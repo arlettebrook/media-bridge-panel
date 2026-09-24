@@ -14,6 +14,16 @@
  * 留在 emby 会让聚合层反向依赖它。
  */
 const tmdbCore = require('../../core/tmdb');
+const providers = require('../../core/providers');
+
+/**
+ * tmdb 是**内置的元数据提供者**，在这里注册。
+ *
+ * 条目 Id 的形状由 `core/providers.js` 统一规定，这里只声明"提供者是谁、认哪个前缀、
+ * 是不是剧集式"。目标形态里这条注册由**元数据插件**自己发起（见 docs/plugin-contract.md
+ * 与 docs/adr/0031），本文件届时只留 emby 专有的 DTO 拼装。
+ */
+providers.register({ id: 'tmdb', prefix: 'tmdb', series: true, label: 'TMDB' });
 
 /** 元数据请求的超时（`/configuration` 的连通性测试另有 core 的 10s 默认） */
 const TIMEOUT_MS = 10000;
@@ -69,40 +79,32 @@ function httpStatusOf(error) {
 }
 
 /**
- * Emby 条目的 Id：只由「tmdb 坐标」派生，**不含源信息**。
+ * Emby 条目的 Id：只由「元数据坐标」派生，**不含源信息**。
  *
  * 客户端拿到它当主键回查（详情 / 季集 / 图片 / 播放都只带 Id），所以它必须稳定：
  * 掺进"哪次搜索、哪个站点"就会因为源变动而变 Id，客户端缓存的「已看」会全丢。
  * 带 type 是因为 TMDB 里 tv 95350 与 movie 95350 是两条不同数据。
  *
+ * 形状与拼装规则现在住在 `core/providers.js`（**认哪个前缀**由那张注册表说了算，
+ * 加第二个元数据来源时不必再改这里）。本函数只负责把 tmdb 这个前缀与它的参数传进去。
+ *
  * 传了 season 就是季：`tmdb_95350_tv_s1`；再传 episode 就是集：`tmdb_95350_tv_s1_e3`
  * （电影分不了季，季分不了集 —— 层级只能一级一级往下走）。
  */
 function itemId(type, tmdbId, season, episode) {
-  const kind = type === 'movie' ? 'movie' : 'tv';
-  const base = `tmdb_${Number(tmdbId)}_${kind}`;
-  if (kind !== 'tv' || season === undefined || season === null) return base;
-  const s = `${base}_s${Number(season)}`;
-  if (episode === undefined || episode === null) return s;
-  return `${s}_e${Number(episode)}`;
+  return providers.itemId('tmdb', tmdbId, type, season, episode);
 }
 
 /**
  * itemId() 的逆 —— 必须与它互逆，所以紧挨着放（改格式时一眼能看到要一起改）。
- * `tmdb_{id}_{tv|movie}[_s{n}][_e{m}]` → { type, tmdbId, season, episode }；无则 null。
- * 认不出来 / 电影带季号 / 有集号却没有季号 / 号不是数字 → null。
+ * 内部走注册表解析，这里只把结果翻译回 emby 层用的字段名（`tmdbId`），
+ * 因此调用点（`emby/service.js` 里那二十来处）不用改。
+ *
+ * 认不出来 / 前缀没注册 / 电影带季号 / 有集号却没有季号 / 号不是数字 → null。
  */
 function parseItemId(id) {
-  const m = /^tmdb_(\d+)_(movie|tv)(?:_s(\d+))?(?:_e(\d+))?$/i.exec(String(id || '').trim());
-  if (!m) return null;
-  const type = m[2].toLowerCase();
-  if (m[3] !== undefined && type !== 'tv') return null;
-  if (m[4] !== undefined && m[3] === undefined) return null; // 集号必须挂在季号下
-  const season = m[3] === undefined ? null : Number(m[3]);
-  const episode = m[4] === undefined ? null : Number(m[4]);
-  if (season !== null && !Number.isFinite(season)) return null;
-  if (episode !== null && !Number.isFinite(episode)) return null;
-  return { type, tmdbId: Number(m[1]), season, episode };
+  const p = providers.parseItemId(id);
+  return p ? { type: p.type, tmdbId: p.entryId, season: p.season, episode: p.episode } : null;
 }
 
 const ISO_SUFFIX = 'T00:00:00.0000000Z';
