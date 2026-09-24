@@ -1,6 +1,8 @@
 # ADR-0020 详情快照：把"连问三遍"的那一步存下来
 
-- 状态：已采纳（其中「线路过滤不进 key」这一条已被 [0025](0025-line-filter-in-usable-judgement.md) 取代）
+- 状态：已采纳（「线路过滤不进 key」被 [0025](0025-line-filter-in-usable-judgement.md) 取代；
+  **缓存归属、判据与有效期口径被 [0032](0032-cache-two-levels.md) 取代** —— 面板侧只留线路结果、按天；
+  完整详情由插件自己缓存。「把连问三遍的那一步存下来」这个动机继续有效）
 - 相关：[agg/cache.js](../../server/modules/agg/cache.js) · [agg/api.js](../../server/modules/agg/api.js) · [emby/service.js](../../server/modules/emby/service.js) · [cachedb.js](../../server/core/cachedb.js) · [0011](0011-cache-split-by-consumer.md) · [0006](0006-redirect-for-playback.md) · [0008](0008-no-fabricated-data.md) · [0025](0025-line-filter-in-usable-judgement.md)
 
 ## 背景

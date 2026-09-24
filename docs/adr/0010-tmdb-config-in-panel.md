@@ -1,7 +1,8 @@
 # ADR-0010 TMDB 配置归面板层
 
-- 状态：已采纳
-- 相关：[0001](0001-module-layering.md) · [tmdb.js](../../server/core/tmdb.js) · [0011](0011-cache-split-by-consumer.md)
+- 状态：已采纳（**「配置归面板层」这一条已被 [0031](0031-metadata-by-domain.md) 取代** ——
+  上游凭据随元数据插件走；「多个消费方共用一个上游」的其余部分继续有效）
+- 相关：[0001](0001-module-layering.md) · [tmdb.js](../../server/core/tmdb.js) · [0011](0011-cache-split-by-consumer.md) · [0031](0031-metadata-by-domain.md)
 
 ## 背景
 

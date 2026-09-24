@@ -17,7 +17,7 @@
 | [0007](0007-emby-dto-shape.md) | Emby 响应按真机 DTO 形状对齐 | 已采纳 |
 | [0008](0008-no-fabricated-data.md) | 不编数据：不知道就空字段，没有数据就如实回空 | 已采纳 |
 | [0009](0009-unauthenticated-empty-responses.md) | 回空的端点不校验账号 | 已采纳 |
-| [0010](0010-tmdb-config-in-panel.md) | TMDB 配置归面板层 | 已采纳 |
+| [0010](0010-tmdb-config-in-panel.md) | TMDB 配置归面板层 | 已采纳（配置归属被 0031 取代） |
 | [0011](0011-cache-split-by-consumer.md) | 缓存按消费方分库 | 已采纳 |
 | [0012](0012-deployed-sources-auto-aggregate.md) | 本地托管的源自动参与聚合 | 已采纳 |
 | [0013](0013-image-endpoint-signing.md) | 图片端点：签名 tag + 本地索引 | 已采纳 |
@@ -27,7 +27,7 @@
 | [0017](0017-panel-auth-single-password.md) | 面板门禁：单密码，不是用户体系 | 已采纳 |
 | [0018](0018-branding-single-source.md) | 产品名只在一处定义 | 已采纳 |
 | [0019](0019-self-update-from-release.md) | 自身更新：应用装在数据卷、按 Release 资产安装、进程重启生效 | 已采纳 |
-| [0020](0020-detail-snapshot.md) | 详情快照 + 剧集详情提前返回（同一次点播被算三遍的那一步存下来） | 已采纳 |
+| [0020](0020-detail-snapshot.md) | 详情快照 + 剧集详情提前返回（同一次点播被算三遍的那一步存下来） | 已采纳（缓存归属与有效期被 0032 取代） |
 | [0021](0021-update-replaces-app-dir.md) | 更新即完整替换：只保留当前版本，不留本地旧版本 | 已采纳 |
 | [0023](0023-playback-progress.md) | 观看进度：客户端 `Sessions/Playing*` 上报落库，「继续观看 / 接下来看 / 已看」出真数据 | 已采纳 |
 | [0022](0022-movie-all-play-items.md) | 电影取法：每条线路列出全部播放项（剧集仍按集号定位） | 已采纳 |
@@ -35,6 +35,13 @@
 | [0025](0025-line-filter-in-usable-judgement.md) | 线路过滤参与"有没有用"的判据（并进快照 key） | 已采纳（局部取代 0020） |
 | [0026](0026-seconds-and-detail-timeout.md) | 聚合超时：搜索与取详情分开，时间单位统一为秒 | 已采纳 |
 | [0027](0027-extra-fetch-only-when-zero.md) | 补打只在"一条能用的都没有"时触发（并发批、拿到即停） | 已采纳（局部取代 0005） |
+| [0028](0028-plugin-system.md) | 插件体系：包安装、不沙箱、每个插件一个常驻子进程 | 已采纳 |
+| [0029](0029-plugin-channel-and-actions.md) | 插件契约：走管道、用动作名、由插件申报能力 | 已采纳 |
+| [0030](0030-play-address-handoff.md) | 播放地址转交：伪地址的 host 是面板，`ref` 由插件解析 | 已采纳（延伸 0006） |
+| [0031](0031-metadata-by-domain.md) | 元数据按域分离：插件注册域 id，面板按前缀分派 | 已采纳（局部取代 0010） |
+| [0032](0032-cache-two-levels.md) | 缓存分两级：插件侧管"下次点开也快"，面板侧只管线路结果 | 已采纳（局部取代 0020） |
+| [0033](0033-template-and-domain.md) | 模板与域：模板是配置数据文件，每个域最多一套 | 已采纳 |
+| [0034](0034-fresh-install-no-migration.md) | 本版当作全新安装：不做数据迁移 | 已采纳 |
 
 ## 新增一条 ADR
 
