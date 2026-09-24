@@ -103,7 +103,7 @@ function legacyAggView() {
       /* ⚠️ **这里必须把 agg 的设置全带上**：前端启动时读的就是这份（`S.settings.agg`），
        * 少一个键，页面刷新后就当它不存在 —— 实测：`lineFilter` 没带 → "保存完刷新编辑框还是空的"，
        * `matchExtraK` 没带 → 打分设置那页刷新后显示默认值，一点保存就把用户设的值覆盖掉（8 → 3）。
-       * 加键的时候**两边都要加**（或让设置页直接读 `/api/modules/agg/settings`，见 agg/params.js）。 */
+       * 加键的时候**两边都要加**（或让设置页直接读 `/api/modules/<id>/settings`）。 */
       matchMinScore: a.matchMinScore,
       matchMaxItems: a.matchMaxItems,
       matchExtraK: a.matchExtraK,

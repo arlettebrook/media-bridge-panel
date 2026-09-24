@@ -9,7 +9,6 @@
  *   "按 key 对齐/去重/排序"的地方都必须带上 source（否则会静默互相覆盖）。
  *   对外形状里 source 与 key 是**两个字段**；只有内部做 Map 键时才拼成一个复合键。
  */
-const settings = require('../../core/settings');
 const { request } = require('../../core/upstream');
 const { normName } = require('../../core/catpaw');
 const match = require('./match'); // 片名清洗 + 打分（"这是不是目标作品"的唯一判据）
@@ -31,9 +30,14 @@ function needSource(byId, id) {
   return s;
 }
 
-/** 打分参数：调用方给的优先，没给就读 `agg.json`（web 上那三个输入框的默认值就是它） */
-function matchDefaults(opts) {
-  const cfg = settings.read('agg') || {};
+/**
+ * 打分参数：调用方给的优先，没给就用**这套模板**的参数。
+ *
+ * ⚠️ 模板参数由域决定（`templates.paramsFor(domain)`，见 docs/adr/0033）——
+ * 所以这里的 `params` 是必传的：调用方必须先把域解析成模板，再进来。
+ */
+function matchDefaults(params, opts) {
+  const cfg = params || {};
   const o = opts || {};
   const num = (v, d) => (v === undefined || v === null || v === '' ? d : Number(v));
   return {
@@ -53,7 +57,7 @@ function matchDefaults(opts) {
  *   · `searchTimeoutMs` —— 搜索 / 播放 / 首次 `/init`：这一发本来就该快，默认 5 秒；
  *   · `detailTimeoutMs` —— 取详情：**剧集动辄几十上百集**（响应体大、上游拼装慢），
  *     与搜索共用一个超时会让"目录里内容多的那种"一律记成超时 / 定位不到，默认 10 秒。
- * 上限与 `settings.validate` 一致（60s / 120s），这里再兜一次 —— 手改配置文件也不至于把请求挂死。
+ * 上限与模板保存时的校验一致（60s / 120s），这里再兜一次 —— 手改模板文件也不至于把请求挂死。
  */
 const searchTimeoutMs = (cfg) => Math.min(60000, Math.max(1000, Math.round((Number((cfg || {}).timeoutSec) || 5) * 1000)));
 const detailTimeoutMs = (cfg) => Math.min(120000, Math.max(1000, Math.round((Number((cfg || {}).detailTimeoutSec) || 10) * 1000)));
@@ -165,9 +169,9 @@ async function searchSite(source, site, wd, page, timeoutMs) {
  *   · 每个条目多出 `score` / `matched` / `matchReason`（web 要显示"为什么它进了/没进"）；
  *   · 顶层多出 `matched` / `unmatched`（失败也回，带原因）+ `stats.match`（各桶计数）。
  */
-async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, concurrency, want, matchOptions } = {}) {
+async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, concurrency, want, matchOptions, params } = {}) {
   if (!wd || !String(wd).trim()) throw new Error('请提供搜索关键字 wd');
-  const cfg = settings.read('agg');
+  const cfg = params || {};
   const t = Math.max(1000, Number(timeoutMs) || searchTimeoutMs(cfg));
   const c = Math.max(1, Math.min(32, Number(concurrency) || cfg.concurrency || 8));
   const byId = sourceMap(sources);
@@ -268,7 +272,7 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
       flat.push(it);
     }
   }
-  const picked = match.select(flat, { name: (want && want.name) || wd, ...(want || {}) }, matchDefaults(matchOptions));
+  const picked = match.select(flat, { name: (want && want.name) || wd, ...(want || {}) }, matchDefaults(params, matchOptions));
   /* 每条都写回分数与去留（`all` 不截断）—— web 上逐条显示"命中/没进 + 为什么"靠的就是这两个字段 */
   for (const a of picked.all) {
     a.item.score = round3(a.score);
@@ -316,8 +320,8 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
  * ⚠️ 语义不变：**只影响"列出来的版本"，不影响播放**（`resolveStream` 按版本 Id 回查，不查这个列表）。
  * 规则写错时**不抛**（保存时已校验；这里是运行时兜底）：`re:null + invalid:true`，调用方按"不过滤"走。
  */
-function lineFilter() {
-  const raw = String((settings.read('agg') || {}).lineFilter || '').trim();
+function lineFilter(params) {
+  const raw = String(((params || {}).lineFilter) || '').trim();
   if (!raw) return { raw: '', re: null, invalid: false };
   try {
     return { raw, re: new RegExp(raw, 'i'), invalid: false };
@@ -783,7 +787,7 @@ async function fetchDetail(source, site, vodId, timeoutMs, season, episode, pick
  * `maxItems`（默认 8）是上限：命中越多，"取链"的上游请求就越多，太慢。
  */
 async function aggregateDetail(sources, sites, opts = {}) {
-  const cfg = settings.read('agg');
+  const cfg = opts.params || {};
   const byId = sourceMap(sources);
   const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || searchTimeoutMs(cfg));
   /* 取详情**单独一项超时**（默认 10 秒，比搜索宽）—— 下面每一次 `fetchDetail` 都用它。 */
@@ -805,7 +809,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
   const pick = opts.pick === 'items' ? 'items' : '';
   /* 线路过滤规则：**参与"能用"的判据**（见 `detailUsable` 与 ADR-0025）——
    * 否则会出现"命中 3 条、客户端 0 个版本"，而接续补打还以为已经有能用的了。 */
-  const lf = lineFilter();
+  const lf = lineFilter(cfg);
 
   /* ---- 快路径：已知绑定（source + site + vodId），跳过搜索 ---- */
   if (opts.site && opts.vodId) {
@@ -878,9 +882,9 @@ async function aggregateDetail(sources, sites, opts = {}) {
   out.stats.variants = (search.matched || []).length - repOfSite.size;
 
   /* 命中的站**全部取 detail**（不再只取 picked 那一站）。
-   * 顺序按 `agg.order` 的优先级排 —— 否则并发搜索"谁先回来谁在前"，客户端版本列表每次刷新顺序都在跳
-   * （同一条线路位置换来换去，找不着）。order 里没有的排到最后。 */
-  const orderIdx = new Map((settings.read('agg').order || []).map((x, i) => [sid(x && x.source, x && x.key), i]));
+   * 顺序按**模板里勾的站点顺序**排 —— 否则并发搜索"谁先回来谁在前"，客户端版本列表每次刷新顺序都在跳
+   * （同一条线路位置换来换去，找不着）。模板里有它就是那个名次，不在里面的排到最后。 */
+  const orderIdx = new Map((cfg.order || []).map((x, i) => [sid(x && x.source, x && x.key), i]));
   const wanted = Array.from(bySite.keys()).sort((a, b) => {
     const ia = orderIdx.has(a) ? orderIdx.get(a) : 9999;
     const ib = orderIdx.has(b) ? orderIdx.get(b) : 9999;
@@ -966,7 +970,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
    * 怎么打：**整批并发**（批宽 = 阶段一的条数 `N`），一批的墙钟耗时 ≈ 其中**最慢的那条**，
    * 而不是逐条相加 —— 代价是"批内已经发出去的都得等"（一批里只有一条是必要的）。
    */
-  const cfgNow = settings.read('agg');
+  const cfgNow = cfg;
   const extraAll = !!(opts.extraAll === undefined ? cfgNow.matchExtraAll : opts.extraAll);
   const extraK = Math.max(0, Number(opts.extraK === undefined ? cfgNow.matchExtraK : opts.extraK) || 0);
   /* `targetN` 仍然只表示"阶段一要取几条"（批宽按它算）；补打的判据是"一条能用的都没有" */
@@ -1118,7 +1122,7 @@ const NON_HTTP_URL = /^(push|magnet|ed2k|thunder|ftp|rtmp):/i;
  * 站点 api 前缀由 `(source, site)` 反查（调用方不用带），地址会过期，**每次播放都现取、不缓存**。
  */
 async function playEpisode(sources, sites, opts = {}) {
-  const cfg = settings.read('agg');
+  const cfg = opts.params || {};
   const byId = sourceMap(sources);
   /* 播放走**搜索那一档**超时（取一个播放地址本来就该快）；要更宽的是详情，不是它。 */
   const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || searchTimeoutMs(cfg));

@@ -1907,7 +1907,7 @@ async function getItem(itemId, requestedId, host = '') {
    * 名字 + 年份 + 季集就是全部输入：聚合层用它们**打分**挑片（`agg/match.js`）。
    * ⚠️ **不再把 tmdb 坐标传下去**（早期给"别名回退"用）：判据换成了本地打分，
    * 阈值与"最多留几条"都在聚合层的设置里，emby 这条链与 web 的聚合搜索**共用同一套**。 */
-  const hit = await agg.detail(Object.assign({ name, year }, wantLocator(p)));
+  const hit = await agg.detail(Object.assign({ name, year, domain: p.domain }, wantLocator(p)));
   if (!hit.ok) {
     return {
       status: 200,
@@ -1939,7 +1939,7 @@ async function getItem(itemId, requestedId, host = '') {
     };
   }
 
-  const filter = lineFilter();
+  const filter = lineFilter(p.domain);
   const bindings = [];
   const siteDigest = [];
   /* 命中涉及**多个源**时，版本行标题要带上源名 —— 不同源可能有同名站点（都叫"木偶"），
@@ -2541,10 +2541,11 @@ function redirectUrl(rawUrl, sourceRow, clientHost) {
  *
  * 返回值：`{ raw, re, invalid }`，`raw` 也用于日志与诊断字段。
  */
-function lineFilter() {
-  /* **设置已搬到聚合层**（`agg.json` 的 `lineFilter`，UI 在「聚合设置 → 聚合参数」）——
-   * 线路是聚合层产出的东西，规则跟它放一起才不"配置在 A、生效在 B"。这里只转发（读实现见 `agg/api.js`）。 */
-  return agg.lineFilter();
+function lineFilter(domain) {
+  /* **设置已搬到模板**：线路过滤跟着模板走，而模板由**域**决定（见 docs/adr/0033）。
+   * 线路是聚合层产出的东西，规则跟它放一起才不"配置在 A、生效在 B"。这里只转发
+   * （实现见 `agg/api.js` → `agg/service.js` 的 `lineFilter`）。 */
+  return agg.lineFilter(agg.paramsFor(domain));
 }
 
 /**
@@ -2769,7 +2770,7 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
   const itemIndex = Number(parsed.i) || 0;
   const hinted = playHintOf(itemId, parsed.source, parsed.site, parsed.flag, vodId, itemIndex);
   if (hinted) {
-    const pr0 = await agg.play({ source: parsed.source, site: parsed.site, flag: parsed.flag, episodeId: hinted });
+    const pr0 = await agg.play({ domain: p.domain, source: parsed.source, site: parsed.site, flag: parsed.flag, episodeId: hinted });
     if (pr0.ok && (((pr0.play || {}).urls) || []).length) {
       return finishStream({ p, parsed, pr: pr0, clientHost, matchedBy: '列表备忘' });
     }
@@ -2780,7 +2781,7 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
 
   /* 与 `getItem` 那条链路用**同一套取法坐标**（`wantLocator`）：电影 = 该线路的全部播放项、
    * 集 = 这一集。否则 PlaybackInfo 给的版本和这里取到的会不是同一项。 */
-  const hit = await agg.detail(Object.assign({ source: parsed.source, site: parsed.site, vodId }, wantLocator(p)));
+  const hit = await agg.detail(Object.assign({ domain: p.domain, source: parsed.source, site: parsed.site, vodId }, wantLocator(p)));
   if (!hit.ok) {
     /* 照旧一律 502（"上游取不到数"）：换进程内直调后 code/message 才真的有意义，那就写进 body 与日志，
      * HTTP 状态码不动 —— 客户端侧的表现与改动前一致。 */
@@ -2834,7 +2835,7 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
     };
   }
 
-  const pr = await agg.play({ source: parsed.source, site: parsed.site, flag: parsed.flag, episodeId: item.id });
+  const pr = await agg.play({ domain: p.domain, source: parsed.source, site: parsed.site, flag: parsed.flag, episodeId: item.id });
   if (!pr.ok) {
     const e = pr.error || {};
     return {

@@ -24,8 +24,10 @@ const fs = require('fs');
 const settings = require('../../core/settings');
 const { sendJson, sendError, readBody } = require('../../core/http');
 const api = require('./api');
+const templates = require('./templates');
+const providers = require('../../core/providers');
 const siteTest = require('./site-test');
-const { aggregateSearch, selectSites, searchTimeoutMs, detailTimeoutMs } = require('./service');
+const { aggregateSearch, selectSites } = require('./service');
 
 /**
  * 一次性搬迁（项目未发布，不做兼容分支）：把多源之前的两样东西搬成新形状。
@@ -102,7 +104,6 @@ module.exports = function routes(r) {
   r.add('GET', '/api/agg/sources', (req, res) => sendJson(res, 200, { sources: api.listSources() }));
 
   r.add('GET', '/api/agg/sites', async (req, res) => {
-    const cfg = settings.read('agg');
     const { sources, sites } = await api.loadSites();
     const bad = sources.filter((s) => !s.ok);
     if (sources.length) {
@@ -111,38 +112,84 @@ module.exports = function routes(r) {
           (bad.length ? `（${bad.length} 个源取不到：${bad.map((s) => s.id + ' ' + s.error).join('；')}）` : '')
       );
     }
+    /* 站点表上要能看出**每个站点被哪几套模板用了**（否则以后查不清"为什么这个域用了这个站"，
+     * 见 docs/adr/0033）。反查表在这里现算，不额外存一份。 */
+    const tplList = templates.list();
+    const usedBy = new Map();
+    for (const t of tplList) {
+      for (const x of t.sites) {
+        const id = `${x.source}\u0001${x.key}`;
+        if (!usedBy.has(id)) usedBy.set(id, []);
+        usedBy.get(id).push({ id: t.id, name: t.name });
+      }
+    }
     return sendJson(res, 200, {
       sources,
-      sites,
-      agg: {
-        enabled: cfg.enabled || [],
-        order: cfg.order || [],
-        /* 设置里是**秒**（`timeoutSec` / `detailTimeoutSec`），这里统一换成毫秒给前端：
-         * 「站点与参数」页拿 `timeoutMs` 与测速结果比（比它慢的站聚合里必被判超时）。 */
-        timeoutMs: searchTimeoutMs(cfg),
-        detailTimeoutMs: detailTimeoutMs(cfg),
-        concurrency: cfg.concurrency,
-        /* 打分默认值一起给：web「聚合搜索」页的"最低分/最多取几条"输入框就是拿它预填的
-         * （页面里改只影响这一次请求；要改默认值去「聚合设置」页） */
-        matchMinScore: cfg.matchMinScore,
-        matchMaxItems: cfg.matchMaxItems,
-      },
+      sites: sites.map((x) => Object.assign({}, x, { templates: usedBy.get(`${x.source}\u0001${x.key}`) || [] })),
+      templates: tplList,
+      domains: templates.domains(),
+      /* 已注册的元数据域（前缀就是域 id）。这一批只有内置的 tmdb；插件化之后由插件注册（见 docs/adr/0031） */
+      providers: providers.list().map((x) => ({ id: x.id, prefix: x.prefix, label: x.label, series: x.series })),
     });
+  });
+
+  /* ------------------------------- 模板：读 / 存 / 删 / 指给哪个域 */
+
+  r.add('GET', '/api/agg/templates', (req, res) =>
+    sendJson(res, 200, {
+      templates: templates.list(),
+      domains: templates.domains(),
+      providers: providers.list().map((x) => ({ id: x.id, prefix: x.prefix, label: x.label, series: x.series })),
+    })
+  );
+
+  r.add('POST', '/api/agg/templates', async (req, res) => {
+    const body = (await readBody(req)) || {};
+    let out;
+    try {
+      out = templates.save(body.template || body);
+    } catch (e) {
+      return sendError(res, 400, (e && e.message) || '模板保存失败');
+    }
+    console.log(`  ✔ agg 模板已保存「${out.name}」(${out.id})：${out.sites.length} 个站点`);
+    return sendJson(res, 200, { template: out });
+  });
+
+  r.add('DELETE', '/api/agg/templates/:id', (req, res, { params }) => {
+    const gone = templates.remove(params.id);
+    if (!gone) return sendError(res, 404, '没有这份模板');
+    console.log(`  · agg 模板已删除：${params.id}`);
+    return sendJson(res, 200, { removed: params.id, domains: templates.domains() });
+  });
+
+  /** 把某个域指到某份模板上（`templateId` 传空 = 取消这个域的指向）。一个域最多一条对照。 */
+  r.add('POST', '/api/agg/domains/:domain', async (req, res, { params }) => {
+    const body = (await readBody(req)) || {};
+    try {
+      const map = templates.setDomain(params.domain, body.templateId);
+      console.log(`  · agg 域 ${params.domain} → 模板 ${body.templateId || '(取消)'}`);
+      return sendJson(res, 200, { domains: map });
+    } catch (e) {
+      return sendError(res, 400, (e && e.message) || '设置失败');
+    }
   });
 
   r.add('POST', '/api/agg/search', async (req, res) => {
     const body = await readBody(req);
     if (!body || !String(body.wd || '').trim()) return sendError(res, 400, '请提供搜索关键字 wd');
 
-    const cfg = settings.read('agg');
+    /* 域 → 模板：参数与站点都来自那套模板；**没配模板就如实为空并点名**（见 docs/adr/0033） */
+    const dom = api.ensureDomain(body.domain);
+    if (dom.error) return fail(res, dom.error);
+    const cfg = dom.params;
     const { sources, sites } = await api.loadSites();
     if (!sources.length) return sendError(res, 400, '还没有聚合源：本地部署一个源，或到「聚合设置 → 源列表」填一个外部地址');
-    const picked = selectSites(sites, cfg, body.keys);
+    const picked = selectSites(sites, dom.selection, body.keys);
     if (!picked.length) {
       if (!api.liveSources(sources).length) {
         return sendError(res, 400, '所有聚合源都取不到站点：' + sources.map((s) => `${s.id} ${s.error || '未知错误'}`).join('；'));
       }
-      return sendError(res, 400, '没有可聚合的站源：请到「站点与参数」页勾选参与聚合的站点');
+      return sendError(res, 400, '没有可聚合的站源：请到「模板」页把要用的站点勾进这个域用的那套模板');
     }
 
     const out = await aggregateSearch(sources, picked, {
@@ -151,9 +198,11 @@ module.exports = function routes(r) {
       timeoutMs: body.timeoutMs,
       concurrency: body.concurrency,
       /* 打分：`year` / `season` / `episode` 是"目标是哪部片"的信号（web 上填季集就是给它用），
-       * `minScore` / `maxItems` 不传就用 `agg.json` 里的设置。`minScore: 0` = 不按分数线筛选。 */
+       * `minScore` / `maxItems` 不传就用**这套模板**的参数。`minScore: 0` = 不按分数线筛选。 */
       want: { name: body.name || body.wd, year: body.year, season: body.season, episode: body.episode },
       matchOptions: { minScore: body.minScore, maxItems: body.maxItems, unmatchedMax: body.unmatchedMax },
+      /* 参数与站点顺序都来自这套模板（上面已按域解析过） */
+      params: dom.params,
     });
     /* `ranked` 是"过关全量的排名"，只给聚合层内部（detail 的接续补打）用；
      * 回给前端等于把同一批条目再序列化一遍（响应大一倍），这里删掉。 */
@@ -201,7 +250,8 @@ module.exports = function routes(r) {
   /**
    * POST /api/agg/detail —— 取影视详情（**内部含搜索**）
    *
-   * body：name（影视名，必填）/ year（消歧）/ season + episode（定位某一集）/
+   * body：**domain（元数据域，必填 —— 决定用哪套模板）** / name（影视名，必填）/ year（消歧）/
+   *       season + episode（定位某一集）/
    *       keys（限定站点，`{source,key}[]`）/ `source`+`site`+`vodId`（快路径：已知绑定就直查，跳过搜索）/
    *       minScore + maxItems（打分阈值与"最多留几条"，不传读设置）
    *       —— **没有 `all` 了：命中的站一律全取**（见 service.aggregateDetail）
@@ -218,7 +268,8 @@ module.exports = function routes(r) {
   /**
    * POST /api/agg/play —— 取播放地址
    *
-   * body：source（源 id，必填）/ site（站点 key，必填）/ flag（线路名，必填）/ episodeId（集 ID，必填）
+   * body：**domain（元数据域，必填 —— 决定用哪套模板）** / source（源 id，必填）/ site（站点 key，必填）/
+   *       flag（线路名，必填）/ episodeId（集 ID，必填）
    * 成功 200 `{ok:true, play:{urls, header, parse, nonHttp}}`；
    * 失败按原因给码（SITE_NOT_FOUND 404 / FLAG_NOT_FOUND 404 / NO_PLAY_URL 502 / …）。
    * 地址会过期：**每次播放都现取**，别缓存。

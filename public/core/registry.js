@@ -53,7 +53,7 @@ export const MODULES = [
   {
     id: 'agg',
     label: '聚合设置',
-    pages: () => [['agg-host', '源列表'], ['agg-sites', '站点与参数'], ['agg-params', '聚合参数'], ['agg-search', '聚合搜索']],
+    pages: () => [['agg-host', '源列表'], ['agg-templates', '模板'], ['agg-search', '聚合搜索']],
   },
   { id: 'emby', label: 'Emby', pages: () => [['emby-setup', '连接设置'], ['emby-home', '首页插件']] },
   {

@@ -5,6 +5,9 @@
  *   · 配置备份与还原 导出直接下载 .json；还原选一个 .json 文件（GET /api/panel/backup · POST /api/panel/restore）
  *   · TMDB 设置      **共享配置**：emby 层（元数据反查）与聚合层（同名失败时按名字反查）都用它
  *                    存 `panel.json` 的 `tmdb.*`，自检端点 `/api/panel/tmdb/test`（见 core/tmdb.js）
+ *   · 站点测速       **开关与间隔**（`panel.json` 的 `speedTest*`，实现见 agg/site-test.js）——
+ *                    测速是"这台机器与这条网络"的体检，与内容偏好无关，所以不跟模板走（见 ADR-0033）；
+ *                    测速的结果（站点统计）也是面板级共享的一份。「立即测速」在「聚合 · 模板」页。
  *   · 缓存设置       **跨库**的用量与清空（`data/cache/*.db` + `data/emby/cache.db`），
  *                    端点 `GET|DELETE /api/panel/cache`，策略存 `panel.json` 的 `cache.*`（见 core/cachedb.js）
  *   · 面板密码        改密码（见 core/auth.js）+ 退出登录
@@ -743,6 +746,71 @@ function passwordCard() {
   );
 }
 
+/**
+ * 「站点测速」卡：开关 + 间隔。
+ *
+ * 从「聚合参数」页挪来的：测速是"**这台机器与这条网络**"的体检，与内容偏好无关 ——
+ * 所以它不跟模板走（模板装的是内容偏好），而测速的**结果**（站点统计）也是面板级共享的一份。
+ * 「立即测速」按钮仍在「聚合 · 模板」页（那是"看结果 + 手点一轮"）。
+ */
+function speedTestSection(v) {
+  (async () => {
+    if (!S.panel.settings) S.panel.settings = (await api('/api/modules/panel/settings')).settings;
+    const p = S.panel.settings || {};
+    const on = el('input', { type: 'checkbox', checked: p.speedTestAuto !== false });
+    const hours = el('input', {
+      type: 'number',
+      class: 'w-sm',
+      value: String(p.speedTestHours === undefined || p.speedTestHours === null ? 6 : p.speedTestHours),
+      min: '1',
+      max: '168',
+    });
+    const save = el('button', { class: 'btn primary', text: '保存' });
+    save.addEventListener('click', async () => {
+      const h = Number(hours.value);
+      if (!(h >= 1 && h <= 168)) return toast('测速间隔填 1~168 小时', true);
+      save.disabled = true;
+      try {
+        const r = await api('/api/modules/panel/settings', {
+          method: 'PUT',
+          body: { settings: { speedTestAuto: on.checked, speedTestHours: h } },
+        });
+        S.panel.settings = r.settings || Object.assign({}, p, { speedTestAuto: on.checked, speedTestHours: h });
+        toast(on.checked ? `已保存（每 ${h} 小时自动测一轮）` : '已保存（自动测速已关）');
+      } catch (e) {
+        toast('保存失败：' + e.message, true);
+      } finally {
+        save.disabled = false;
+      }
+    });
+    v.append(
+      el(
+        'div',
+        { class: 'card' },
+        el('h3', { text: '站点测速' }),
+        el(
+          'div',
+          { class: 'row' },
+          el(
+            'label',
+            { class: 'chk', title: '每站打一发 POST /search（片名从常见影视名里随机取、非 200 换一个再测一发），结果写进「聚合 · 模板」页那一列「延迟」' },
+            on,
+            '自动测速（全部站点）'
+          ),
+          el('label', { class: 'chk', title: '多久测一轮，1~168 小时；改完从现在重新计时' }, hours, '小时'),
+          save
+        ),
+        el('div', {
+          class: 'note',
+          text:
+            '测速是"这台机器与这条网络"的体检，与内容偏好无关 —— 所以不跟模板走，测速的结果也是面板级共享的一份。' +
+            '这里只管自动测速；要立刻测一轮，去「聚合 · 模板」页点「立即测速」。',
+        })
+      )
+    );
+  })().catch((e) => v.append(el('div', { class: 'hint warn', text: '读取测速设置失败：' + e.message })));
+}
+
 export function renderPanelSettings(v) {
   const first = backupCard();
   v.append(first, passwordCard());
@@ -750,6 +818,7 @@ export function renderPanelSettings(v) {
    * ⚠️ 两张卡共用一个 `S.panel.settings`：`cacheSection` 在 `tmdbSection` 之后跑，
    * 那时设置已经读回来了（若没读到它会自己再读一次），不会出现"缓存卡拿着空设置"的情况。 */
   tmdbSection(v);
+  speedTestSection(v);
   cacheSection(v).then(() =>
     v.append(el('div', { class: 'actions' }, el('button', { class: 'btn', text: '退出登录', onclick: () => logout() })))
   );

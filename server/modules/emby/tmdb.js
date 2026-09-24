@@ -104,7 +104,9 @@ function itemId(type, tmdbId, season, episode) {
  */
 function parseItemId(id) {
   const p = providers.parseItemId(id);
-  return p ? { type: p.type, tmdbId: p.entryId, season: p.season, episode: p.episode } : null;
+  /* `domain` = 这个前缀（条目 Id 的前缀就是元数据域，见 docs/adr/0031）。
+   * 聚合层要拿它去解析"该用哪套模板"（见 docs/adr/0033），所以一并带出去。 */
+  return p ? { type: p.type, tmdbId: p.entryId, season: p.season, episode: p.episode, domain: p.prefix } : null;
 }
 
 const ISO_SUFFIX = 'T00:00:00.0000000Z';

@@ -31,8 +31,7 @@ import { init } from './core/boot.js';
 import { renderSourceBundle } from './modules/source/host.js';
 import { renderWebsite } from './modules/source/config.js';
 import { renderAggHost } from './modules/agg/host.js';
-import { renderSites } from './modules/agg/sites.js';
-import { renderAggParams } from './modules/agg/params.js';
+import { renderTemplates } from './modules/agg/templates.js';
 import { renderAgg } from './modules/agg/search.js';
 import { renderEmbySetup } from './modules/emby/setup.js';
 import { renderEmbyHome } from './modules/emby/home.js';
@@ -45,8 +44,7 @@ registerPages({
   'source-bundle': renderSourceBundle,
   website: { render: renderWebsite, nopad: true },
   'agg-host': renderAggHost,
-  'agg-sites': renderSites,
-  'agg-params': renderAggParams,
+  'agg-templates': renderTemplates,
   'agg-search': renderAgg,
   'emby-setup': renderEmbySetup,
   'emby-home': renderEmbyHome,

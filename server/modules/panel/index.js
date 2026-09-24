@@ -24,6 +24,12 @@ module.exports = {
       /* 面板「日志」页的内存缓冲条数（见 core/logbus.js）。**纯内存、不落盘**，
        * 所以这个数直接决定内存占用上限（500 条 ≈ 最多 0.5MB）。 */
       logMax: 500,
+      /* 站点测速的**开关与间隔**（实现见 agg/site-test.js）。
+       * 为什么归面板层：测速是"这台机器与这条网络"的体检，与内容偏好无关 ——
+       * 它既不跟模板走（模板是内容偏好），也不该跟"这次测了哪些站"混在一起。
+       * ⚠️ 测速的**结果**（站点统计）也是面板级共享的一份，不跟模板走，见 docs/adr/0033。 */
+      speedTestAuto: true,
+      speedTestHours: 6,
       modules: { source: true, agg: true, emby: true, panel: true },
       /* TMDB（元数据反查）—— **共享配置，归面板层**（原在 emby 层）。
        * 为什么放这儿：emby 层（元数据）与聚合层（同名失败时按名字反查 tmdb id）都要用，

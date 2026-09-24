@@ -37,10 +37,11 @@ export async function ensureAggSites({ force = false } = {}) {
     const d = await api('/api/agg/sites');
     S.aggSources = d.sources || [];
     S.aggSites = d.sites || [];
-    /* **合并**而不是整份替换：这个响应的 agg 只有 enabled/order/参数，没有 sources
-       （源清单它在顶层单独给，还带探测结果）。整份替换会把 sources 抹掉，
-       于是「以设置清单为准」的地方就会以为一个源都没有。 */
-    S.settings = Object.assign(S.settings || {}, { agg: Object.assign({}, (S.settings || {}).agg, d.agg) });
+    /* 模板 / 域对照 / 已注册的域：站点表要按"当前这套模板"画勾选，
+     * 并且要能看出"每个站点还被哪几套模板用了"（见 docs/adr/0033）。 */
+    S.aggTemplates = d.templates || [];
+    S.aggDomains = d.domains || {};
+    S.aggProviders = d.providers || [];
     S.aggLoadedFor = aggSourcesKey(S.aggSources);
   })();
   try {
@@ -48,6 +49,35 @@ export async function ensureAggSites({ force = false } = {}) {
   } finally {
     aggInflight = null;
   }
+}
+
+/** 飞行中的模板拉取（搜索页与模板页可能同时要） */
+let tplInflight = null;
+
+/**
+ * 模板 / 域对照 / 已注册的域（`GET /api/agg/templates`）—— **不探测源**，几十毫秒就回来。
+ * 与 `ensureAggSites()` 分开：搜索页只要模板（决定默认参数与域），不必等各源 /config 探测。
+ */
+export async function ensureTemplates({ force = false } = {}) {
+  if (!force && S.aggTemplates) return;
+  if (tplInflight) return tplInflight;
+  tplInflight = (async () => {
+    const d = await api('/api/agg/templates');
+    S.aggTemplates = d.templates || [];
+    S.aggDomains = d.domains || {};
+    S.aggProviders = d.providers || [];
+  })();
+  try {
+    await tplInflight;
+  } finally {
+    tplInflight = null;
+  }
+}
+
+/** 某个域用的模板 —— **没配就返回 null**（调用方如实为空，见 docs/adr/0033） */
+export function templateOf(domain) {
+  const id = (S.aggDomains || {})[String(domain || '')];
+  return id ? (S.aggTemplates || []).find((t) => t.id === id) || null : null;
 }
 
 /**

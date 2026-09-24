@@ -63,9 +63,14 @@ const st = {
   nextRunAt: 0,
 };
 
-/** 当前配置（带兜底：设置文件里没有/写坏了也不会把定时器搞成 NaN） */
+/**
+ * 当前配置（带兜底：设置文件里没有/写坏了也不会把定时器搞成 NaN）。
+ *
+ * ⚠️ 读的是**面板设置**（原在 `agg.json`）：测速是"这台机器与这条网络"的体检，
+ * 与内容偏好无关 —— 不该跟模板走，也不该跟聚合参数混在一起（见 docs/adr/0033）。
+ */
 function cfg() {
-  const s = settings.read('agg') || {};
+  const s = settings.read('panel') || {};
   const hours = Math.min(168, Math.max(1, Number(s.speedTestHours) || DEFAULTS.hours));
   return { enabled: s.speedTestAuto !== false, hours };
 }

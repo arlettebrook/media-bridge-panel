@@ -29,12 +29,40 @@ const catpaw = require('../../core/catpaw');
 const { request } = require('../../core/upstream');
 const sourceService = require('../source/service');
 const cache = require('./cache');
+const templates = require('./templates');
 const siteStats = require('./site-stats');
 const { aggregateSearch, aggregateDetail, playEpisode, selectSites, matchDefaults, ensureInit, detailTimeoutMs, lineFilter: serviceLineFilter } = require('./service');
 
 /** 失败的统一形状（不抛异常：调用方可能是路由，也可能是 emby 层，各自决定怎么呈现） */
 function fail(code, status, message) {
   return { ok: false, error: { code, status, message } };
+}
+
+/**
+ * 某个域该用哪份模板 —— 把"域"解析成"这套模板的参数与站点"。
+ *
+ * 三条如实口径（见 docs/adr/0033）：
+ *   · 请求没带域 ⇒ 400（面板侧要显式告诉面板"这条内容属于哪个域"）
+ *   · 域还没有配模板 ⇒ **如实为空并点名**，不挑兜底、不猜
+ *   · 解析出来之后，参数就跟着模板走（超时、并发、打分、过滤全在里面）
+ */
+function ensureDomain(domain) {
+  const d = String(domain || '').trim();
+  if (!d) return { error: fail('NO_DOMAIN', 400, '请求要带上 domain（这条内容属于哪个元数据域）') };
+  const template = templates.templateFor(d);
+  if (!template) {
+    return {
+      error: fail('NO_TEMPLATE', 404, `域 ${d} 还没有配模板 —— 如实为空（到「模板」页配一套，并把它指给这个域）`),
+    };
+  }
+  return {
+    domain: d,
+    template,
+    /* 站点顺序也由模板决定（模板里勾的顺序 = 聚合取站优先级），所以并进 params 一起往下传 */
+    params: Object.assign({}, template.params, { order: template.sites }),
+    /* 勾了哪些站点：`{enabled, order}` 就是 `selectSites` 要的形状 */
+    selection: { enabled: template.sites, order: template.sites },
+  };
 }
 
 /**
@@ -47,6 +75,8 @@ function fail(code, status, message) {
  * 前端「聚合 · 源列表」用 `deployed` 这个标记区分两类（部署的不可删、也没有地址可编辑）。
  */
 function listSources() {
+  /* 源清单仍读 `agg.json`：源本身的插件化在后面的批次（批次 4/5），这一批只把
+   * 「选哪些站点、按什么参数聚合」搬到模板。 */
   const cfg = settings.read('agg');
   const custom = (cfg.sources || []).map((s) => ({
     id: s.id,
@@ -128,7 +158,7 @@ const liveSources = (sources) => (sources || []).filter((s) => s.ok);
  * emby 层拼版本列表时，与聚合层判断"这条详情对客户端有没有用"时（见 ADR-0025）。
  * 这里只转发，emby 层照旧调这个入口（`emby/service.js` 的 `lineFilter()` 一行转发）。
  */
-const lineFilter = () => serviceLineFilter();
+const lineFilter = (params) => serviceLineFilter(params);
 
 /* ============================================================
  * 详情快照 + 同键并发合并（表与库见 modules/agg/cache.js）
@@ -153,8 +183,8 @@ const inflightDetail = new Map();
  * 就必须换成另一个 key。代价如实记着：**改规则后第一次请求要重算**（那一趟是秒级的）——
  * 换来的是不会命中一份"按旧规则判定为有用"的结论。
  */
-function detailCacheKey({ name, year, season, episode, scoped, sources, cfg, opts }) {
-  const m = matchDefaults(opts);
+function detailCacheKey({ name, year, season, episode, scoped, sources, cfg, params, opts }) {
+  const m = matchDefaults(params, opts);
   const extraAll = opts.extraAll === undefined ? !!cfg.matchExtraAll : !!opts.extraAll;
   const pair = (x) => `${(x && x.source) || ''}/${(x && x.key) || ''}`;
   const dim = (v) => (v === undefined || v === null || v === '' ? '' : String(v));
@@ -227,20 +257,22 @@ async function detail(opts = {}) {
     return fail('BAD_INPUT', 400, '请提供 name（影视名），或用 source + site + vodId 直接指定绑定');
   }
 
-  const cfg = settings.read('agg');
+  const dom = ensureDomain(opts.domain);
+  if (dom.error) return dom.error;
+  const cfg = dom.params;
   const { sources, sites } = await loadSites();
   if (!sources.length) return fail('NO_SOURCE', 400, '还没有聚合源：本地部署一个源，或到「聚合设置 → 源列表」填一个外部地址');
 
   const scoped = site
     ? sites.filter((x) => x.key === site && (!source || x.source === source))
-    : selectSites(sites, cfg, opts.keys);
+    : selectSites(sites, dom.selection, opts.keys);
   if (!scoped.length) {
     return fail(
       'NO_SITE',
       400,
       site
         ? `没有可用的站源：${source ? source + ' / ' : ''}${site}`
-        : '没有可用的站源：请到「站点与参数」页勾选参与聚合的站点'
+        : '没有可用的站源：请到「模板」页把要用的站点勾进这个域用的那套模板'
     );
   }
 
@@ -248,7 +280,7 @@ async function detail(opts = {}) {
    * 带 `source + site + vodId` 的快路径只打一个站，而且它是 `resolveStream` 取**新鲜**集 ID 的那条路 ——
    * 缓存它会拿到过期的集 ID，所以那条路一律不缓存、也不做合并。 */
   const cacheKey =
-    !site && !vodId && name ? detailCacheKey({ name, year: opts.year, season: opts.season, episode: opts.episode, scoped, sources, cfg, opts }) : '';
+    !site && !vodId && name ? detailCacheKey({ name, year: opts.year, season: opts.season, episode: opts.episode, scoped, sources, cfg, params: dom.params, opts }) : '';
 
   if (cacheKey) {
     const snap = cache.getDetail(cacheKey);
@@ -284,6 +316,8 @@ async function detail(opts = {}) {
        * `extraAll` = 匹配到底（不看 K，一直往下打到拿到一条或名单打完） */
       extraK: opts.extraK,
       extraAll: opts.extraAll,
+      /* 参数与站点顺序都来自这套模板（上面已按域解析过） */
+      params: dom.params,
     });
     out.sources = sources;
 
@@ -356,6 +390,8 @@ async function play(opts = {}) {
   if (!site) return fail('BAD_INPUT', 400, '请提供 site（站点 key）');
   if (!source) return fail('BAD_INPUT', 400, '请提供 source（源 id）');
 
+  const dom = ensureDomain(opts.domain);
+  if (dom.error) return dom.error;
   const { sources, sites } = await loadSites();
   const out = await playEpisode(sources, sites, {
     source,
@@ -363,6 +399,7 @@ async function play(opts = {}) {
     flag: opts.flag,
     episodeId: opts.episodeId,
     timeoutMs: opts.timeoutMs,
+    params: dom.params,
   });
   out.sources = sources;
   return out;
@@ -506,6 +543,10 @@ async function probeSearch({ source, key, api, wd, timeoutMs } = {}) {
 
 module.exports = {
   fail,
+  templates,
+  ensureDomain,
+  /** 某个域的参数（emby 层拼版本列表时要按同一套规则过滤线路，见 docs/adr/0025） */
+  paramsFor: (domain) => templates.paramsFor(String(domain || '').trim()),
   lineFilter,
   listSources,
   loadSites,

@@ -19,14 +19,28 @@
 import { el, toast, modal, codeBlock } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
-import { ensureAggSites, ensureAggSources } from '../../core/store.js';
+import { ensureAggSites, ensureAggSources, ensureTemplates, templateOf } from '../../core/store.js';
 import { renderPage } from '../../core/shell.js';
 
 /** 一个站超过这么多条就先折叠，点「展开」再看（一个站挂上百条同名很常见） */
 const FOLD_AT = 12;
 
-export function renderAgg(v) {
-  const agg = (S.settings && S.settings.agg) || { enabled: [], timeoutSec: 5, concurrency: 8 };
+export async function renderAgg(v) {
+  /* 模板决定"这次搜索用哪批站点、默认参数是多少"，而模板由**域**决定（见 docs/adr/0033）。
+   * 模板清单不走源探测，几十毫秒 —— 等它一下，页面才不会先用错默认值画一遍。 */
+  try {
+    await ensureTemplates();
+  } catch {
+    /* 拿不到就按空模板画：下面的域选择器会显示"（没有已注册的域）" */
+  }
+  const providers = S.aggProviders || [];
+  /* 域是**页面上显式选的**，不猜：只有一个域时它就是唯一那一项 */
+  if (!S.aggDomain || !providers.some((p) => p.prefix === S.aggDomain)) {
+    S.aggDomain = (providers[0] || {}).prefix || '';
+  }
+  const tpl = templateOf(S.aggDomain);
+  const tparams = (tpl && tpl.params) || {};
+  const tplSites = (tpl && tpl.sites) || [];
 
   const wdInput = el('input', { type: 'text', placeholder: '搜索关键字，例如：斗破苍穹', value: S.aggKeyword, spellcheck: 'false' });
   wdInput.addEventListener('input', () => (S.aggKeyword = wdInput.value));
@@ -42,7 +56,10 @@ export function renderAgg(v) {
   });
 
   /* ---- 打分用的输入（默认值取「聚合设置」里那两个；页面上改只影响这一次请求）---- */
-  const defaults = { minScore: agg.matchMinScore === undefined ? 0.85 : agg.matchMinScore, maxItems: agg.matchMaxItems === undefined ? 8 : agg.matchMaxItems };
+  const defaults = {
+    minScore: tparams.matchMinScore === undefined ? 0.85 : tparams.matchMinScore,
+    maxItems: tparams.matchMaxItems === undefined ? 8 : tparams.matchMaxItems,
+  };
   /* 宽度档位见 style.css 的 `.chk > input.w-*`：季/集/年份只要小框（w-xs），
    * 分数与条数要能看全 `0.85` / `15` 这种值（w-md）—— 编辑框太小时数值显示不全。 */
   const numInput = (key, fallback, min, max, title, cls) => {
@@ -95,15 +112,18 @@ export function renderAgg(v) {
     if (!(S.aggSources || []).length) return toast('还没有源：先部署一个猫源，或到「聚合 · 源列表」填一个外部地址', true);
     if (S.aggUseAll) await ensureAggSites();
     const keys = S.aggUseAll ? S.aggSites.filter((s) => s.searchable).map((s) => ({ source: s.source, key: s.key })) : null;
-    if (!S.aggUseAll && !agg.enabled.length) return toast('没有勾选参与聚合的站点，请去「聚合 · 站点与参数」勾选', true);
-    if (S.aggUseAll && !keys.length) return toast('拿不到可搜索站点列表，请先在「聚合 · 站点与参数」刷新', true);
+    if (!S.aggUseAll && !tplSites.length) {
+      return toast(tpl ? `「${tpl.name}」这套模板还没勾站点，去「聚合 · 模板」勾` : `域 ${S.aggDomain || '?'} 还没有配模板，去「聚合 · 模板」配一套`, true);
+    }
+    if (S.aggUseAll && !keys.length) return toast('拿不到可搜索站点列表，先去「聚合 · 模板」刷新站点', true);
     S.aggBusy = true;
-    S.aggResult = { loading: true, wd, keyCount: keys ? keys.length : agg.enabled.length };
+    S.aggResult = { loading: true, wd, keyCount: keys ? keys.length : tplSites.length };
     renderPage();
     try {
       const r = await api('/api/agg/search', {
         method: 'POST',
         body: {
+          domain: S.aggDomain,
           wd,
           page: pageInput.value || '1',
           keys: keys || undefined,
@@ -146,11 +166,16 @@ export function renderAgg(v) {
       const [d, st] = await Promise.all([
         api('/api/agg/detail', {
           method: 'POST',
-          body: { source: m.source, site: m.siteKey, vodId: m.vod_id, season: useSeason, episode: useEpisode, pick: usePick },
+          body: { domain: S.aggDomain, source: m.source, site: m.siteKey, vodId: m.vod_id, season: useSeason, episode: useEpisode, pick: usePick },
         }),
-        api('/api/modules/agg/settings').catch(() => null),
+        api('/api/agg/templates').catch(() => null),
       ]);
-      const raw = String(((st && st.settings) || {}).lineFilter || '').trim();
+      /* 线路过滤跟着模板走（见 docs/adr/0033）：这里现读一次，免得用内存里可能过期的那份 */
+      const tnow = (() => {
+        const id = ((st && st.domains) || {})[S.aggDomain];
+        return id ? (((st && st.templates) || []).find((x) => x.id === id) || null) : null;
+      })();
+      const raw = String(((tnow && tnow.params) || {}).lineFilter || '').trim();
       let re = null;
       try {
         if (raw) re = new RegExp(raw, 'i');
@@ -171,9 +196,23 @@ export function renderAgg(v) {
 
   /* 搜索行：**关键字 + 季/集/年份 + 页 + 按钮**全是"这次要搜什么"的参数，摆在一起。
    * （季集年份曾是按钮下面单独一行；它们与关键字同属搜索参数，放在搜索按钮之前更贴合语义。） */
+  /* 域选择器：**这条搜索属于哪个元数据域** —— 决定用哪套模板（哪批站点、哪些参数）。
+   * 不放在"打分旋钮"那一行的原因：它是这一页的**前提**，比打分更靠前。 */
+  const domSel = el('select', { title: '这条搜索属于哪个元数据域：决定用哪套模板（站点与参数）' });
+  if (!providers.length) domSel.append(el('option', { value: '', text: '（没有已注册的域）' }));
+  for (const p of providers) {
+    const o = el('option', { value: p.prefix, text: p.label || p.prefix, selected: p.prefix === S.aggDomain });
+    domSel.append(o);
+  }
+  domSel.addEventListener('change', () => {
+    S.aggDomain = domSel.value;
+    renderPage();
+  });
+
   const searchRow = el(
     'div',
     { class: 'toolbar' },
+    el('label', { class: 'chk', title: '域决定用哪套模板；模板决定这批站点与参数' }, domSel, ''),
     wdInput,
     el('label', { class: 'chk', title: seasonInput.getAttribute('title') }, seasonInput, '季'),
     el('label', { class: 'chk', title: episodeInput.getAttribute('title') }, episodeInput, '集'),
@@ -189,7 +228,7 @@ export function renderAgg(v) {
     el('span', { class: 'note', text: '0 = 不过滤分数线' }),
     el('label', { class: 'chk', title: maxItemsInput.getAttribute('title') }, maxItemsInput, '最多几条'),
     el('label', { class: 'chk' }, pageInput, '页'),
-    el('label', { class: 'chk', title: '忽略勾选，改用「站点与参数」里标了"可搜索"的全部站点' }, useAllCb, '全量站点'),
+    el('label', { class: 'chk', title: '忽略模板里勾的站点，改用全部标了"可搜索"的站点（调试用）' }, useAllCb, '全量站点'),
     el('span', { class: 'spacer' })
   );
 
@@ -198,7 +237,7 @@ export function renderAgg(v) {
     return;
   }
   if (S.aggResult.loading) {
-    v.append(searchRow, optRow, el('div', { class: 'muted', text: `正在并发搜索 ${S.aggResult.keyCount || agg.enabled.length} 个站源…` }));
+    v.append(searchRow, optRow, el('div', { class: 'muted', text: `正在并发搜索 ${S.aggResult.keyCount || tplSites.length} 个站源…` }));
     return;
   }
   if (S.aggResult.error) {
