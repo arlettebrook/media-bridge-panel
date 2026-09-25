@@ -1907,7 +1907,9 @@ async function getItem(itemId, requestedId, host = '') {
    * （同一部片的多个压制版本各自成一个版本），见 `wantLocator()` 与 docs/adr/0022。
    * 名字 + 年份 + 季集就是全部输入：聚合层用它们**打分**挑片（`agg/match.js`）。
    * ⚠️ **不再把 tmdb 坐标传下去**（早期给"别名回退"用）：判据换成了本地打分，
-   * 阈值与"最多留几条"都在聚合层的设置里，emby 这条链与 web 的聚合搜索**共用同一套**。 */
+   * 阈值与"最多留几条"来自**这个域用的那套模板**（`agg/templates.js`）——
+   * emby 这条链与 web 的聚合搜索**共用同一套**：`aggregateDetail` 内部那发搜索
+   * 也把模板参数原样带下去了（否则会退回内置的 0.85 / 8）。 */
   const hit = await agg.detail(Object.assign({ name, year, domain: p.domain }, wantLocator(p)));
   if (!hit.ok) {
     return {

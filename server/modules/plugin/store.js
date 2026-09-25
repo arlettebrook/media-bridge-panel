@@ -230,7 +230,10 @@ function syncBuiltins() {
     const cur = get(b.type, b.id);
     if (cur && cur.digest === digest) continue; // 一致 → 跳过
     try {
-      const entry = installDir(b.dir, { origin: 'builtin', enabled: cur ? cur.enabled : false });
+      /* 内置插件**首次同步即启用**（"装完即用"，见 plugin-migration-plan 挂账 #2）：
+       * 全新安装后元数据 / 源插件要能直接跑，否则面板是空的。
+       * 已装过的沿用原状态（人停用过就别给它开回来）；手动上传的仍默认停用（routes.js 那边）。 */
+      const entry = installDir(b.dir, { origin: 'builtin', enabled: cur ? cur.enabled : true });
       notes.push({ id: entry.id, type: entry.type, action: cur ? 'updated' : 'installed', version: entry.version });
     } catch (e) {
       notes.push({ id: b.id, type: b.type, action: 'failed', reason: (e && e.message) || String(e) });

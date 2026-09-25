@@ -645,7 +645,12 @@ async function aggregateDetail(sources, sites, opts = {}) {
     /* 打分要"目标是哪部片"：名字 + 年份 + 季集，全交给 match.js（筛选逻辑就在搜索这一步，
      * 所以 detail 只是"拿已经筛好的链"，不再自己判一遍）。 */
     want: { name: opts.name, year: opts.year, season, episode },
+    /* 打分参数：调用方显式给了就用它的，没给就落回**这套模板** ——
+     * ⚠️ `params` 必须传下去：漏了它，`aggregateSearch` 里的 `cfg` 就是空对象，
+     * 分数线与条数会退回内置默认（0.85 / 8），于是"搜索页按模板筛、emby 这条链按 0.85 筛"，
+     * 同一套模板两个口径（原先就是这个毛病）。 */
     matchOptions: { minScore: opts.minScore, maxItems: opts.maxItems },
+    params: cfg,
   });
   out.searched = true;
   out.stats.searched = searchSites.length;
