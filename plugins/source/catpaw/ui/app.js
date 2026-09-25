@@ -234,11 +234,23 @@ function paintAutoUpdate(au, results) {
   host.append(table);
 }
 
+/** 插件自己那份缓存的用量（两个旋钮是输入框，其余在这儿显示） */
+function paintCache(settings, stats) {
+  $('cacheTtl').value = settings.ttlMinutes !== undefined ? settings.ttlMinutes : 5;
+  $('cacheMax').value = settings.maxMB !== undefined ? settings.maxMB : 64;
+  const up = (stats.tables && stats.tables.upstream) || {};
+  const mb = (n) => (Number(n || 0) / 1024 / 1024).toFixed(1);
+  const cap = up.maxBytes > 0 ? `${mb(up.maxBytes)} MB` : '不限';
+  const ttl = settings.ttlMinutes > 0 ? `${settings.ttlMinutes} 分钟` : '不缓存';
+  $('cacheState').textContent = `已用 ${mb(stats.bytes)} MB / 上限 ${cap} · ${stats.rows || 0} 条 · 有效期 ${ttl}`;
+}
+
 async function load() {
   try {
     const d = await call('/state');
     paintInstances(d.instances || []);
     paintAutoUpdate(d.autoUpdate || {});
+    paintCache(d.cacheSettings || {}, d.cache || {});
   } catch (e) {
     say('读不到状态：' + e.message, true);
   }
@@ -312,4 +324,45 @@ $('auRun').addEventListener('click', async (e) => {
 });
 
 $('mode').dispatchEvent(new Event('change'));
+
+$('cacheSave').addEventListener('click', async (e) => {
+  e.target.disabled = true;
+  try {
+    const d = await call('/cache/settings', {
+      method: 'POST',
+      body: { cacheTtlMinutes: Number($('cacheTtl').value), cacheMaxMB: Number($('cacheMax').value) },
+    });
+    paintCache(d.cacheSettings || {}, d.cache || {});
+    say('缓存设置已保存');
+  } catch (err) {
+    say('保存失败：' + err.message, true);
+  }
+  e.target.disabled = false;
+  await load();
+});
+
+$('cacheReload').addEventListener('click', async () => {
+  try {
+    const d = await call('/cache');
+    paintCache(d.cacheSettings || {}, d.cache || {});
+    say('缓存用量已刷新');
+  } catch (err) {
+    say('刷新失败：' + err.message, true);
+  }
+});
+
+$('cacheClear').addEventListener('click', async (e) => {
+  if (!window.confirm('清空插件自己的缓存？下次取数会重新打上游。')) return;
+  e.target.disabled = true;
+  try {
+    const d = await call('/cache/clear', { method: 'POST' });
+    paintCache(d.cacheSettings || {}, d.cache || {});
+    say('缓存已清空');
+  } catch (err) {
+    say('清空失败：' + err.message, true);
+  }
+  e.target.disabled = false;
+  await load();
+});
+
 load();

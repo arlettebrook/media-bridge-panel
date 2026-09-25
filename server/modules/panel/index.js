@@ -34,18 +34,19 @@ module.exports = {
        * 它自己的缓存都在 `plugins/metadata/tmdb/data/settings.json` 里，UI 是插件自己的设置页。
        * 面板只从插件的「注册」动作里拿**图片基地址**（替客户端取图要拼串，见 emby/meta.js）。 */
       /* 本地缓存策略（原在 emby 层）—— 面板这边还剩两个库：
-       *   core 的 `data/cache/detail.db`（detail_cache 聚合详情快照，见 agg/cache.js）
+       *   core 的 `data/cache/lines.db`（line_cache = **线路结果缓存**，见 agg/cache.js）
        *   emby 的 `data/emby/cache.db`（image_index 图片索引）
        * 而「用量显示 / 清空缓存 / 设置改小后立刻淘汰」都要一把抓 —— 所以设置放在
        * 宿主层，UI 在「面板设置 → 缓存设置」。默认值与读法只此一处：`core/cachedb.js` 的 cfg()。
        *   imageTtlDays 图片索引的存活期 —— URL 几乎不变，但换图床基地址后靠它自愈
        *   imageMaxMB   图片索引上限（无头路径，一条约几十字节，5MB 已经远超实际用量）
-       *   detailTtlMinutes / detailNeverExpire / detailMaxMB
-       *                聚合详情快照活多久、最多占多少字节 —— **按分钟**（它是秒级~分钟级的短缓存：
-       *                客户端点一次播放会连问三遍同一件事，那两遍靠它省掉）。0 = 不缓存；勾了
-       *                「长期有效」就不看分钟数；`detailMaxMB` 是总字节上限（0 = 不限）。
-       *                上限默认 32MB：一条快照含全站的线路与选集（每个选集 ID 是 600~720 字符的
-       *                token，一条详情里还存了两份），实测几十~几百 KB 一条。
+       *   linesTtlDays / linesNeverExpire / linesMaxMB
+       *                 **线路结果**缓存活多久、最多占多少字节 —— **按天、默认 1 天**
+       *                （口径见 docs/adr/0032：面板侧只挡"点一次播放连问三遍"，按天的热度
+       *                由插件自己的缓存承担）。0 = 不缓存；勾了「长期有效」就不看天数；
+       *                `linesMaxMB` 是总字节上限（0 = 不限）。
+       *                上限默认 32MB：一条结果含全站的线路与选集（每个选集 ID 是 600~720 字符的
+       *                token），实测几十~几百 KB 一条。
        * **上限一律按字节不按条数**：lean 1.9KB vs rich 119KB 差 60 倍，按条数算不准。 */
       cache: Object.assign({}, cachedb.DEFAULTS),
     }),
@@ -55,17 +56,17 @@ module.exports = {
       { key: 'logMax', label: '日志缓冲条数', type: 'number', min: 50, max: 5000, hint: '「日志」页只留最近这么多条（纯内存，不落盘；长期留档看 docker logs）' },
       { key: 'cache.imageTtlDays', label: '图片索引天数', type: 'text', placeholder: '90' },
       { key: 'cache.imageMaxMB', label: '图片索引上限 MB', type: 'text', placeholder: '5' },
-      { key: 'cache.detailTtlMinutes', label: '聚合详情分钟数', type: 'text', placeholder: '60（0 = 不缓存）' },
-      { key: 'cache.detailMaxMB', label: '聚合详情上限 MB', type: 'text', placeholder: '32（0 = 不限）' },
-      { key: 'cache.detailNeverExpire', label: '聚合详情长期有效', type: 'boolean', hint: '勾上就不按分钟数过期（只要你不动设置，源里有什么就一直用那份）' },
+      { key: 'cache.linesTtlDays', label: '线路结果天数', type: 'text', placeholder: '1（0 = 不缓存）' },
+      { key: 'cache.linesMaxMB', label: '线路结果上限 MB', type: 'text', placeholder: '32（0 = 不限）' },
+      { key: 'cache.linesNeverExpire', label: '线路结果长期有效', type: 'boolean', hint: '勾上就不按天数过期（只要你不动设置，源里有什么就一直用那份）' },
     ],
     validate: (o) => {
       if (!(Number(o.port) >= 1 && Number(o.port) <= 65535)) return 'port 取值 1~65535';
       /* 缓存数值必须是「非负数字」（原为 emby 的设置校验，已迁到此处）。
        * ⚠️ 两个 0 的语义**不一样**（见 core/cachedb.js 的 cfg）：
-       *   天数 / 分钟数 0 = 不缓存（写完即过期）；上限 0 = **不限**（不淘汰）。二者不可当作同一语义处理。 */
+       *   天数 0 = 不缓存（写完即过期）；上限 0 = **不限**（不淘汰）。二者不可当作同一语义处理。 */
       const c = (o && o.cache) || {};
-      for (const key of ['imageTtlDays', 'imageMaxMB', 'detailTtlMinutes', 'detailMaxMB']) {
+      for (const key of ['imageTtlDays', 'imageMaxMB', 'linesTtlDays', 'linesMaxMB']) {
         const v = c[key];
         if (v === undefined || v === null || v === '') continue;
         const n = Number(v);

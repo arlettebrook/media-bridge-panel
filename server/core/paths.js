@@ -24,9 +24,10 @@ module.exports = {
    * 缓存按"谁用"分家 —— 面板自己用的在这里与 `data/emby/cache.db`，
    * **元数据插件的缓存不在这里**（它自己在 `plugins/<类型>/<id>/data/` 下）。 */
   CACHE_DIR: path.join(DATA_DIR, 'cache'),
-  /** 聚合详情缓存库：`detail_cache`（影视名 + 季集 → 线路与定位结果，见 agg/cache.js）。
-   * 也放共享缓存目录：读它的有聚合层（web 取详情）与 emby 层（条目详情 / 播放信息）。 */
-  DETAIL_CACHE_DB: path.join(DATA_DIR, 'cache', 'detail.db'),
+  /** 线路结果缓存库：`line_cache`（影视名 + 季集 + 影响结果的参数 → 线路与定位结果，见 agg/cache.js）
+   * + `agg_stat`（按插件记的聚合耗时）。放共享缓存目录：读它的有聚合层（web 取详情）
+   * 与 emby 层（条目详情 / 播放信息）。⚠️ 旧版那份 `detail.db`（完整快照）已不再读写。 */
+  LINES_CACHE_DB: path.join(DATA_DIR, 'cache', 'lines.db'),
   /** emby 模块自己的库（客户端登录账号等；含密码哈希，不要提交/外发） */
   EMBY_DIR: path.join(DATA_DIR, 'emby'),
   EMBY_DB: path.join(DATA_DIR, 'emby', 'emby.db'),

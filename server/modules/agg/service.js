@@ -905,7 +905,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
     sameNameCount: (bySite.get(sid(pickedFinal.source, pickedFinal.siteKey)) || []).length || (out.stats.extraHit ? 1 : 0),
   };
   /* 「这份详情对客户端有没有用」= **过滤后**至少有一条能列出来 ——
-   * `api.js` 的 `cacheableDetail` 读它决定存不存快照（见 ADR-0025）。 */
+   * `api.js` 的 `cacheableLines` 读它决定存不存这份线路结果（见 ADR-0025 / ADR-0032）。 */
   out.stats.usable = usableItems;
   out.elapsedMs = Date.now() - t0;
   return out;

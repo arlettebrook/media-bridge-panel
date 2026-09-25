@@ -27,7 +27,7 @@ const bridge = require('./source-bridge');
 const cache = require('./cache');
 const templates = require('./templates');
 const siteStats = require('./site-stats');
-const { aggregateSearch, aggregateDetail, playEpisode, selectSites, matchDefaults, detailTimeoutMs, lineFilter: serviceLineFilter } = require('./service');
+const { aggregateSearch, aggregateDetail, playEpisode, selectSites, matchDefaults, searchTimeoutMs, detailTimeoutMs, lineFilter: serviceLineFilter } = require('./service');
 
 /** 失败的统一形状（不抛异常：调用方可能是路由，也可能是 emby 层，各自决定怎么呈现） */
 function fail(code, status, message) {
@@ -100,25 +100,28 @@ const liveSources = (sources) => (sources || []).filter((s) => s.ok);
 const lineFilter = (params) => serviceLineFilter(params);
 
 /* ============================================================
- * 详情快照 + 同键并发合并（表与库见 modules/agg/cache.js）
+ * 线路结果缓存 + 同键并发合并（表与库见 modules/agg/cache.js）
  *
  * 客户端点一次「播放」会连着问三遍同一件事（条目详情 → 播放信息① → 播放信息②），
  * 每遍都要「搜源 → 逐站取详情 → 定位到这一集」，实测 4~7 秒 —— 三次串行 ≈ 20 秒，
  * 其中两遍是白重算的。这里把那一步的结果存下来复用。
+ *
+ * ⚠️ 面板侧**只管这三连问**（几秒内）—— 更长的热度归**插件自己的缓存**
+ * （"插件应当自己缓存"是契约义务，见 docs/plugin-contract.md 第十节与 docs/adr/0032）。
  * ============================================================ */
 
 /** 正在跑的详情查询：同一个 key 的并发请求跟着同一趟走，不各打一次源站 */
 const inflightDetail = new Map();
 
 /**
- * 快照 key = 「问的是什么」+「当时按什么规则问」。
+ * 缓存 key = 「问的是什么」+「当时按什么规则问」。
  *
- * 把**规则**（参与站点、源地址、分数线、最多留几条、补打设置、站点顺序、**线路过滤**）
- * 一起拼进去，是为了让「改了设置」这件事**天然换 key** —— 不必再写一套"设置变更后清缓存"
- * 的钩子，也不会读到按旧规则算出来的结论。
+ * 把**规则**（参与站点、源地址、分数线、最多留几条、补打设置、站点顺序、**线路过滤**、
+ * 两档单站超时、**取法**）一起拼进去，是为了让「改了设置」这件事**天然换 key** ——
+ * 不必再写一套"设置变更后清缓存"的钩子，也不会读到按旧规则算出来的结论（ADR-0032）。
  *
  * ⚠️ **线路过滤进 key**（原先写的是"不进"，现已被 ADR-0025 取代）：它现在参与"这条详情
- * 对客户端有没有用"的判据（过滤后一条都列不出来 → 不算有用、也不存快照），所以规则一改
+ * 对客户端有没有用"的判据（过滤后一条都列不出来 → 不算有用、也不存缓存），所以规则一改
  * 就必须换成另一个 key。代价如实记着：**改规则后第一次请求要重算**（那一趟是秒级的）——
  * 换来的是不会命中一份"按旧规则判定为有用"的结论。
  */
@@ -133,13 +136,16 @@ function detailCacheKey({ name, year, season, episode, scoped, sources, cfg, par
     String(year || ''),
     dim(season),
     dim(episode),
-    /* 参与站点（顺序无关 → 排序）+ 源地址（改了地址等于换了后端，旧快照不能再用） */
+    /* 参与站点（顺序无关 → 排序）+ 源地址（改了地址等于换了后端，旧结果不能再用） */
     scoped.map(pair).sort().join(','),
     (sources || []).map((s) => `${s.id}|${s.url || ''}`).sort().join(';'),
     /* 这几项直接决定"命中哪些站"，必须进 key */
     [m.minScore, m.maxItems, m.extraK, extraAll ? 1 : 0, (cfg.order || []).map(pair).join(',')].join('|'),
-    /* 取详情的单站超时（秒）：它决定"这一次哪几条线路取得到"（超时的站那条就没了），
+    /* 取法（电影 `items` / 剧集按季集定位）：两种取法算出来的"可播目标"不是一回事，分开存 */
+    String(opts.pick === 'items' ? 'items' : ''),
+    /* 两档单站超时（秒）：它们决定"这一次哪几条线路取得到/哪些站搜得到"（超时的站那条就没了），
      * 与线路过滤同理 —— 改了规则就该重算，而不是命中一份按旧超时算出来的结论 */
+    String(Math.round(searchTimeoutMs(cfg) / 1000)),
     String(Math.round(detailTimeoutMs(cfg) / 1000)),
     /* 线路过滤的原文（正则）：它决定"这份详情对客户端有没有用"，必须进 key（见上） */
     String(cfg.lineFilter || '').trim(),
@@ -147,28 +153,79 @@ function detailCacheKey({ name, year, season, episode, scoped, sources, cfg, par
 }
 
 /**
- * 什么样的结果才值得存快照。
+ * 什么样的结果才值得存。
  *
  * **判据：`stats.usable > 0`** —— 即"至少有一条**过滤后仍能被客户端列出来**的线路"
  *（有线路、过了线路过滤、且定位到这一集 / 有播放项；由 `service.aggregateDetail` 统计）。
  *
- * 这条判据改过两次，两次都是被实测推着走的：
- *   ① 原先还额外要求「没有站失败」「没有详情失败」，太严：这一趟是 **10 秒级**的活
- *      （实测中位 10.8s），启用站里只要有一个慢/抖一下整份就不存，于是客户端点一次播放
- *      连着问的那三遍（详情 → 播放信息① → 播放信息②）**全部重算**，一次播放要等 20~30 秒。
- *      放宽成"有站拿到详情就存"（`detailOk > 0`）。那次取舍的完整理由与代价见 ADR-0020。
- *   ② 现在再收一道：**过滤后一条都列不出来 = 对客户端没有用**（ADR-0025）。
- *      实测症状：某站的 4 条线路被 `/夸克原画/` 全滤掉，客户端 0 个版本，而这份"没用"的
- *      快照照样存了下来、在那个有效期内一直挡着（客户端反复点开都是 0 版本）。
+ * ⚠️ 这就是 ADR-0032 那条"**只要有线路就存**"：它不要求"所有站点都通"（那是旧的
+ * "完整快照"口径，ADR-0020 时代已经放宽过）。实测这一趟是 10 秒级的活，启用站里只要有一个
+ * 慢一下或抖一下整份就不存的话，客户端点一次播放连着问的那三遍就**全部重算**。
+ *
+ * 但**"过滤后一条都列不出来"仍不算有用**（ADR-0025）：那等于给客户端 0 个版本，
+ * 存下来会在整个有效期内一直挡着（实测：某站 4 条线路被 `/夸克原画/` 全滤掉，
+ * 客户端反复点开都是 0 版本）。所以判据是"有**能用的**线路就存"。
  *
  * 代价**如实记着**：存下的可能是"缺某个源那几条线路"的半份结果，在那个有效期内点开都会缺它。
- * 所以不让这件事无声无息 —— 存快照那行日志会**点名**这次是哪个源没取到（见下面 `compute()` 里）。
+ * 所以不让这件事无声无息 —— 存那行日志会**点名**这次是哪个源没取到（见下面 `compute()` 里）。
  *
  * 仍然不存**负结果**（没命中、或全失败）：这两件事在返回值上不好区分，
  * 分不清就不缓存，每次如实去问（延续 ADR-0008）。
  */
-function cacheableDetail(out) {
+function cacheableLines(out) {
   return Number((out.stats || {}).usable) > 0;
+}
+
+/**
+ * 入库前**甩掉插件那份上游原样响应**（`sites[].data`）。
+ *
+ * 面板侧这份缓存只该装"面板聚合出来的线路结果"（ADR-0032：面板不必懂插件返回的全部结构）。
+ * `data` 是插件的原样响应体，面板这边没有任何消费方读它（web 的「这条的版本」弹窗与 emby 层
+ * 都只读 `detail` / `variants`），留着只是让缓存白白大一截。
+ * ⚠️ 于是**缓存命中时回的响应里没有 `sites[].data`，而现算那次有** —— 这是刻意的：
+ * 那个字段只当诊断用，别拿它做判据（要诊断去看插件自己的缓存与日志）。
+ *
+ * `sources`（这次的源清单）也不入库：源会增删改，命中时就地用**当次**读到的顶上。
+ */
+function slimLines(out) {
+  const slim = Object.assign({}, out);
+  delete slim.sources;
+  slim.sites = (out.sites || []).map((x) => {
+    if (!x || !x.data) return x;
+    const one = Object.assign({}, x);
+    delete one.data;
+    return one;
+  });
+  return slim;
+}
+
+/**
+ * **按插件记这次聚合的耗时**（ADR-0032 第 4 条：不记就查不出"慢插件"）——
+ * 日志点名 + 写进统计（见 `cache.recordAgg`，面板「缓存设置」页会列出来）。
+ *
+ * 一次聚合会同时打几个插件，记一个总耗时说不出是谁慢，所以按插件分开记，
+ * 每项取它**这次最慢的那一发取数**（插件内几个实例/站点并发，最慢的那发才是用户等的那段）。
+ */
+function noteAggPerPlugin(name, out) {
+  const per = new Map();
+  for (const x of out.sites || []) {
+    if (!x || !x.source) continue;
+    const pluginId = String(x.source).split('/')[0]; // 源身份是「插件 id / 实例 id」
+    const ms = Number(x.ms) || 0;
+    const cur = per.get(pluginId);
+    if (!cur) per.set(pluginId, { ms, sites: 1 });
+    else {
+      cur.sites += 1;
+      if (ms > cur.ms) cur.ms = ms;
+    }
+  }
+  if (!per.size) return;
+  const parts = [];
+  for (const [id, v] of per) {
+    cache.recordAgg(id, v.ms, v.sites);
+    parts.push(`${id} ${(v.ms / 1000).toFixed(1)}s`);
+  }
+  console.log(`  · agg 聚合耗时「${name}」共 ${out.elapsedMs || 0}ms（按插件最慢的一发：${parts.join(' / ')}）`);
 }
 
 /**
@@ -185,7 +242,8 @@ function cacheableDetail(out) {
  * 但条数受 `maxItems` 限制（每多一条命中就要多打一次 `/detail` 取链，太慢）。
  * ⚠️ **不再有 TMDB 反查**：判据是 `match.js` 的打分（理由见那个文件顶部）。
  * 成功回 `{ok:true, sites, picked, stats, sources, elapsedMs}`（每站的成败在 `sites[].ok/error` 里）；
- * 走快照时多一个 `cached:true`，`elapsedMs` 是**当初算它那一次的耗时**。
+ * 走缓存时多一个 `cached:true`，`elapsedMs` 是**当初算它那一次的耗时**，
+ * 且**响应里没有 `sites[].data`**（那份上游原样响应不入库，见 `slimLines`）。
  */
 async function detail(opts = {}) {
   const name = String(opts.name || '').trim();
@@ -222,20 +280,20 @@ async function detail(opts = {}) {
     !site && !vodId && name ? detailCacheKey({ name, year: opts.year, season: opts.season, episode: opts.episode, scoped, sources, cfg, params: dom.params, opts }) : '';
 
   if (cacheKey) {
-    const snap = cache.getDetail(cacheKey);
-    if (snap) {
-      /* 源清单用**这次**读到的（站点/端口会变），其余照旧 —— 快照只省掉"打源站"那一段 */
-      snap.sources = sources;
-      snap.cached = true;
+    const hit = cache.getLine(cacheKey);
+    if (hit) {
+      /* 源清单用**这次**读到的（站点/端口会变），其余照旧 —— 缓存只省掉"打插件"那一段 */
+      hit.sources = sources;
+      hit.cached = true;
       console.log(
-        `  · agg 详情走快照「${name}」→ ${(snap.sites || []).length} 站` +
-          `（没打源站；当初算它花了 ${snap.elapsedMs || 0}ms）`
+        `  · agg 线路结果缓存命中「${name}」→ ${(hit.sites || []).length} 站` +
+          `（没打插件；当初算它花了 ${hit.elapsedMs || 0}ms）`
       );
-      return Object.assign({ ok: true }, snap);
+      return Object.assign({ ok: true }, hit);
     }
   }
 
-  /** 真正去打源站的那一趟（含写快照） */
+  /** 真正去打插件的那一趟（含写缓存） */
   const compute = async () => {
     const out = await aggregateDetail(sources, scoped, {
       name,
@@ -275,26 +333,29 @@ async function detail(opts = {}) {
       );
     }
 
+    /* 按插件记这次聚合的耗时（日志 + 统计）—— 见 `noteAggPerPlugin` */
+    noteAggPerPlugin(name, out);
+
     if (cacheKey) {
-      if (!cacheableDetail(out)) {
+      if (!cacheableLines(out)) {
         console.log(
-          '  · agg 详情不存快照（没命中 / 没有任何站拿到详情 / **线路过滤后一条能用的都没有**）—— 下次仍如实去问'
+          '  · agg 线路结果不存缓存（没命中 / 没有任何站拿到详情 / **线路过滤后一条能用的都没有**）—— 下次仍如实去问'
         );
-      } else if (cache.putDetail(cacheKey, out)) {
-        /* **有站失败也照存**（见 `cacheableDetail`），所以这里必须点名缺了谁 ——
-         * 否则"快照里少几条线路"跟"源里本来就没有"长得一模一样，事后无从分辨。 */
+      } else if (cache.putLine(cacheKey, slimLines(out))) {
+        /* **有站失败也照存**（见 `cacheableLines`），所以这里必须点名缺了谁 ——
+         * 否则"缓存里少几条线路"跟"源里本来就没有"长得一模一样，事后无从分辨。 */
         const s = out.stats || {};
         const bad = (out.sites || []).filter((x) => x && x.ok === false).map((x) => x.name || x.key);
         const miss = [];
         if (bad.length) miss.push(`${bad.length} 个源没搜到（${bad.slice(0, 4).join(' / ')}${bad.length > 4 ? ' …' : ''}）`);
         if (Number(s.detailFailed)) miss.push(`${s.detailFailed} 条详情没取到`);
         console.log(
-          `  ✔ agg 详情已存快照（${(out.sites || []).length} 站` +
-            (miss.length ? `；⚠️ 但不完整：${miss.join('，')} —— 这份快照里没有它们的线路` : '') +
+          `  ✔ agg 线路结果已存缓存（${(out.sites || []).length} 站` +
+            (miss.length ? `；⚠️ 但不完整：${miss.join('，')} —— 这份缓存里没有它们的线路` : '') +
             `；有效期见「面板设置 → 缓存设置」）`
         );
       } else {
-        console.log('  · agg 详情没存快照（「缓存设置 → 聚合详情」的有效期填了 0 = 不缓存）');
+        console.log('  · agg 线路结果没存缓存（「缓存设置 → 线路结果」的有效期填了 0 = 不缓存）');
       }
     }
     return Object.assign({ ok: true }, out);
@@ -302,10 +363,10 @@ async function detail(opts = {}) {
 
   if (!cacheKey) return compute();
 
-  /* 同键并发合并：同一时刻两个人点开同一部片，只打一趟源站 */
+  /* 同键并发合并：同一时刻两个人点开同一部片，只打一趟插件 */
   const running = inflightDetail.get(cacheKey);
   if (running) {
-    console.log(`  · agg 详情同键合并「${name}」—— 跟着同一趟源站查询走`);
+    console.log(`  · agg 同键合并「${name}」—— 跟着同一趟插件查询走`);
     return running;
   }
   const p = compute();

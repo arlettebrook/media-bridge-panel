@@ -402,9 +402,39 @@ data/
 - **做什么**：删掉旧"详情快照"逻辑，改为：插件侧自己缓存（插件义务）+ 面板侧只缓存
   "这一条目的线路结果"（按天默认 1 天，key 带上所有影响结果的参数，判据"有线路就存"）；
   面板按插件记录聚合耗时。
-- **动到**：`server/modules/agg/cache.js`、`server/modules/agg/api.js`、面板缓存设置页。
-- **行为**：缓存内容与有效期口径变了（见 [ADR-0032](adr/0032-cache-two-levels.md)）。
-- **验证**：客户端连问三遍只打一次插件；改一条参数后旧结果立即失效；缺线路的结果会被缓存（知情接受）。
+- **动到**：
+  - 面板侧 —— `server/core/cachedb.js`（设置项由"分钟"改"天"：`linesTtlDays` 默认 1 /
+    `linesNeverExpire` / `linesMaxMB` 默认 32，`TABLE_CAP` 加 `line_cache` 与 `agg_stat`）、
+    `server/modules/agg/cache.js`（库改 `data/cache/lines.db`、表 `line_cache` + 新增 `agg_stat`；
+    `getDetail`/`putDetail` → `getLine`/`putLine` + `recordAgg`/`aggStats`）、
+    `server/modules/agg/api.js`（key 补 `pick` 与两档单站超时；只存"能用的线路"；入库前剔除
+    `sites[].data` 与 `sources`；按插件记耗时到日志 + `agg_stat`）、
+    `server/core/paths.js`（`DETAIL_CACHE_DB` → `LINES_CACHE_DB`）、
+    `server/modules/panel/index.js` + `routes.js`（缓存页字段与用量、显示各插件聚合耗时）、
+    `public/modules/panel/settings.js`（缓存卡字段与文案）。
+  - 插件侧 —— `plugins/source/catpaw/`（新增 `lib/cache.js`；`lib/store.js` 加 `cacheTtlMinutes` 默认 5 /
+    `cacheMaxMB` 默认 64；`index.js` 的 `search`/`detail` 落盘缓存 + `GET /cache` /
+    `POST /cache/clear` / `POST /cache/settings`；`ui/` 缓存设置卡）。
+- **行为**：缓存内容与有效期口径变了（见 [ADR-0032](adr/0032-cache-two-levels.md)）——
+  面板侧只存"线路结果"、**按天、默认 1 天**；插件侧自己缓存上游原始响应（分钟/上限由插件自己的设置管）。
+- **验证（已做）**：`npm run check` 通过；本机起实例（临时 `DATA_DIR` + 临时端口）实测
+  `GET /api/panel/cache`、`PUT /api/modules/panel/settings`、`DELETE /api/panel/cache` 都正常
+  （`lines` 段按天/`agg` 段按插件；勾「长期有效」→ `ttlMs` 变成很远的数；填 0 → 不缓存；清空后归零）。
+  缓存口径用**打桩 `source-bridge`** 跑 `agg/api.detail`（本机没有真源，见下"没验到的"）：
+  - 同一请求连问三遍 → **只打一次插件**（`search` / `detail` 各 1 次），第二、三遍命中缓存，日志写"没打插件"；
+  - 改一条影响结果的参数（分数线）→ **立即换 key、重打插件**（各 +1）；
+  - **缺线路仍缓存**（B 站搜不到、A 站有能用的线路）→ 照存，日志点名"⚠️ 但不完整：1 个源没搜到（站B）"，
+    第二遍命中缓存不打插件；
+  - 一条能用的线路都没有（定位不到这一集）→ **不存**（ADR-0025 的边界：`usable > 0` 才存）；
+  - 命中缓存时响应里**没有** `sites[].data`（现算那次有）—— 刻意（那份上游原样响应不入库，见 `slimLines`）；
+  - `agg_stat` 按插件记到（`aggStats()` 回 `{catpaw:{ms,sites,at}}`）。
+- **没验到的（如实记）**：**没在同一条真源上跑过三连问**（本机没有可用的猫爪源实例）——
+  上面的口径是**打桩** `source-bridge` 验的，链路是面板侧那一段。插件侧的落盘缓存
+  （`plugins/source/catpaw/lib/cache.js`）只过了 `npm run check` 与代码复核，**没在真源上实测过命中**。
+  面板「设置 → 缓存设置」页**没能用浏览器逐页验**：这台机器上 WebView 一直未就绪、资源 `net::ERR_ABORTED`，
+  连换两个浏览器实例都一样。已核对到的是：模块能被正常服务（HTTP 200）、新增标识符无"用了没定义"、
+  console 无 JS 报错。下次有实机条件时，这两条要补上。
+- **风险**：中。缓存键少一项就会"改设置不生效"，多一项会无谓失效率 —— 所以 `pick` 与两档超时都进 key。
 - **依赖**：批次 6。
 
 ### 批次 9 — 首页插件搬进统一插件树

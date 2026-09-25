@@ -3,10 +3,13 @@
  * 通用本地缓存（Node 内置 `node:sqlite`，零依赖）—— **所有缓存表的唯一设施**
  *
  * 由 `modules/emby/cache.js` 抽出：缓存不止一个调用方 ——
- * 图片索引归 emby、聚合线路结果归 agg，而依赖是单向的 `emby → agg → core`。
+ * 图片索引归 emby、聚合的**线路结果**归 agg，而依赖是单向的 `emby → agg → core`。
  * 所以「开库 / TTL / 按字节 LRU 淘汰 / 统计 / 清空」这套通用能力放在 core，
  * 各有各策略的调用方（`modules/emby/cache.js`、`modules/agg/cache.js`、`modules/agg/site-stats.js`）
  * 各自建一个 store。
+ *
+ * ⚠️ **面板侧只剩"这一条目的线路结果"这一份**（`line_cache`，见 `modules/agg/cache.js`
+ * 与 docs/adr/0032）：面板不再缓存"完整详情快照"，插件自己的取数缓存归插件自己管。
  * ⚠️ **元数据与名字搜索的缓存已经不在面板里了**：它们随元数据插件化搬进了插件自己的数据目录，
  * 由插件自己管（插件里那份实现不需要也不该 require 面板）。
  *
@@ -37,14 +40,14 @@ const USED_REFRESH_MS = 60 * 60 * 1000;
 const DEFAULTS = {
   imageTtlDays: 90,
   imageMaxMB: 5,
-  /** 聚合详情缓存（`detail_cache`，见 agg/cache.js）：**按分钟**，因为它是秒级~分钟级的短缓存。
+  /** 线路结果缓存（`line_cache`，见 agg/cache.js）：**按天**，默认 1 天（口径见 docs/adr/0032）。
    *  0 = 不缓存（与上面「天数 0 = 不缓存」同一口径）；勾了「长期有效」时这个数不看。
-   *  `detailMaxMB` = 总字节上限，**可调**（「面板设置 → 缓存设置」，0 = 不限）。
-   *  默认 32MB 是实测值：一条快照含全站的线路与选集，而每个选集 ID 就是 600~720 字符的 token
-   *  （且那条详情里存了两份：站源原始响应 + 解析结果），实测几十~几百 KB 一条。 */
-  detailTtlMinutes: 60,
-  detailNeverExpire: false,
-  detailMaxMB: 32,
+   *  `linesMaxMB` = 总字节上限，**可调**（「面板设置 → 缓存设置」，0 = 不限）。
+   *  默认 32MB 是实测值：一条结果含全站的线路与选集，而每个选集 ID 就是 600~720 字符的 token，
+   *  实测几十~几百 KB 一条。 */
+  linesTtlDays: 1,
+  linesNeverExpire: false,
+  linesMaxMB: 32,
 };
 
 /**
@@ -62,20 +65,22 @@ const NEVER_TTL_MS = 100 * 365 * 86400000;
 function cfg() {
   const c = (settings.read('panel') || {}).cache || {};
   const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : d);
-  const detailMinutes = num(c.detailTtlMinutes, DEFAULTS.detailTtlMinutes);
+  const linesDays = num(c.linesTtlDays, DEFAULTS.linesTtlDays);
   return {
     imageTtlMs: num(c.imageTtlDays, DEFAULTS.imageTtlDays) * 86400000,
     imageMaxBytes: num(c.imageMaxMB, DEFAULTS.imageMaxMB) * 1024 * 1024,
-    /* 「长期有效」勾了就无视分钟数（`detailNeverExpire` 是布尔，不是数字） */
-    detailTtlMs: c.detailNeverExpire ? NEVER_TTL_MS : detailMinutes * 60000,
-    detailMaxBytes: num(c.detailMaxMB, DEFAULTS.detailMaxMB) * 1024 * 1024,
+    /* 「长期有效」勾了就无视天数（`linesNeverExpire` 是布尔，不是数字） */
+    lineTtlMs: c.linesNeverExpire ? NEVER_TTL_MS : linesDays * 86400000,
+    lineMaxBytes: num(c.linesMaxMB, DEFAULTS.linesMaxMB) * 1024 * 1024,
   };
 }
 
 /** 各表的字节上限来自哪个设置的哪一项（sweepAll 用） */
 const TABLE_CAP = {
   image_index: (c) => c.imageMaxBytes,
-  detail_cache: (c) => c.detailMaxBytes,
+  line_cache: (c) => c.lineMaxBytes,
+  /* 按插件记的聚合耗时：一张很小的统计表（几百字节一条 × 插件个数），固定上限就够，不进设置 */
+  agg_stat: () => 512 * 1024,
 };
 
 /** 已建的 store（label → store）：面板的「用量 / 清空 / 设置变更后扫一遍」靠它一把抓 */

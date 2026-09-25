@@ -25,6 +25,7 @@
  */
 const protocol = require('./lib/protocol');
 const store = require('./lib/store');
+const cache = require('./lib/cache');
 const runner = require('./lib/runner');
 const fetcher = require('./lib/fetcher');
 const autoUpdate = require('./lib/auto-update');
@@ -41,6 +42,9 @@ const SITES_TIMEOUT_MS = 20000;
 const SITES_TTL_MS = 60000;
 /** `init` 单次最多等多久（面板原来那套取的是 min(业务超时, 8s)） */
 const INIT_MAX_MS = 8000;
+
+/** 拼缓存键的一段：`undefined` / `null` 归成空串（不写进 `undefined` 那种字面量） */
+const seg = (v) => (v === undefined || v === null ? '' : String(v));
 
 /** 实例 id → `{ at, sites: Map<key, site> }` */
 const sitesCache = new Map();
@@ -282,14 +286,22 @@ const actions = {
     return out;
   },
 
-  /** 候选 —— 一个站的搜索（两层式站点的第一步） */
+  /** 候选 —— 一个站的搜索（两层式站点的第一步）。**插件自己那份缓存的第一个落点** */
   async search(args, ctx) {
     const one = needInstance(args.source);
     const site = await needSite(one, args.key);
     const timeoutMs = Math.max(1000, Number(args.timeoutMs) || 5000);
+    const key = [one.id, site.key, 'search', seg(args.wd), seg(args.page)].join('|');
+    const hit = cache.get('upstream', key);
+    if (hit) {
+      if (ctx) ctx.log(`插件自己的缓存命中：${one.id} / ${site.key} 的搜索「${seg(args.wd)}」第 ${seg(args.page) || 1} 页 —— 直接回缓存，不打上游`);
+      return Object.assign({}, hit, { cached: true, site: site.key, source: one.id });
+    }
     try {
       const initCalled = await ensureInit(one, site, timeoutMs);
       const r = await postSite(one, site.api, '/search', { wd: args.wd, page: args.page }, timeoutMs);
+      /* 只缓存成功响应；失败与非 200 不写（下次照常重试） */
+      if (r.ok) cache.put('upstream', key, r, cache.limits().ttlMs);
       if (initCalled && ctx) ctx.log(`首次搜索前打了 init：${one.id} / ${site.key}`);
       return Object.assign(r, { initCalled, site: site.key, source: one.id });
     } catch (e) {
@@ -307,8 +319,19 @@ const actions = {
     const one = needInstance(args.source);
     const site = await needSite(one, args.key);
     const timeoutMs = Math.max(1000, Number(args.timeoutMs) || 10000);
+    const pick = args.pick === 'items' ? 'items' : '';
+    const key = [one.id, site.key, 'detail', seg(args.id), seg(args.season), seg(args.episode), pick].join('|');
     try {
-      const r = await postSite(one, site.api, '/detail', { id: args.id }, timeoutMs);
+      /* 缓存的是**上游原始响应** —— 命中时不打上游，但照旧重新跑一遍 `buildDetail`：
+       * 它是纯函数，重建出的「线路 → 选集」与现打一次一致，`ref` 里嵌的集 id 也来自这份响应。 */
+      let r = cache.get('upstream', key);
+      const cached = !!r;
+      if (cached) {
+        if (ctx) ctx.log(`插件自己的缓存命中：${one.id} / ${site.key} 的详情 ${seg(args.id)} —— 用缓存里的原始响应重建「线路 → 选集」，不打上游`);
+      } else {
+        r = await postSite(one, site.api, '/detail', { id: args.id }, timeoutMs);
+        if (r.ok) cache.put('upstream', key, r, cache.limits().ttlMs);
+      }
       const built = buildDetail(r.json, {
         pluginId: PLUGIN_ID,
         instanceId: one.id,
@@ -316,14 +339,16 @@ const actions = {
         vodId: args.id,
         season: args.season,
         episode: args.episode,
-        pick: args.pick === 'items' ? 'items' : '',
+        pick,
       });
-      return Object.assign(r, {
+      const out = Object.assign({}, r, {
         source: one.id,
         site: site.key,
         detail: built.detail,
         detailNote: built.note,
       });
+      if (cached) out.cached = true;
+      return out;
     } catch (e) {
       if (ctx) ctx.log(`取播放项失败：${one.id} / ${site.key} — ${(e && e.message) || e}`);
       return { error: failFrom(e), source: one.id, site: site.key };
@@ -468,6 +493,9 @@ const actions = {
           instances: store.list().map(stateOf),
           autoUpdate: autoUpdate.state(),
           dataDir: store.DATA_DIR,
+          /* 插件自己那份缓存的两个旋钮与当前用量（面板侧那份「线路结果」不在这儿） */
+          cacheSettings: store.cacheCfg(),
+          cache: cache.stats(),
         });
       }
 
@@ -530,6 +558,21 @@ const actions = {
         const r = await autoUpdate.runNow({ reason: 'manual' });
         if (!r.ok) return bad(r.busy ? 409 : 400, r.error || '跑不起来');
         return ok({ results: r.results, autoUpdate: autoUpdate.state() });
+      }
+
+      /* 插件自己那份缓存（契约第十节）：用量、清空、两个旋钮 —— 与自动更新同级 */
+      if (p === '/cache' && method === 'GET') {
+        return ok({ cacheSettings: store.cacheCfg(), cache: cache.stats() });
+      }
+      if (p === '/cache/clear' && method === 'POST') {
+        const out = cache.clear(body.table ? String(body.table) : '');
+        return ok({ cacheSettings: store.cacheCfg(), cache: out });
+      }
+      if (p === '/cache/settings' && method === 'POST') {
+        const next = store.setCache(body);
+        /* 上限调小后**立刻淘汰**（不然设置页会显示"已用 60MB / 上限 10MB"，看着像坏了） */
+        cache.sweep('upstream', { force: true });
+        return ok({ cacheSettings: next, cache: cache.stats() });
       }
 
       return bad(404, `插件设置页没有这个接口：${method} ${p}`);

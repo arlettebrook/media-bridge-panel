@@ -11,6 +11,10 @@
 const settings = require('../../core/settings');
 const registry = require('../../core/registry');
 const cachedb = require('../../core/cachedb');
+/* 面板层的「缓存设置」要顺带显示**按插件记的聚合耗时**（ADR-0032 第 4 条）——
+ * 那份账写在 `agg_stat`（agg/cache.js），所以这里直接读它。方向是单向的：
+ * agg 层不 require panel（只 require core），不会转圈。 */
+const cache = require('../agg/cache');
 const logbus = require('../../core/logbus');
 const auth = require('../../core/auth');
 const { sendJson, sendError, readBody } = require('../../core/http');
@@ -154,9 +158,9 @@ module.exports = function routes(r) {
    * DELETE /api/panel/cache —— **清空所有缓存**
    *
    * 建这个端点时缓存已跨两个库（原 `/api/emby/cache` 只有 emby 那张库）——
-   *   core  `data/cache/detail.db`  detail_cache（聚合线路结果）
-   *   emby  `data/emby/cache.db`    image_index（图片索引）
-   * ⚠️ 元数据插件的缓存不归这里（它自己在插件的数据目录里）。
+   *   core  `data/cache/lines.db`    line_cache（面板侧的**线路结果**）+ agg_stat（按插件的聚合耗时）
+   *   emby  `data/emby/cache.db`     image_index（图片索引）
+   * ⚠️ 插件自己的缓存不归这里（元数据插件、源插件各自的都在自己的数据目录里）。
    * "清空"与"用量"**只能有一个入口**，否则以后加一张表就会漏清一处 —— 所以收敛到面板层，
    * 走 `core/cachedb.js` 的 `statsAll()` / `clearAll()`（各 store 自己登记，见那个文件）。
    * 清它**永远不动账号**（账号在 emby.db）—— 缓存出问题就删掉重建，这是当初分库的理由之一。
@@ -165,13 +169,13 @@ module.exports = function routes(r) {
     const c = cachedb.cfg();
     const all = cachedb.statsAll();
     const img = ((all.image || {}).tables) || {};
-    const det = ((all.detail || {}).tables) || {};
+    const lines = ((all.lines || {}).tables) || {};
     const one = (tbl, fallback) => Object.assign({ rows: 0, bytes: 0 }, tbl || fallback);
     const imgTbl = one(img.image_index);
-    const detTbl = one(det.detail_cache);
+    const lineTbl = one(lines.line_cache);
     return {
       /* 每组数字一一对应 UI 上那一行；`maxBytes`/`ttl*` 是**当前策略**（面板设置里可改）。
-       * ⚠️ 元数据与名字搜索的缓存**不在这里**了：它们随元数据插件走（插件自己那份设置页里看）。 */
+       * ⚠️ 插件自己的缓存在各自的设置页里看，不在这里。 */
       image: {
         rows: imgTbl.rows,
         bytes: imgTbl.bytes,
@@ -179,15 +183,17 @@ module.exports = function routes(r) {
         ttlDays: c.imageTtlMs / 86400000,
         path: (all.image || {}).path || '',
       },
-      detail: {
-        rows: detTbl.rows,
-        bytes: detTbl.bytes,
-        maxBytes: c.detailMaxBytes,
+      lines: {
+        rows: lineTbl.rows,
+        bytes: lineTbl.bytes,
+        maxBytes: c.lineMaxBytes,
         /* 「长期有效」时 ttlMs 是个很远的数 —— 如实报出去，由 UI 决定怎么显示 */
-        ttlMs: c.detailTtlMs,
-        ttlForever: !!(((settings.read('panel') || {}).cache || {}).detailNeverExpire),
-        path: (all.detail || {}).path || '',
+        ttlMs: c.lineTtlMs,
+        ttlForever: !!(((settings.read('panel') || {}).cache || {}).linesNeverExpire),
+        path: (all.lines || {}).path || '',
       },
+      /* 按插件记的**最近一次聚合耗时**（ADR-0032 第 4 条）：`{ <插件 id>: {ms, sites, at} }` */
+      agg: cache.aggStats(),
     };
   };
 
@@ -195,7 +201,7 @@ module.exports = function routes(r) {
 
   r.add('DELETE', '/api/panel/cache', (req, res) => {
     cachedb.clearAll();
-    console.log('  ✔ 缓存已清空（detail.db 聚合线路结果、cache.db 图片索引；账号不受影响。元数据插件的缓存在它自己那边）');
+    console.log('  ✔ 缓存已清空（lines.db 线路结果、cache.db 图片索引；账号不受影响。插件自己的缓存在各自那边）');
     return sendJson(res, 200, cacheView());
   });
 

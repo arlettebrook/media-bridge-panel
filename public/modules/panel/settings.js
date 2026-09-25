@@ -7,8 +7,8 @@
  *                    测速是"这台机器与这条网络"的体检，与内容偏好无关，所以不跟模板走（见 ADR-0033）；
  *                    测速的结果（站点统计）也是面板级共享的一份。「立即测速」在「聚合 · 模板」页。
  *   · 缓存设置       面板自己那两份缓存的用量与清空（`data/emby/cache.db` 图片索引 +
- *                    `data/cache/detail.db` 聚合线路结果），端点 `GET|DELETE /api/panel/cache`，
- *                    策略存 `panel.json` 的 `cache.*`（见 core/cachedb.js）
+ *                    `data/cache/lines.db` 线路结果 + 按插件的聚合耗时），端点 `GET|DELETE /api/panel/cache`，
+ *                    策略存 `panel.json` 的 `cache.*`（见 core/cachedb.js）。⚠️ 插件自己的缓存在各自插件设置页。
  *   · 面板密码        改密码（见 core/auth.js）+ 退出登录
  *
  * ⚠️ **TMDB 设置不在这里**了：token / 基地址 / 语言 / 它自己的缓存都归**元数据插件**
@@ -371,9 +371,10 @@ function fmtBytes(n) {
  * 缓存设置（从「Emby → 连接设置」搬来）。
  *
  * 为什么归面板：剩下的这两份缓存都归面板用 —— `data/emby/cache.db`（图片索引，面板替客户端取图）
- * 与 `data/cache/detail.db`（聚合线路结果）。用量显示、清空、上限一把抓才可能不出错，
+ * 与 `data/cache/lines.db`（线路结果 + 按插件的聚合耗时）。用量显示、清空、上限一把抓才可能不出错，
  * 所以设置、按钮、端点在面板层（`GET|DELETE /api/panel/cache`）。
- * ⚠️ **元数据与名字搜索的缓存不在这里**：它们随元数据插件走，归插件自己管（插件 → tmdb → 设置）。
+ * ⚠️ **插件自己的缓存不在这里**：元数据、源插件的取数缓存都随插件走，归插件自己管
+ * （插件 → tmdb → 设置、插件 → 源 → 设置）。
  */
 function cacheCard() {
   const c = (S.panel.settings || {}).cache || {};
@@ -382,29 +383,52 @@ function cacheCard() {
     el('input', { type: 'text', value: String(c[key] === undefined || c[key] === null ? dflt : c[key]), class: 'w-sm' });
   const cImgDays = cnum('imageTtlDays', 90);
   const cImgMB = cnum('imageMaxMB', 5);
-  const cDetMin = cnum('detailTtlMinutes', 60);
-  const cDetMB = cnum('detailMaxMB', 32);
-  const cDetForever = el('input', { type: 'checkbox' });
-  cDetForever.checked = !!c.detailNeverExpire;
+  const cLineDays = cnum('linesTtlDays', 1);
+  const cLineMB = cnum('linesMaxMB', 32);
+  const cLineForever = el('input', { type: 'checkbox' });
+  cLineForever.checked = !!c.linesNeverExpire;
   const out = el('div', { class: 'hint', text: '正在读取用量…' });
+  const aggLine = el('div', { class: 'note' });
   const save = el('button', { class: 'btn primary', text: '保存' });
   const clear = el('button', { class: 'btn', text: '清空缓存' });
 
-  /** 聚合详情的有效期显示：勾了长期有效就说长期有效，填 0 就说不缓存 */
-  const fmtDetailTtl = (r) => {
-    const d = r.detail || {};
+  /** 线路结果的有效期显示：勾了长期有效就说长期有效，填 0 就说不缓存 */
+  const fmtLineTtl = (r) => {
+    const d = r.lines || {};
     if (d.ttlForever) return '长期有效';
-    const min = Math.round(Number(d.ttlMs || 0) / 60000);
-    return min > 0 ? `${min} 分钟` : '不缓存';
+    const days = Number(d.ttlMs || 0) / 86400000;
+    return days > 0 ? `${days} 天` : '不缓存';
+  };
+
+  /**
+   * 按插件记的**最近一次聚合耗时**（ADR-0032 第 4 条，数据来自 `r.agg`）——
+   * 一次聚合同时打几个插件，总耗时说不出是谁慢，所以按插件各记一笔。
+   * 没记过就留空（如实，不编）。
+   */
+  const paintAgg = (r) => {
+    const agg = r.agg || {};
+    const ids = Object.keys(agg);
+    aggLine.textContent = '';
+    if (!ids.length) return;
+    aggLine.append(
+      '各插件最近一次聚合耗时：' +
+        ids
+          .map((id) => {
+            const a = agg[id] || {};
+            return `${id} 最慢一发 ${Math.round(Number(a.ms) || 0)}ms（${Number(a.sites) || 0} 站）`;
+          })
+          .join(' · ')
+    );
   };
 
   const paint = (r) => {
-    const d = r.detail || { rows: 0, bytes: 0, maxBytes: 0 };
+    const d = r.lines || { rows: 0, bytes: 0, maxBytes: 0 };
     out.textContent = '';
     out.append(
       `图片索引 ${r.image.rows} 条 / ${fmtBytes(r.image.bytes)}（上限 ${fmtBytes(r.image.maxBytes)}）` +
-        ` · 聚合详情 ${d.rows} 条 / ${fmtBytes(d.bytes)}（上限 ${fmtBytes(d.maxBytes)}，当期有效期 ${fmtDetailTtl(r)}）`
+        ` · 线路结果 ${d.rows} 条 / ${fmtBytes(d.bytes)}（上限 ${fmtBytes(d.maxBytes)}，当期有效期 ${fmtLineTtl(r)}）`
     );
+    paintAgg(r);
   };
   const load = async () => {
     try {
@@ -427,10 +451,10 @@ function cacheCard() {
               imageMaxMB: Number(cImgMB.value),
               /* 留空**不要**当成 0 —— 这个字段的 0 是"不缓存"，留空的意思是"用默认值"，
                * 所以留空发 undefined（JSON 会把它丢掉，后端按默认值算）。 */
-              detailTtlMinutes: cDetMin.value.trim() === '' ? undefined : Number(cDetMin.value),
+              linesTtlDays: cLineDays.value.trim() === '' ? undefined : Number(cLineDays.value),
               /* 同上：留空 = 用默认值（32MB），填 0 才是"不限" */
-              detailMaxMB: cDetMB.value.trim() === '' ? undefined : Number(cDetMB.value),
-              detailNeverExpire: cDetForever.checked,
+              linesMaxMB: cLineMB.value.trim() === '' ? undefined : Number(cLineMB.value),
+              linesNeverExpire: cLineForever.checked,
             },
           },
         },
@@ -448,7 +472,7 @@ function cacheCard() {
   clear.addEventListener('click', async () => {
     if (
       !confirm(
-        '清空本地缓存？\n\n图片索引与聚合详情快照都会重来（下一次点开会重新搜源；插件那边的元数据缓存不归这里管）。\n账号在另一个库里，不受影响、不用重新登录。'
+        '清空本地缓存？\n\n图片索引与线路结果都会重来（下一次点开会重新搜源；插件那边的缓存不归这里管）。\n账号在另一个库里，不受影响、不用重新登录。'
       )
     ) {
       return;
@@ -472,15 +496,16 @@ function cacheCard() {
       class: 'note',
       text:
         '缓存图片索引：客户端不带 tag 来要图时靠它答出"这张图在哪儿"，也让面板少找一次上游；' +
-        '另有一层「聚合详情」快照：把「这部片在源里有哪些线路、这一集定位到哪一条」存起来（客户端点一次播放会连问三遍同一件事，' +
+        '另有一层「线路结果」缓存：把「这部片在源里有哪些线路、这一集定位到哪一条」存起来（客户端点一次播放会连问三遍同一件事，' +
         '靠它省掉后两遍）；还有「站点测速」那份统计（站点表里那两列速度就是它）。清空不影响账号，也不用重新登录。' +
-        'TMDB 元数据与名字搜索另有缓存，那归元数据插件自己管（插件 → tmdb → 设置）。',
+        'TMDB 元数据、源插件的取数另有缓存，那归**插件自己**管（在各自的插件设置页看）。',
     }),
     el('p', {
       class: 'note',
       text:
-        '天数 / 分钟数填 0 = 不缓存；上限填 0 = 不限（不淘汰）。两个 0 意思不一样，别当成一回事。' +
-        '「聚合详情」勾了长期有效就不按分钟数过期（改了站点勾选 / 分数线这类设置会立刻换一份新的，不会读到旧结论）。',
+        '天数填 0 = 不缓存；上限填 0 = 不限（不淘汰）。两个 0 意思不一样，别当成一回事。' +
+        '「线路结果」勾了长期有效就不按天数过期（改了站点勾选 / 分数线这类设置会立刻换一份新的，不会读到旧结论）。' +
+        '这里改的只是**面板侧**这层缓存；插件自己那份在各自插件设置页里改。',
     }),
     el(
       'div',
@@ -494,16 +519,17 @@ function cacheCard() {
     el(
       'div',
       { class: 'row' },
-      el('span', { class: 'muted', text: '聚合详情（线路 + 定位）' }),
-      cDetMin,
-      el('span', { class: 'muted', text: '分钟 · 上限' }),
-      cDetMB,
+      el('span', { class: 'muted', text: '线路结果（线路 + 定位）' }),
+      cLineDays,
+      el('span', { class: 'muted', text: '天 · 上限' }),
+      cLineMB,
       el('span', { class: 'muted', text: 'MB' }),
-      el('label', { class: 'chk' }, cDetForever, '长期有效'),
+      el('label', { class: 'chk' }, cLineForever, '长期有效'),
       save,
       clear
     ),
-    out
+    out,
+    aggLine
   );
 }
 

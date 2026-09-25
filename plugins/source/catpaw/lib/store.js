@@ -2,7 +2,7 @@
 /**
  * 实例仓库：插件自己的数据目录里那份 `settings.json` 的读写 + 每个实例的目录管理。
  *
- *   data/settings.json                 实例清单 + 自动更新的开关与间隔
+ *   data/settings.json                 实例清单 + 自动更新的开关与间隔 + 缓存的两个旋钮
  *   data/instances/<id>/bundle/        本地部署时下载回来的源包（index.js 等）
  *   data/instances/<id>/runtime/       源包自己的数据目录（它写 db / 日志 / 弹幕配置的地方）
  *
@@ -21,7 +21,16 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const INSTANCES_DIR = path.join(DATA_DIR, 'instances');
 
 const MODES = ['local', 'remote'];
-const DEFAULT_SETTINGS = { instances: [], autoUpdate: false, autoUpdateHours: 12 };
+const DEFAULT_SETTINGS = {
+  instances: [],
+  autoUpdate: false,
+  autoUpdateHours: 12,
+  cacheTtlMinutes: 5,
+  cacheMaxMB: 64,
+};
+
+/** 不小于 0 的数字（`0` 是有意义的值 —— 不缓存 / 不限，所以不能用 `|| 默认值` 把它吃了） */
+const num = (v, dft) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : dft);
 
 function ensureDirs() {
   fs.mkdirSync(INSTANCES_DIR, { recursive: true });
@@ -32,6 +41,8 @@ function normalize(raw) {
     instances: Array.isArray(raw && raw.instances) ? raw.instances : [],
     autoUpdate: !!(raw && raw.autoUpdate),
     autoUpdateHours: Math.min(168, Math.max(1, Number(raw && raw.autoUpdateHours) || 12)),
+    cacheTtlMinutes: num(raw && raw.cacheTtlMinutes, DEFAULT_SETTINGS.cacheTtlMinutes),
+    cacheMaxMB: num(raw && raw.cacheMaxMB, DEFAULT_SETTINGS.cacheMaxMB),
   };
 }
 
@@ -163,6 +174,28 @@ function setAutoUpdate(patch) {
   return autoUpdateCfg();
 }
 
+/** 插件自己那份缓存的两个旋钮（有效期分钟 + 上限 MB）—— 0 分别表示"不缓存"与"不限" */
+function cacheCfg() {
+  const s = read();
+  return { ttlMinutes: s.cacheTtlMinutes, maxMB: s.cacheMaxMB };
+}
+
+function setCache(patch) {
+  const cfg = read();
+  if (patch && patch.cacheTtlMinutes !== undefined) {
+    const n = Number(patch.cacheTtlMinutes);
+    if (!Number.isFinite(n) || n < 0) throw new Error('缓存有效期取值不小于 0 分钟（0 = 不缓存）');
+    cfg.cacheTtlMinutes = n;
+  }
+  if (patch && patch.cacheMaxMB !== undefined) {
+    const n = Number(patch.cacheMaxMB);
+    if (!Number.isFinite(n) || n < 0) throw new Error('缓存上限取值不小于 0 MB（0 = 不限）');
+    cfg.cacheMaxMB = n;
+  }
+  write(cfg);
+  return cacheCfg();
+}
+
 module.exports = {
   DATA_DIR,
   SETTINGS_FILE,
@@ -182,4 +215,6 @@ module.exports = {
   runtimeDir,
   autoUpdateCfg,
   setAutoUpdate,
+  cacheCfg,
+  setCache,
 };
