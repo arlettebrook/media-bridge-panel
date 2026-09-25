@@ -456,6 +456,6 @@ data/emby/homepage/
 | `server/modules/emby/home/routes.js` | 上表 8 个面板自用端点（挂载在 501 通配之前） |
 | `server/modules/emby/home/example.plugin.js` | 参考插件 |
 | `server/modules/emby/home/plugin-dev.skill.md` | **面向用户**的插件开发文档（面板「下载开发文档」发出去的那份；本文是开发者契约，两份分工见「九」） |
-| `server/core/tmdb.js` + `server/modules/emby/tmdb.js` | 前者是**协议层**（`get()` / `search()` / 图片拼串 / `test()`，配置读 `panel.json`），后者是 emby 专有层；`get()`（任意 TMDB 路径，`spawn.js` 代插件调用，带元数据缓存）、`imageBase()`（图床基地址，随 job 下发给沙箱）、`imageUrlOf()`（详情/季集拼图地址用） |
+| `plugins/metadata/tmdb/` + `server/modules/emby/tmdb.js` | 前者是**元数据插件**（协议层 + 缓存 + 它自己的设置，动作 `lookup` / `season` / `search` / `get` / `test`），后者是 emby 侧的转发与 DTO 适配层：`get()`（任意 TMDB 路径，`spawn.js` 代插件调用 → 插件动作 `get`）、`imageBase()`（图床基地址，取自插件的「注册」申报，随 job 下发给沙箱）、`imageUrlOf()`（详情/季集拼图地址用） |
 | `public/modules/emby/home.js` | 面板「首页插件」页：上传 / 启用 / 参数 / 预览 / 删除 |
 | `data/emby/homepage/` | 运行时数据（插件代码、清单、私有存储） |

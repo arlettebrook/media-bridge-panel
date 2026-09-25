@@ -5,10 +5,10 @@
  *   image_index  条目 Id → 图片位置（客户端不带 tag 来要图时用）
  *
  * —— 缓存按「谁使用」切分，而不是按数据来源切分 ——
- *   · `tmdb_cache`（TMDB 元数据）→ 搬到 **core** 的 `data/cache/tmdb.db`：它是 TMDB 数据，
+ *   · `tmdb_cache`（TMDB 元数据）→ 已随元数据插件化搬进**插件自己的数据目录**：它是 TMDB 数据，
  *     与名字索引同类；
- *   · `name_index`（名字 → 搜索结果）→ core，**emby 的搜索端点用**（聚合层改用本地打分后
- *     就不再碰它），放 core 是为了不把 TMDB 协议层留在 emby 里；
+ *   · `name_index`（名字 → 搜索结果）→ 同样搬进了元数据插件（emby 的搜索端点经转发层拿结果，
+ *     缓存命不命中归插件自己管）；
  *   · `image_index` 留下：写入点在 emby（`baseItem()` 出 tag 那一刻）、读在 emby 的图片端点，
  *     agg 从不碰它。⚠️ 并且它里头的图**不全是 TMDB 的** —— 插件/首页模块给的自定义图地址
  *     会原样存绝对 URL（TMDB 图床的那些才剥成无头相对路径，见 `tmdb.splitImageUrl`），

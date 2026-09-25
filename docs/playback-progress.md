@@ -183,7 +183,7 @@ CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, u
 |---|---|---|
 | **A（推荐）写时快照** | 写端点里**只在该 item 还没有快照时** resolve 一次（`tmdb.lookup`，通常命中已有缓存），把最小字段存进 `snapshot` | 写路径多一次（一次性的）解析；读路径完全不碰上游，行为可预测 |
 | B 读时 resolve | `Resume` 时按坐标现查，走 `tmdb` 缓存 | 冷缓存时**会真的打上游**；`Resume` 是客户端高频端点 |
-| C 只读缓存 | 只读缓存，查不到就不列 | 需要在 `core/tmdb.js` 新增 `cacheOnly`（现在只有 `noCache`，**没有**"只读"的口子） |
+| C 只读缓存 | 只读缓存，查不到就不列 | 需要在元数据插件里新增 `cacheOnly`（现在只有 `noCache`，**没有**"只读"的口子；见 `plugins/metadata/tmdb/lib/tmdb.js`） |
 
 **快照要存的最小字段**（够拼一条列表项）：`Name` / `Type`(`Episode`\|`Movie`) / `ProductionYear` /
 `posterUrl` / `runTimeTicks` / 剧集还需 `SeriesId` / `SeriesName` / `ParentIndexNumber` / `IndexNumber`。
@@ -238,7 +238,7 @@ CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, u
 | `server/modules/emby/service.js` | 新增 `recordPlayback()`；改 `getResume` / `getNextUp` / `getItems` 的 Filters 分支 / `itemsWillReturnData`；`baseItem` 与各 DTO 的 `UserData` 注入；`userDataOf(accountId,itemId)`；`authorize` 的回账号通道 |
 | `server/modules/emby/db.js` | `playback` 表 + `SCHEMA_VERSION=3`；`upsertPlayback` / `listResume` / `listPlayed` / `userDataOf` / `removePlaybackOfAccount` |
 | `server/modules/emby/log.js` | `bodyBrief()`（掩码 + 限长 300）并导出 |
-| `server/core/tmdb.js` | 仅当选 §5.2 的 C 方案：加 `cacheOnly` |
+| `plugins/metadata/tmdb/lib/tmdb.js` | 仅当选 §5.2 的 C 方案：加 `cacheOnly`（元数据缓存现在归插件） |
 | `docs/adr/0023-*.md`（新）、`docs/adr/README.md`、`docs/emby-compat.md`、`docs/develop.md` | 决策与端点清单同步（`Sessions/Playing*` 现在**根本没登记**在缺口清单里，顺手补上） |
 | `CHANGELOG.md` | `[Unreleased]` 记一条 |
 

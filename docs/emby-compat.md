@@ -275,7 +275,7 @@ docker logs -t media-bridge-panel              # 带时间戳
 | tmdb id 不合法 | `400` |
 
   响应体形如 `{"error":"连不上 TMDB：ECONNRESET","code":"NETWORK","tmdb":"tv/95350"}`（`code` 是内部错误分类，便于日志对照）。
-  **网络类失败会先立即重试一次**（`core/tmdb.js` 的 `requestWithRetry`，日志里是 `↻ tmdb NETWORK，立即重试一次：…`）——
+  **网络类失败会先立即重试一次**（元数据插件里 `plugins/metadata/tmdb/lib/tmdb.js` 的 `requestWithRetry`，日志里是 `↻ tmdb NETWORK，立即重试一次：…`）——
   经过代理的网络里 TMDB 链路可能不稳定（实测会在握手阶段被中断），重试能把单次抖动的成功率拉回来；
   **确定性失败（401/404）不重试**（重试没有意义），失败仍然**不写缓存**。
 - **兼容取向**：握手对外自称 `Emby Server 4.8.0.0` —— 客户端按 Emby 的版本号判断能力，这是刻意的兼容选择。
@@ -307,7 +307,7 @@ docker logs -t media-bridge-panel              # 带时间戳
     - **鉴权**：它**真会出数据** ⇒ `itemsWillReturnData()` 里已加上它，无 token 一律 **401**（实测 `curl` 不带 token → 401）。
     - 实测（路由器）：`斗破苍穹` → **14 条**（剧 + 电影，`tmdb_79481_tv` / `tmdb_1206282_movie` …，均带图、可点进详情）；
       `律师` + `IncludeItemTypes=Series` + `Limit=5` → 20 条里切 5 条；不存在的词 → **0 条**；
-      第 1 次 250~1300ms（看 TMDB 抖动）→ **第 2 次 111ms**（走 `name_index`，见「本地缓存」那条）。
+      第 1 次 250~1300ms（看 TMDB 抖动）→ **第 2 次 111ms**（走插件那边「名字 → 搜索结果」的缓存，见「本地缓存」那条）。
       ⇒ 客户端侧已生效：日志里紧接着出现 `Items/tmdb_241007_tv/Images/Primary`、`tmdb_1599184_movie` 等**取图请求**（搜索卡片在渲染）。
 
   - **`AnyProviderIdEquals=tmdb.{id}`**：**按外部 id 搜一条**。
@@ -694,8 +694,7 @@ docker logs -t media-bridge-panel              # 带时间戳
 | POST | `/api/emby/accounts` | 新增账号 `{username,password}` → 200 `{account}`；400 空/用户名>64/密码<6；409 用户名已存在 |
 | PUT | `/api/emby/accounts/{id}` | 改 `{username?,password?}`（只传 password 就是改密）→ 200；400 没内容可改/格式不对；404；409 |
 | DELETE | `/api/emby/accounts/{id}` | 删除（**允许删最后一个**，删光后退化成"还没有账号 → 登录 401"）→ 200 `{ok,remaining}`；404 |
-| POST | `/api/panel/tmdb/test` | 测 TMDB 设置：先 `GET {apiBase}/configuration` 验 v4 Token，再实查一个 tmdb id（**两步都绕缓存**）。**已从 `/api/emby/tmdb/test` 搬到面板层**（配置跟着走了） |
-| GET / DELETE | `/api/panel/cache` | **缓存用量 / 清空**：跨两个库一把抓（`data/cache/tmdb.db` 的 `tmdb_cache`+`name_index`、`data/emby/cache.db` 的 `image_index`），走 `core/cachedb.js` 的 `statsAll()`/`clearAll()`。**取代了 `/api/emby/cache`**（缓存分家后"清空"必须只有一个入口） |
+| GET / DELETE | `/api/panel/cache` | **缓存用量 / 清空**：面板这边那两个库一把抓（`data/cache/detail.db` 的 `detail_cache`、`data/emby/cache.db` 的 `image_index`），走 `core/cachedb.js` 的 `statsAll()`/`clearAll()`。**取代了 `/api/emby/cache`**（缓存分家后"清空"必须只有一个入口）。⚠️ 元数据插件的缓存不在这里，它自己在插件的数据目录里 |
 | ANY | `/api/emby/home/**` | **首页插件**：`GET/POST /plugins`、`GET/PUT/DELETE /plugins/{id}`、`POST /plugins/{id}/rows/{rowId}/run`、`GET /example`、`GET /skill`（开发文档下载）。上传单文件 JS 插件产出「首页行」，**已接客户端端点**（`Views` / `Items?ParentId=` / `Items/Latest` / 库封面 / 「推荐」查询 → `feed` 行，见「五」）；契约见 [emby-home-plugin.md](emby-home-plugin.md) |
 | GET / DELETE | `/api/logs` | **面板日志**（属**面板层**，不是 emby）：`GET ?since=&limit=` 增量取内存缓冲、`DELETE` 清空。给「面板设置 → 日志」页用，契约见「二」 |
 
@@ -709,13 +708,14 @@ docker logs -t media-bridge-panel              # 带时间戳
 
 ### TMDB 设置（按 tmdb id 反查元数据用）
 
-- **归面板层**：存 `data/settings/panel.json` 的 `tmdb.{token,apiBase,imageBase,language}`，
-  面板「面板设置 → 设置 → TMDB 设置」卡读写（原先在 `emby.json`，启动时自动搬迁、token 不丢）。
-  **为什么搬**：它跟"名字 → 搜索结果"这张表同类，且要走同一个 `search()`（emby 的搜索端点用；聚合层已不再用它），
-  而依赖是单向的 `emby → agg → source` —— agg 不能读 emby 的配置。协议层在 `core/tmdb.js`。
+- **归元数据插件**：`tmdb` 元数据插件（`plugins/metadata/tmdb/`）自己存 token / 基地址 / 语言 /
+  它自己的缓存，落在**插件自己的数据目录** `plugins/metadata/tmdb/data/settings.json`；
+  UI 是插件自己的设置页（「插件」页 → tmdb → 「设置」），连通性自检也在那一页（动作 `test`）。
+  **面板不读也不写这份设置** —— 它只从插件的「注册」动作里拿**图片基地址**（替客户端取图要拼串，
+  见 `server/modules/emby/meta.js`）。决策见 [adr/0031](adr/0031-metadata-by-domain.md)。
 - **凭证只支持 v4 API Read Access Token**（`Authorization: Bearer`）；v3 `api_key` 不支持 —— 两种凭证在 TMDB 侧权限完全相同，token 是官方推荐且不会出现在 URL/日志里。
-- `apiBase` / `imageBase` 留空即用官方（`https://api.themoviedb.org/3`、`https://image.tmdb.org/t/p`），直连不通时可填反代/镜像；`validate` 只校验非空时必须是 `http(s)://`（校验也搬到 panel 的 settings.validate 了）。
-- Token 以**明文**落在 `data/settings/panel.json`（本地面板；含凭证的 `data/` 已在 `.gitignore`）。
+- `apiBase` / `imageBase` 留空即用官方（`https://api.themoviedb.org/3`、`https://image.tmdb.org/t/p`），直连不通时可填反代/镜像；插件设置页只校验非空时必须是 `http(s)://`。
+- Token 以**明文**落在插件的数据目录里（本地面板；含凭证的 `data/` 已在 `.gitignore`）。
 
 ### TMDB 出口全清单（做缓存/限速/记账前必看）
 
@@ -726,16 +726,17 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 | 1 | 详情/影剧反查 | `service.tmdbItemDto` → `tmdb.lookup()` | api.themoviedb.org | 是 |
 | 2 | 季/集反查 | `service.getEpisodes` → `tmdb.lookupSeason()` | api.themoviedb.org | 是 |
 | 3 | 插件 `Catpaw.tmdb.get` | `home/sandbox.js` →RPC→ `home/spawn.js` → `tmdb.get()`（注入 emby 的元数据缓存） | api.themoviedb.org | 是 |
-| 4 | 面板「连通性测试」 | `core/tmdb.test()`（打 `/configuration` + 实查一个 id，**都绕缓存**） | api.themoviedb.org | 是 |
+| 4 | 插件设置页的「测试连接」 | 插件的 `test` 动作（打 `/configuration` + 实查一个 id，**都绕缓存**） | api.themoviedb.org | 是 |
 | 5 | **图片端点取图** | `routes.js` 的 `imagesByType` 直接 `fetch(tag 里的 URL)` | **image.tmdb.org** | 否 |
 | 6 | **插件 `Catpaw.http`** | `home/sandbox.js` →RPC→ `home/spawn.js` 裸 `fetch` | 任意 URL | 否 |
 
 统一的底层是 `server/core/upstream.js` 的 `request(baseUrl, path, {timeout, headers})` —— **表中第 1~4 条（即全部 API 调用）都走它**（第 1~3 条经 `emby/tmdb.js` 的缓存包装）。
 
-- **已删除的一条**（原表中的聚合层「别名回退」反查）：那时**只在"站源没有同名"这一条失败路径上**才会打（每次最多 5 个候选名），正常请求一次都不打；它走 `core/tmdb.js` 的 `search`，该函数带进程内小缓存。已删 —— 挑片判据换成聚合层本地打分（`agg/match.js`），聚合层不再出网；`core/tmdb.search()` 仍归 emby 的搜索端点用。
+- **已删除的一条**（原表中的聚合层「别名回退」反查）：那时**只在"站源没有同名"这一条失败路径上**才会打（每次最多 5 个候选名），正常请求一次都不打；它走的那个按名字搜索的接口带着缓存。已删 —— 挑片判据换成聚合层本地打分（`agg/match.js`），聚合层不再出网；按名字搜索现在只服务 emby 的搜索端点，经元数据插件的「搜索」动作。
 
-**第 1~4 条 = 「API 调用」**（消耗配额）：**100% 由两个 tmdb 客户端独占**（`core/tmdb.js` 是协议层、
-`modules/emby/tmdb.js` 是 emby 专有层）。
+**第 1~4 条 = 「API 调用」**（消耗配额）：**100% 由元数据插件里的 TMDB 客户端独占**
+（`plugins/metadata/tmdb/lib/tmdb.js` 是协议层 + 缓存，`lib/meta.js` 是归一化；
+`server/modules/emby/tmdb.js` 只做转发与 DTO 拼装）。
 插件也绕不过去 —— 因为沙箱里**根本没有 token**（`home/spawn.js` 随 job 只下发
 `env: { tmdbImageBase }`，就是拼图用的图床基地址）。插件自己拼 `api.themoviedb.org` 也是 401。
 ⇒ 要给 API 调用做**统一记账/限速/缓存**，`tmdb.js` 是唯一插入点，做一次全覆盖。
@@ -751,30 +752,35 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 > ⚠️ **不要把第 5 条（取字节）算进「TMDB 请求数」**。讨论「按 Id 反查」的代价时算的是**第 1~4 条**那张账
 > （实测 340 次图片请求 ≈ 55 次 API 调用）；第 5 条的字节流量**本来就有**，且与配额无关。
 
-### 本地缓存（**两个库**：`data/cache/tmdb.db` + `data/emby/cache.db`）
+### 本地缓存（面板两个库：`data/cache/detail.db` + `data/emby/cache.db`；元数据另有插件自己的一份）
 
 **按"谁用"分家**（判据不是"是不是 TMDB 数据"—— 图片索引里混着插件给的自定义图地址，
 按来源切对它不成立）：
 
 | 表 | 存什么 | 写入时机 | 谁读 | 库 |
 |---|---|---|---|---|
-| `tmdb_cache` | **元数据类** TMDB 响应（`/movie/{id}`、`/tv/{id}`、`/tv/{id}/season/{n}`） | `core/tmdb.js` 的 `requestCached` 里，成功响应才写 | 同上（lookup / lookupSeason / 插件 get 三个调用点共用） | `data/cache/tmdb.db` |
-| `name_index` | **名字 → TMDB 搜索结果**（`search/tv\|movie`，键 `<类型>\|<语言>\|<名字>`，值=整条 `results[]`） | `core/tmdb.js` 的 `search()`，**只写有结果的成功响应** | emby 的搜索端点（聚合层已不再用它） | 同上 |
+| `detail_cache` | 聚合线路结果（影视名 + 季集 → 线路与定位） | `agg/cache.js` | 聚合层与 emby 层 | `data/cache/detail.db` |
 | `image_index` | 条目 Id → 图片位置（无头相对路径或绝对 URL） | `baseItem()` 里出 tag 的那一刻 | 图片端点（没带 tag 时） | `data/emby/cache.db` |
 
-- **为什么这么切**：`name_index` 是 agg 与 emby **共用**的，留在 emby 就会让 agg 反向依赖 emby
-  （依赖是单向的 `emby → agg → core`）；`image_index` 的读写都在 emby，agg 从不碰它，留下即可。
+**元数据与名字搜索的缓存在插件那边**（表 `meta` 与 `names`，一条一个文件，落
+`plugins/metadata/tmdb/data/cache/`）：什么进缓存、多久过期、上限多少，全由插件自己定 —— 面板不干预
+（见 [adr/0032](adr/0032-cache-two-levels.md)）。判据与口径与原先那份一致（元数据类才缓存、
+只缓存成功响应、名字负结果不存）。
+
+- **为什么这么切**：缓存归**产生数据的人** —— 元数据归插件（它最清楚自己的数据什么时候会变），
+  面板只留自己用的那两份（图片索引的读写都在 emby，聚合线路结果归 agg）。
   通用设施（开库 / TTL / 按字节 LRU / 统计 / 清空）下沉到 **`server/core/cachedb.js`**，
-  两个库各自建一个 store 复用它 —— 不这么抽，TTL 与淘汰会变成两份必然漂移的实现。
-- **设置、用量、清空统一在面板层**：`cache.*` 存 `panel.json`（UI 在「面板设置 → 缓存设置」），
-  端点 `GET|DELETE /api/panel/cache`（**原 `/api/emby/cache` 已删**）—— 缓存跨两个库了，
-  "清空"必须只有一个入口，散在各模块里迟早漏清一处。清的是 `tmdb_cache` + `name_index` + `image_index`。
-- **`name_index` 的口径**：TTL **6 小时**、上限 **2MB**（`core/cachedb.js` 的 `NAME_TTL_MS` / `NAME_MAX_BYTES`，
-  不进面板设置）；**负结果（空数组）不存** —— 存了会让新上线的别名条目永远看不见；
-  TTL 故意不拉长：将来 emby 的搜索端点也要用它，"现在有哪些"要新鲜。
+  面板这边两个库各自建一个 store 复用它 —— 不这么抽，TTL 与淘汰会变成两份必然漂移的实现。
+- **面板这边的设置、用量、清空统一在面板层**：`cache.*` 存 `panel.json`（UI 在「面板设置 → 缓存设置」），
+  端点 `GET|DELETE /api/panel/cache`（**原 `/api/emby/cache` 已删**）—— 面板这边的缓存跨两个库，
+  "清空"必须只有一个入口，散在各模块里迟早漏清一处。清的是 `detail_cache` + `image_index`；
+  元数据插件那份缓存由它自己那页管（它自己清）。
+- **名字搜索缓存的口径**（现在是插件里那张 `names`）：TTL **6 小时**、上限 **2MB**（写死在插件里，
+  不是要调的旋钮）；**负结果（空数组）不存** —— 存了会让新上线的别名条目永远看不见；
+  TTL 故意不拉长：emby 的搜索端点要用它，"现在有哪些"要新鲜。
   它从"进程内 Map"改成落盘，直接原因是 **dev 模式 `--watch` 一重启就全丢**，
   刚查过的名字马上又打一遍上游、正好撞上 TMDB 的抖动窗口（实测：第 1 次 1.08s、第 2 次 3ms）。
-- **网络失败会立即重试一次**（`core/tmdb.js` 的 `requestWithRetry`）：路由器上 TMDB 链路是抖的
+- **网络失败会立即重试一次**（插件里 `lib/tmdb.js` 的 `requestWithRetry`）：路由器上 TMDB 链路是抖的
   （实测会在握手阶段被中断），而一次搜索要连打多个名字 —— 全撞上坏窗口的概率不低，
   表现就是"版本列表空"。**只重试网络/超时**（401/404 这类确定性失败重试没意义）；
   失败照旧**不缓存**，所以重试是唯一能压住抖动的动作。
@@ -782,16 +788,16 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 - **删掉的孤儿表 `item_seen`**（`item_id` + `first_seen`，84 行）：它是"用**条目首次见到的时刻**
   当 `DateCreated`"那次尝试的残留，那个口径**已被否**（改用 TMDB 发行日期，见「五」）。
 - **其后又删掉两张**：`view_seen`（库首见时刻 —— 库 `DateCreated` 改占位值后失去唯一用途，
-  见「五」）与旧的 `tmdb_cache`（已搬到 `data/cache/tmdb.db`）。现在 `emby/cache.db` 里**只剩 `image_index`**。
+  见「五」）与旧的 `tmdb_cache`（已随元数据插件化搬进插件的数据目录）。现在 `emby/cache.db` 里**只剩 `image_index`**。
   ⇒ 规矩照旧：**不可再生的表（`*_seen` 丢了就再也算不出来）做实验时要么叫 `_tmp`、要么删干净**。
 
 **为什么图片索引独立文件、不并进 `emby.db`**：`emby.db` 存账号（scrypt 哈希），它的两句话是"写入量极小 + 文件级备份不漏数据"（DELETE journal）与"chmod 0600"。缓存正好相反：**高写入、可随时删掉重建**。混在一起会让备份把可丢的缓存混进不可丢的账号，还会在缓存写盘时锁住整个库、挡住登录。
 ⇒ 运维上就一句话：**缓存出问题就删掉重建，账号不受影响、不用重新登录**（面板「缓存设置」里有「清空缓存」按钮）。
 ⇒ 因此两个缓存库反过来**用 WAL + `synchronous=NORMAL`**（缓存要的是写吞吐，掉电丢几条无所谓），与 `emby.db` 的取舍**正好相反**，这是刻意的。
 
-**只缓存元数据，不缓存榜单**：判据是**请求的性质**而非"谁问的"（`core/tmdb.js` 的 `isMetaPath`，正则要求 id 是**纯数字**，否则 `/movie/top_rated` 会被误伤）。所以榜单/搜索/`/configuration` 一律不进 `tmdb_cache` —— 榜单归首页模块自己的 `cacheDuration` 管；`/configuration` 是连通性测试，缓存了会让自检结果失真。
+**只缓存元数据，不缓存榜单**：判据是**请求的性质**而非"谁问的"（插件里 `lib/tmdb.js` 的 `isMetaPath`，正则要求 id 是**纯数字**，否则 `/movie/top_rated` 会被误伤）。所以榜单/搜索/`/configuration` 一律不进元数据缓存 —— 榜单归首页模块自己的 `cacheDuration` 管；`/configuration` 是连通性测试，缓存了会让自检结果失真。
 顺带一个好处：插件经 `Catpaw.tmdb.get` 问**元数据**也享受缓存，而榜单照旧不缓存。
-（`name_index` 是**另一张表**：它缓存的是"检索结果"，与 `isMetaPath` 那条判据无关，见上面那行。）
+（名字搜索缓存是**另一张表**（`names`）：它缓存的是"检索结果"，与 `isMetaPath` 那条判据无关，见上面那行。）
 
 **只缓存成功响应**：401/404/5xx/超时一律不写。否则一次网络抖动会把"404"钉在缓存里，部署者改了 token 还是错的。
 
@@ -903,18 +909,18 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 | `server/modules/agg/match.js` | **挑片判据（唯一一处）**：片名清洗（剥更新话术/画质/体积/年份/括号/分类后缀、去 emoji）+ 打分（名字 0.7 / 季集 0.2 / 年份 0.1，缺项不进分母）+ 两道闸门（名字硬拒 / 分数线可关）+ 按分数「取前 N」（**不去重**：同名照收，只统计）。取代了原来的「精确同名 + TMDB 别名回退」 |
 | `server/modules/agg/api.js` | **聚合层的进程内调用面**：`loadSites()`、`detail()`（**内部含搜索**，可用 site+vodId 走快路径）、`play()`（→ 播放地址，PlaybackInfo 会用）。路由层（`/api/agg/detail` / `/play`）与 emby 层**共用这一套**；失败统一 `{ok:false, error:{code,status,message}}` |
 | 聚合层契约（[develop.md](develop.md) 的「聚合层（agg）」一节） | `/api/agg/search`、`/api/agg/detail`、`/api/agg/play` 的入参、出参与错误码 |
-| `server/core/tmdb.js` | **TMDB 协议层（共享）**：默认值与 `effective()` 合并、`current()`（读 `panel.json` 的 `tmdb.*`，**读配置的唯一入口**）、通用 `get()`（`noCache` 绕缓存，连通性自检用）、**响应缓存**（从 emby 搬来）：`isMetaPath()` / `cacheKey()` / `requestCached()`（落 `data/cache/tmdb.db` 的 `tmdb_cache`）、`requestWithRetry()`（**网络失败立即重试一次**）、`search()`（`search/tv\|movie`，结果落同库的 `name_index`，**emby 搜索端点用**；聚合层已改本地打分、不再调它）、图片拼串（`imageUrl` / `imageUrlOf` / `imageBase`）、`test()`（连通性 + 实查一个 id，两步都绕缓存）。**已从 emby 层拆出来** —— 聚合层也要用 TMDB，而 `emby → agg` 是单向依赖 |
-| `server/core/cachedb.js` | **缓存的通用设施**（从 `emby/cache.js` 抽出来）：`createStore({label,dir,file,tables})`（**同 label 单例**：一库一句柄，避免 WAL 互锁）、`get`/`put`/`enforce`（TTL + 按字节 LRU）、`stats`/`clear`/`sweep`，以及跨 store 的 `statsAll()` / `clearAll()` / `sweepAll()`（面板的用量、清空、设置变更后扫一遍都走它们）；`cfg()`（缓存策略**只此一处**，读 `panel.json` 的 `cache.*`）、`NAME_TTL_MS`/`NAME_MAX_BYTES`（名字索引的固定口径）。WAL + `synchronous=NORMAL` |
-| `server/modules/emby/tmdb.js` | **emby 专有那一层**（协议、配置与**缓存**都在 `core/tmdb.js`）：`itemId()`/`parseItemId()`（条目 Id 派生与解析，**互逆且必须挨着**，支持 `_{tv\|movie}[_s{n}][_e{m}]`）、`lookup()` 反查剧/影元数据（各端点共用，带 `withSeasons` 开关）、`lookupSeason()` 反查某一季的分集（season 接口）、`get()`（给首页插件的任意路径 GET，直接调 core，**不再注入任何缓存**）、`httpStatusOf()`（失败原因 → 回的 HTTP 码，**只此一处**）；图片索引：`splitImageUrl()`（剥成无头相对路径）/ `joinImageUrl()`（按当前基地址拼回） |
+| `plugins/metadata/tmdb/` | **元数据插件（域 `tmdb`）**：`lib/tmdb.js` = TMDB 协议层 + 落盘缓存（`isMetaPath()` / `cacheKey()` / `requestCached()` / `requestWithRetry()` / `search()` / 图片拼串 / `test()`，表 `meta` 与 `names` 落它自己的 `data/cache/`）、`lib/meta.js` = 归一化（rich 字段 / 别名回退 / 季集）、`lib/settings.js` = 它自己的设置（token / 基地址 / 语言 / 缓存策略）、`ui/` = 它自己的设置页；动作 `register` / `lookup` / `season` / `search` / `get` / `test` / `http`。**面板不读它的设置**，只从「注册」拿图片基地址（契约第六节，决策见 [adr/0031](adr/0031-metadata-by-domain.md)） |
+| `server/core/cachedb.js` | **缓存的通用设施**（从 `emby/cache.js` 抽出来）：`createStore({label,dir,file,tables})`（**同 label 单例**：一库一句柄，避免 WAL 互锁）、`get`/`put`/`enforce`（TTL + 按字节 LRU）、`stats`/`clear`/`sweep`，以及跨 store 的 `statsAll()` / `clearAll()` / `sweepAll()`（面板的用量、清空、设置变更后扫一遍都走它们）；`cfg()`（缓存策略**只此一处**，读 `panel.json` 的 `cache.*`）。WAL + `synchronous=NORMAL`。⚠️ 元数据与名字搜索的缓存**不在面板**（随插件走，见 `plugins/metadata/tmdb/`） |
+| `server/modules/emby/tmdb.js` | **emby 专有那一层**（取数已搬进插件，这里只留 DTO 要的那点东西）：`itemId()`/`parseItemId()`（条目 Id 派生与解析，**互逆且必须挨着**，支持 `_{tv\|movie}[_s{n}][_e{m}]`，前缀来自 `core/providers.js`）、`lookup()` / `lookupSeason()` / `search()` / `get()`（转发给插件，并把插件那套域中立的字段名翻回 `tmdbId`/`mediaType` 这些老叫法）、`httpStatusOf()`（失败原因 → 回的 HTTP 码，**只此一处**）；图片：`imageUrlOf()`（基地址来自插件的域声明）、`splitImageUrl()`（剥成无头相对路径）/ `joinImageUrl()`（按当前基地址拼回） |
 | `server/modules/emby/cache.js` | emby 自用的缓存（**独立** SQLite `data/emby/cache.db`，与账号库 `emby.db` 分开）：**只剩 `image_index`**（条目 Id → 图片位置，含插件给的自定义图地址）；`getImage`/`putImage`、`cfg()`（转调 `core/cachedb.js`）、`sweepFromSettings()`。`tmdb_cache` 与 `view_seen` 已搬走/删除（见上面「本地缓存」那条）；统计与清空**不在这里**（面板层统一，见 `core/cachedb.js`） |
 | `server/modules/emby/log.js` | 请求日志（**每请求一行，不筛**）：`logResult` / `logMissing`（501 一行 + `logSeq`）/ `countOf`（只给日志数条数）/ `queryBrief` / `clientTag`；敏感信息掩码在 `queryBrief` 与 `logMissing` 里（见「二」） |
 | `server/core/logbus.js` | 日志总线：`install()` 包一层 `console.log/warn/error`（**先透传 stdout，再入内存环形缓冲**）、按行拆分、单条截断 1000 字符、固定条数（默认 500，`panel.logMax` 可调）；`list()`/`clear()`/`resize()`/`stats()`。**纯内存、不落盘**（长期留档交给 docker 的 json-file）。在 `server.js` 里**加载模块之前**装（见「二」） |
 | `server/modules/panel/routes.js` + `public/modules/panel/logs.js` | 日志页的数据口与页面：`GET /api/logs?since=&limit=`（增量）、`DELETE /api/logs`（清空）；页面「面板设置 → 日志」带暂停/清空/复制/级别过滤，增量轮询 + `isConnected` 守卫（见「二」） |
 | `server/modules/emby/index.js` | 模块清单：`upstream: 'agg'`、设置项（`serverName` / `imageKey` / 账号空壳）与校验（服务器名长度）。**`play.filter` 已搬到聚合层**（`agg.json` 的 `lineFilter`，UI 在「聚合设置 → 聚合参数」），那份校验也跟着走了；`play.mode`（随"面板代理"一起删）、`tmdb.*` 与 `cache.*` 都不在这里了；这里也不再需要"放行老值"的兼容校验 —— 校验里没有那个键，盘上留着也不挡保存 |
-| `server/modules/panel/index.js` | 面板层设置与钩子：`logMax`（改了就 `resize`）、`tmdb.*`、**`cache.*`**（`onSettingsChange` 里调 `cachedb.sweepAll()` 落实新上限） |
+| `server/modules/panel/index.js` | 面板层设置与钩子：`logMax`（改了就 `resize`）、**`cache.*`**（面板这边那两份缓存；`onSettingsChange` 里调 `cachedb.sweepAll()` 落实新上限）。⚠️ `tmdb.*` 已不在面板层（归元数据插件） |
 | `public/modules/emby/setup.js`（「Emby → 连接设置」页） | **两张卡**：**服务器名** / **账号管理（多账号：列表 + 弹窗新增 + 改密 + 删除）**。（原来的「播放设置」卡整张撤掉：拉流一律 302 没有可选项、线路过滤搬到「聚合设置 → 聚合参数」。）**聚合地址不显示**（就是本面板自己，没得填）；TMDB 与缓存设置已搬到面板设置页 |
-| `public/modules/panel/settings.js`（「面板设置」页） | 版本与更新（**更新内容用弹窗展示**，含 GitHub 上那个 Release 的链接）/ 备份还原 / **TMDB 设置** / **缓存设置**（用量 + 上限 + 清空，端点 `GET\|DELETE /api/panel/cache`）/ 面板密码 / **关于**（名称、版本、仓库地址 —— 地址取自 `GET /api/panel/info`） |
+| `public/modules/panel/settings.js`（「面板设置」页） | 备份还原 / **缓存设置**（用量 + 上限 + 清空，端点 `GET\|DELETE /api/panel/cache`）/ **站点测速**（开关与间隔）/ 面板密码。⚠️ **TMDB 设置已不在这一页**（归元数据插件自己的设置页：「插件」→ tmdb → 「设置」） |
 | `data/settings/emby.json` | `account`（**只剩空壳**，账号已搬到 sqlite）、`serverId`、`imageKey`（`tmdb.*` 与 `cache.*` 搬到 `panel.json`；`play.filter` 搬到 `agg.json` 的 `lineFilter`，盘上那两个老键既不读也不校验） |
-| `data/settings/panel.json` | 面板监听参数、`logMax`、`modules`、**`tmdb.{token,apiBase,imageBase,language}`**、**`cache.{tmdbTtlDays,tmdbMaxMB,imageTtlDays,imageMaxMB}`**（都在启动时从 `emby.json` 自动搬迁、数值不丢） |
+| `data/settings/panel.json` | 面板监听参数、`logMax`、`modules`、`speedTest*`、**`cache.{imageTtlDays,imageMaxMB,detailTtlMinutes,detailNeverExpire,detailMaxMB}`**。⚠️ `tmdb.*` 已不在这里（归元数据插件自己的 `data/settings.json`）；盘上留着老键也没人读 |
 | `data/emby/emby.db` | 客户端登录账号表（内置 sqlite；密码为 scrypt 哈希）。**「配置备份/还原」不包含它**（`backup.js` 只打包 `settings/`）—— 还原备份后账号要重建 |
 

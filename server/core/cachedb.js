@@ -2,11 +2,13 @@
 /**
  * 通用本地缓存（Node 内置 `node:sqlite`，零依赖）—— **所有缓存表的唯一设施**
  *
- * 由 `modules/emby/cache.js` 抽出：缓存不再只归 emby 用，
- * TMDB 元数据缓存与「名字 → 搜索结果」索引要被 emby **和**聚合层共用，
- * 而依赖是单向的 `emby → agg → core` —— agg 不能去读 emby 的东西。
+ * 由 `modules/emby/cache.js` 抽出：缓存不止一个调用方 ——
+ * 图片索引归 emby、聚合线路结果归 agg，而依赖是单向的 `emby → agg → core`。
  * 所以「开库 / TTL / 按字节 LRU 淘汰 / 统计 / 清空」这套通用能力放在 core，
- * 各有各策略的调用方（`core/tmdb.js`、`modules/emby/cache.js`、`modules/agg/cache.js`）各自建一个 store。
+ * 各有各策略的调用方（`modules/emby/cache.js`、`modules/agg/cache.js`、`modules/agg/site-stats.js`）
+ * 各自建一个 store。
+ * ⚠️ **元数据与名字搜索的缓存已经不在面板里了**：它们随元数据插件化搬进了插件自己的数据目录，
+ * 由插件自己管（插件里那份实现不需要也不该 require 面板）。
  *
  * —— 淘汰策略：TTL + 字节上限 + LRU，三者各管一件事 ——
  *   · TTL（按时间）管**正确性** —— 元数据会变（评分、简介、海报更换）
@@ -31,19 +33,8 @@ const settings = require('./settings');
  * 会把缓存变成写放大源（尤其图片索引，一次列表渲染就是几十次读）。一小时粒度足够。 */
 const USED_REFRESH_MS = 60 * 60 * 1000;
 
-/**
- * 「名字 → TMDB 搜索结果」的固定口径（不进面板设置：它不是用户要调的旋钮）。
- * 6 小时 = 原来内存 Map 的值，**故意不拉长** —— 这张表将来还要喂 emby 的搜索端点
- * （用户搜"斗破"想看的是"现在有哪些"），结果集敏感、越新越好。
- * 只存**有结果**的成功响应（负结果不存：存了会让新上线的别名条目永远看不见）。
- */
-const NAME_TTL_MS = 6 * 60 * 60 * 1000;
-const NAME_MAX_BYTES = 2 * 1024 * 1024;
-
-/** 面板可改的默认值（「面板设置 → 缓存设置」）。**只有这一处**，core/tmdb.js 与 emby/cache.js 都从这里取 */
+/** 面板可改的默认值（「面板设置 → 缓存设置」）。**只有这一处**，面板这边那两份缓存都从这里取 */
 const DEFAULTS = {
-  tmdbTtlDays: 30,
-  tmdbMaxMB: 200,
   imageTtlDays: 90,
   imageMaxMB: 5,
   /** 聚合详情缓存（`detail_cache`，见 agg/cache.js）：**按分钟**，因为它是秒级~分钟级的短缓存。
@@ -73,8 +64,6 @@ function cfg() {
   const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : d);
   const detailMinutes = num(c.detailTtlMinutes, DEFAULTS.detailTtlMinutes);
   return {
-    tmdbTtlMs: num(c.tmdbTtlDays, DEFAULTS.tmdbTtlDays) * 86400000,
-    tmdbMaxBytes: num(c.tmdbMaxMB, DEFAULTS.tmdbMaxMB) * 1024 * 1024,
     imageTtlMs: num(c.imageTtlDays, DEFAULTS.imageTtlDays) * 86400000,
     imageMaxBytes: num(c.imageMaxMB, DEFAULTS.imageMaxMB) * 1024 * 1024,
     /* 「长期有效」勾了就无视分钟数（`detailNeverExpire` 是布尔，不是数字） */
@@ -85,9 +74,7 @@ function cfg() {
 
 /** 各表的字节上限来自哪个设置的哪一项（sweepAll 用） */
 const TABLE_CAP = {
-  tmdb_cache: (c) => c.tmdbMaxBytes,
   image_index: (c) => c.imageMaxBytes,
-  name_index: () => NAME_MAX_BYTES,
   detail_cache: (c) => c.detailMaxBytes,
 };
 
@@ -274,8 +261,6 @@ function sweepAll(limits) {
 
 module.exports = {
   USED_REFRESH_MS,
-  NAME_TTL_MS,
-  NAME_MAX_BYTES,
   NEVER_TTL_MS,
   DEFAULTS,
   cfg,

@@ -25,5 +25,5 @@ export const S = {
   apiError: null,
   busy: false,
   emby: { settings: null, accounts: null, homePlugins: null, homeRun: {} },
-  panel: { settings: null, tmdbTest: null },
+  panel: { settings: null },
 };

@@ -3,14 +3,16 @@
  * 面板模块 · 「设置」页：面板自己的设置（跟「概览」分开 —— 概览只看环境，这里动设置）。
  *
  *   · 配置备份与还原 导出直接下载 .json；还原选一个 .json 文件（GET /api/panel/backup · POST /api/panel/restore）
- *   · TMDB 设置      **共享配置**：emby 层（元数据反查）与聚合层（同名失败时按名字反查）都用它
- *                    存 `panel.json` 的 `tmdb.*`，自检端点 `/api/panel/tmdb/test`（见 core/tmdb.js）
  *   · 站点测速       **开关与间隔**（`panel.json` 的 `speedTest*`，实现见 agg/site-test.js）——
  *                    测速是"这台机器与这条网络"的体检，与内容偏好无关，所以不跟模板走（见 ADR-0033）；
  *                    测速的结果（站点统计）也是面板级共享的一份。「立即测速」在「聚合 · 模板」页。
- *   · 缓存设置       **跨库**的用量与清空（`data/cache/*.db` + `data/emby/cache.db`），
- *                    端点 `GET|DELETE /api/panel/cache`，策略存 `panel.json` 的 `cache.*`（见 core/cachedb.js）
+ *   · 缓存设置       面板自己那两份缓存的用量与清空（`data/emby/cache.db` 图片索引 +
+ *                    `data/cache/detail.db` 聚合线路结果），端点 `GET|DELETE /api/panel/cache`，
+ *                    策略存 `panel.json` 的 `cache.*`（见 core/cachedb.js）
  *   · 面板密码        改密码（见 core/auth.js）+ 退出登录
+ *
+ * ⚠️ **TMDB 设置不在这里**了：token / 基地址 / 语言 / 它自己的缓存都归**元数据插件**
+ * （插件 → tmdb → 设置，见 plugins/metadata/tmdb/）。面板只从插件的「注册」动作里拿图片基地址。
  *
  * **版本与更新 / 关于 两张卡在「关于」页**（`renderPanelAbout`）—— 它们是"看看而已"，
  * 跟这一页"要动手改"的东西分开放（见 registry 里的页面声明）。
@@ -355,182 +357,6 @@ function backupCard() {
   );
 }
 
-/* ------------------------------------------------------------------ TMDB 设置 */
-
-/**
- * TMDB 测试失败的「大类」—— 一眼分清是**网不通**还是**没配对**。
- * 错误码由后端给（`core/tmdb.js` 的 classify / test）。
- */
-function tmdbErrKind(err) {
-  const code = (err && err.code) || '';
-  if (code === 'TIMEOUT' || code === 'NETWORK') return '网络错误';
-  if (code === 'UPSTREAM_HTTP' && Number(err.status) >= 500) return '上游故障';
-  return '配置错误';
-}
-
-/** 大类 → 一句人话（先说该去看哪儿） */
-const TMDB_ERR_HINT = {
-  网络错误: '面板连不上 TMDB（网络不通，或者基地址填错了）。',
-  上游故障: 'TMDB 自己回错了（5xx），跟面板设置无关，过会儿再试。',
-  配置错误: 'Token 或基地址不对，看下面的码与说明。',
-};
-
-/** 渲染 TMDB 测试结果（不回显 token） */
-function paintTmdbTest(box, r) {
-  box.classList.toggle('warn', !r.ok);
-  box.textContent = '';
-  if (!r.ok) {
-    const kind = tmdbErrKind(r.error);
-    box.append(
-      el(
-        'div',
-        { class: 'kv' },
-        el('span', { class: 'k', text: '失败类型' }),
-        el('span', { class: 'v', text: kind + ' —— ' + (TMDB_ERR_HINT[kind] || '') })
-      ),
-      `✘ ${r.error.code}：${r.error.message}`,
-      el('br'),
-      `基地址 ${r.apiBase} · Token ${r.tokenSet ? `已填（${r.tokenLength} 字符）` : '未填'}`
-    );
-    return;
-  }
-  const it = r.item;
-  const title = it.title + (it.year ? `（${it.year}）` : '');
-  box.append(
-    el(
-      'div',
-      { class: 'kv' },
-      el('span', { class: 'k', text: '反查结果' }),
-      el('span', {
-        class: 'v',
-        text: title + (it.originalTitle && it.originalTitle !== it.title ? ' · ' + it.originalTitle : ''),
-      })
-    ),
-    el('div', { class: 'kv' }, el('span', { class: 'k', text: '鉴权 / 耗时' }), el('span', { class: 'v', text: `HTTP ${r.auth.status} · ${r.elapsedMs}ms · ${r.language}` })),
-    el('div', { class: 'kv' }, el('span', { class: 'k', text: '图片基地址' }), el('span', { class: 'v', text: `${r.imageBase}　（TMDB 官方给的是 ${r.images.secureBaseUrl || '-'}）` }))
-  );
-  if (it.poster) box.append(el('img', { src: it.poster, alt: 'poster', class: 'poster-sm' }));
-  if (it.overview) box.append(el('div', { class: 'note', text: it.overview }));
-}
-
-function tmdbCard() {
-  const t = (S.panel.settings || {}).tmdb || {};
-  const tokInput = el('input', {
-    type: 'password',
-    value: t.token || '',
-    autocomplete: 'new-password',
-    placeholder: 'v4 API Read Access Token（Bearer）',
-  });
-  const showTok = el('input', { type: 'checkbox' });
-  showTok.addEventListener('change', () => {
-    tokInput.type = showTok.checked ? 'text' : 'password';
-  });
-  const apiInput = el('input', {
-    type: 'text',
-    value: t.apiBase || '',
-    spellcheck: 'false',
-    placeholder: '留空 = 官方 https://api.themoviedb.org/3',
-  });
-  const imgInput = el('input', {
-    type: 'text',
-    value: t.imageBase || '',
-    spellcheck: 'false',
-    placeholder: '留空 = 官方 https://image.tmdb.org/t/p',
-  });
-  const langInput = el('input', { type: 'text', value: t.language || '', spellcheck: 'false', placeholder: 'zh-CN' });
-  const save = el('button', { class: 'btn primary', text: '保存' });
-  const test = el('button', { class: 'btn', text: '测试' });
-  const out = el('div', { class: 'hint' });
-
-  save.addEventListener('click', async () => {
-    save.disabled = true;
-    try {
-      const r = await api('/api/modules/panel/settings', {
-        method: 'PUT',
-        body: {
-          settings: {
-            tmdb: {
-              token: tokInput.value.trim(),
-              apiBase: apiInput.value.trim(),
-              imageBase: imgInput.value.trim(),
-              language: langInput.value.trim(),
-            },
-          },
-        },
-      });
-      S.panel.settings = r.settings;
-      toast('TMDB 设置已保存');
-      renderPage();
-    } catch (e) {
-      toast('保存失败：' + e.message, true);
-    } finally {
-      save.disabled = false;
-    }
-  });
-
-  test.addEventListener('click', async () => {
-    test.disabled = true;
-    test.innerHTML = '<span class="spinner"></span> 测试中…';
-    try {
-      /* 用界面上当前的输入值，不必先保存；探测对象固定为日志里客户端要过的 tmdb 95350（剧集） */
-      const r = await api('/api/panel/tmdb/test', {
-        method: 'POST',
-        body: {
-          token: tokInput.value.trim(),
-          apiBase: apiInput.value,
-          imageBase: imgInput.value,
-          language: langInput.value,
-          tmdbId: 95350,
-          type: 'tv',
-        },
-      });
-      S.panel.tmdbTest = r;
-      paintTmdbTest(out, r);
-      toast(r.ok ? `TMDB 正常：${r.item.title}（${r.elapsedMs}ms）` : '测试失败：' + tmdbErrKind(r.error), !r.ok);
-    } catch (e) {
-      toast('测试失败：' + e.message, true);
-    } finally {
-      test.disabled = false;
-      test.textContent = '测试';
-    }
-  });
-
-  if (S.panel.tmdbTest) paintTmdbTest(out, S.panel.tmdbTest);
-
-  return el(
-    'div',
-    { class: 'card' },
-    el('h3', { text: 'TMDB 设置' }),
-    el('p', {
-      class: 'note',
-      text:
-        '元数据来自 TMDB：填一个 v4 Read Access Token（不填就没有元数据）。直连不通时可以把基地址换成镜像；Token 以明文存在面板里，别外传。' +
-        '这份设置是共享的：Emby 层按 tmdb id 取元数据、聚合层在同名失败时按名字反查 tmdb id，都用它。',
-    }),
-    el('div', { class: 'row' }, tokInput, el('label', { class: 'chk' }, showTok, '显示'), save, test),
-    el('div', { class: 'row' }, apiInput, imgInput, el('div', { class: 'field narrow' }, langInput)),
-    out
-  );
-}
-
-/** 设置要异步读一次，所以先占位再把卡换进去（页面本身是同步渲染的） */
-async function tmdbSection(v) {
-  const holder = el('div');
-  v.append(holder);
-  const placeholder = () =>
-    el('div', { class: 'card' }, el('h3', { text: 'TMDB 设置' }), el('div', { class: 'muted', text: '正在读取面板设置…' }));
-  holder.append(placeholder());
-  try {
-    if (!S.panel.settings) S.panel.settings = (await api('/api/modules/panel/settings')).settings;
-  } catch (e) {
-    holder.replaceChildren(
-      el('div', { class: 'card' }, el('h3', { text: 'TMDB 设置' }), el('div', { class: 'hint warn', text: '读取面板设置失败：' + e.message }))
-    );
-    return;
-  }
-  holder.replaceChildren(tmdbCard());
-}
-
 /* ------------------------------------------------------------------ 缓存设置 */
 
 /** 字节数 → 人话（用量显示用） */
@@ -544,17 +370,16 @@ function fmtBytes(n) {
 /**
  * 缓存设置（从「Emby → 连接设置」搬来）。
  *
- * 为什么归面板：缓存现在跨**两个库** —— core 的 `data/cache/tmdb.db`（TMDB 元数据 + 名字索引，
- * agg 与 emby 共用）与 `data/emby/cache.db`（图片索引，emby 自用）。用量显示、清空、上限
- * 一把抓两个才可能不出错，所以设置、按钮、端点在面板层（`GET|DELETE /api/panel/cache`）。
+ * 为什么归面板：剩下的这两份缓存都归面板用 —— `data/emby/cache.db`（图片索引，面板替客户端取图）
+ * 与 `data/cache/detail.db`（聚合线路结果）。用量显示、清空、上限一把抓才可能不出错，
+ * 所以设置、按钮、端点在面板层（`GET|DELETE /api/panel/cache`）。
+ * ⚠️ **元数据与名字搜索的缓存不在这里**：它们随元数据插件走，归插件自己管（插件 → tmdb → 设置）。
  */
 function cacheCard() {
   const c = (S.panel.settings || {}).cache || {};
   /* 这几个是**默认值**，改了就落盘；留空/非数字由后端兜底回默认 */
   const cnum = (key, dflt) =>
     el('input', { type: 'text', value: String(c[key] === undefined || c[key] === null ? dflt : c[key]), class: 'w-sm' });
-  const cTtlDays = cnum('tmdbTtlDays', 30);
-  const cTtlMB = cnum('tmdbMaxMB', 200);
   const cImgDays = cnum('imageTtlDays', 90);
   const cImgMB = cnum('imageMaxMB', 5);
   const cDetMin = cnum('detailTtlMinutes', 60);
@@ -577,9 +402,7 @@ function cacheCard() {
     const d = r.detail || { rows: 0, bytes: 0, maxBytes: 0 };
     out.textContent = '';
     out.append(
-      `元数据 ${r.tmdb.rows} 条 / ${fmtBytes(r.tmdb.bytes)}（上限 ${fmtBytes(r.tmdb.maxBytes)}）` +
-        ` · 名字索引 ${r.names.rows} 条 / ${fmtBytes(r.names.bytes)}（上限 ${fmtBytes(r.names.maxBytes)}）` +
-        ` · 图片索引 ${r.image.rows} 条 / ${fmtBytes(r.image.bytes)}（上限 ${fmtBytes(r.image.maxBytes)}）` +
+      `图片索引 ${r.image.rows} 条 / ${fmtBytes(r.image.bytes)}（上限 ${fmtBytes(r.image.maxBytes)}）` +
         ` · 聚合详情 ${d.rows} 条 / ${fmtBytes(d.bytes)}（上限 ${fmtBytes(d.maxBytes)}，当期有效期 ${fmtDetailTtl(r)}）`
     );
   };
@@ -600,8 +423,6 @@ function cacheCard() {
         body: {
           settings: {
             cache: {
-              tmdbTtlDays: Number(cTtlDays.value),
-              tmdbMaxMB: Number(cTtlMB.value),
               imageTtlDays: Number(cImgDays.value),
               imageMaxMB: Number(cImgMB.value),
               /* 留空**不要**当成 0 —— 这个字段的 0 是"不缓存"，留空的意思是"用默认值"，
@@ -627,7 +448,7 @@ function cacheCard() {
   clear.addEventListener('click', async () => {
     if (
       !confirm(
-        '清空本地缓存？\n\nTMDB 元数据、名字索引、图片索引、聚合详情快照都会重来（下次浏览会重新请求 TMDB，下一次点开会重新搜源）。\n账号在另一个库里，不受影响、不用重新登录。'
+        '清空本地缓存？\n\n图片索引与聚合详情快照都会重来（下一次点开会重新搜源；插件那边的元数据缓存不归这里管）。\n账号在另一个库里，不受影响、不用重新登录。'
       )
     ) {
       return;
@@ -650,9 +471,10 @@ function cacheCard() {
     el('p', {
       class: 'note',
       text:
-        '缓存 TMDB 元数据、名字索引（聚合层按名字反查 tmdb id 用）与图片索引，用来少打上游、也让客户端出得了封面；' +
+        '缓存图片索引：客户端不带 tag 来要图时靠它答出"这张图在哪儿"，也让面板少找一次上游；' +
         '另有一层「聚合详情」快照：把「这部片在源里有哪些线路、这一集定位到哪一条」存起来（客户端点一次播放会连问三遍同一件事，' +
-        '靠它省掉后两遍）；还有「站点测速」那份统计（站点表里那两列速度就是它）。清空不影响账号，也不用重新登录。',
+        '靠它省掉后两遍）；还有「站点测速」那份统计（站点表里那两列速度就是它）。清空不影响账号，也不用重新登录。' +
+        'TMDB 元数据与名字搜索另有缓存，那归元数据插件自己管（插件 → tmdb → 设置）。',
     }),
     el('p', {
       class: 'note',
@@ -663,12 +485,7 @@ function cacheCard() {
     el(
       'div',
       { class: 'row' },
-      el('span', { class: 'muted', text: '元数据' }),
-      cTtlDays,
-      el('span', { class: 'muted', text: '天 · 上限' }),
-      cTtlMB,
-      el('span', { class: 'muted', text: 'MB' }),
-      el('span', { class: 'muted', text: '｜ 图片索引' }),
+      el('span', { class: 'muted', text: '图片索引' }),
       cImgDays,
       el('span', { class: 'muted', text: '天 · 上限' }),
       cImgMB,
@@ -690,7 +507,7 @@ function cacheCard() {
   );
 }
 
-/** 同 TMDB 卡：设置要异步读一次，先占位再把卡换进去 */
+/** 设置要异步读一次，先占位再把卡换进去 */
 async function cacheSection(v) {
   const holder = el('div');
   v.append(holder);
@@ -814,10 +631,7 @@ function speedTestSection(v) {
 export function renderPanelSettings(v) {
   const first = backupCard();
   v.append(first, passwordCard());
-  /* TMDB 卡与缓存卡都要异步读一次设置，各自往 v 末尾插，不挡上面的卡。
-   * ⚠️ 两张卡共用一个 `S.panel.settings`：`cacheSection` 在 `tmdbSection` 之后跑，
-   * 那时设置已经读回来了（若没读到它会自己再读一次），不会出现"缓存卡拿着空设置"的情况。 */
-  tmdbSection(v);
+  /* 缓存卡要异步读一次设置，往 v 末尾插，不挡上面的卡。 */
   speedTestSection(v);
   cacheSection(v).then(() =>
     v.append(el('div', { class: 'actions' }, el('button', { class: 'btn', text: '退出登录', onclick: () => logout() })))
@@ -842,7 +656,7 @@ export function renderPanelSettings(v) {
 /**
  * 「关于」页：**版本与更新** + **关于**两张卡。
  *
- * 从「设置」页挪过来的：「设置」页是"要动手改的东西"（备份/密码/TMDB/缓存），
+ * 从「设置」页挪过来的：「设置」页是"要动手改的东西"（备份/密码/缓存），
  * 而这两张是"看看而已" —— 更新卡里那段说明还动辄几十行，摆在设置页会把要改的卡挤到很下面。
  */
 export function renderPanelAbout(v) {

@@ -29,7 +29,7 @@
  *   GET/POST    /api/emby/accounts       账号列表 / 新增
  *   PUT/DELETE  /api/emby/accounts/{id}  改（用户名/密码）/ 删
  *   ANY  /api/emby/home/**              首页插件：上传/列表/启用/参数/预览（见 home/routes.js）
- *   （TMDB 的设置与测试已搬到面板层：`/api/panel/tmdb/test`，见 core/tmdb.js）
+ *   （TMDB 的设置与自检在**元数据插件自己的设置页**里：插件 → tmdb → 设置）
  *
  * 通配（必须注册在最后）：
  *   ANY  /api/emby/*rest   其余请求一律**记一行**日志 + 回 501，待明确需求后再实现
@@ -636,7 +636,7 @@ module.exports = function routes(r) {
     return sendJson(res, 200, { ok: true, remaining: db.countAccounts() });
   });
 
-  /* 缓存用量 / 清空**不在这一层**了：缓存跨两个库（`data/cache/tmdb.db` +
+  /* 缓存用量 / 清空**不在这一层**了：缓存跨两个库（`data/cache/detail.db` +
    * `data/emby/cache.db`），"清空"必须只有一个入口 —— 见面板层 `GET|DELETE /api/panel/cache`。 */
 
   /* ---------------- 首页插件（面板自用，非 Emby 客户端协议） ----------------

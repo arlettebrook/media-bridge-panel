@@ -9,12 +9,14 @@
  * 当前阶段只做「端点监控」：捕获 Emby 客户端打过来的全部请求，
  * 具体补哪些端点由部署者指定，见 docs/emby-compat.md。
  *
- * TMDB 设置**不在本模块**（已搬到面板层，见 `core/tmdb.js`）；
- * 本模块只留 emby 专有的那层反查与 DTO（`tmdb.js`）。
+ * TMDB 设置与自检**不在本模块**（在元数据插件自己的设置页里，见
+ * `plugins/metadata/tmdb/`）；本模块只留 emby 专有的那层 DTO 与图片地址，
+ * 取数经 `meta.js` 转发给插件。
  */
 const BRAND = require('../../core/branding');
 const routes = require('./routes');
 const home = require('./home');
+const meta = require('./meta');
 
 /**
  * 拉流方式（`play.mode`）**已删** —— 现在一律 302，见 service.js 的 `redirectUrl()`。
@@ -38,9 +40,9 @@ module.exports = {
       /* 老的单账号（明文）—— 只为兼容老备份/老前端而留的空壳：
        * 真正的账号在 data/emby/emby.db（多账号，见 db.js），首次用到库时这个空壳会被清空。 */
       account: { username: '', password: '' },
-      /* ⚠️ TMDB 设置**不在这里**了（已搬到面板层 `panel.json` 的 `tmdb.*`）：
-       * emby 层（元数据）与聚合层（同名失败时按名字反查 tmdb id）都要用它，
-       * 而依赖是单向的 `emby → agg → source`。见 core/tmdb.js。 */
+      /* ⚠️ TMDB 设置**不在这里**（也不在面板层了）：它属于**元数据插件** ——
+       * token / 基地址 / 语言都在插件自己的数据目录里（插件 → tmdb → 设置）。
+       * 面板只从插件的「注册」动作里拿图片基地址（替客户端取图要用），见 emby/meta.js。 */
       /* 拉流方式是**一律 302**：面板不扛流量，客户端直连源。
        * 本地部署的源回的地址是回环地址，302 前会换成客户端访问用的那个域名 + 源端口
        * （见 service.redirectUrl）；自定义源按源给的真实地址。所以这里没有可选项。 */
@@ -98,4 +100,24 @@ module.exports = {
   },
 
   routes,
+
+  /**
+   * 元数据域表：按插件清单重建（**认哪个前缀由元数据插件说了算**，见 core/providers.js）。
+   * server.js 在插件起来之后调一次；请求路径上还会顺手同步一次（`ensureMetaProviders`）——
+   * 这样"面板跑着的时候装/启用了元数据插件"不必重启面板才生效。
+   */
+  syncMetaProviders: () => {
+    const out = meta.syncProviders();
+    for (const s of out.skipped) console.log(`  ✘ 元数据域申报被跳过：${s.id || '(空)'} —— ${s.reason}`);
+    if (out.registered) {
+      console.log(`  ✔ 元数据域：${meta.domains().map((d) => d.domain + (d.enabled ? '' : '(未启用)')).join('、')}`);
+    }
+    return out;
+  },
+
+  /** 请求路径上的顺手同步（便宜：读一次插件清单，没变就什么都不做） */
+  ensureMetaProviders: () => meta.ensureProviders(),
+
+  /** 开机把每个域的声明拉一份（图片基地址这类值早一点就是对的；失败不挡启动） */
+  warmMeta: () => meta.warm(),
 };

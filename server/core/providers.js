@@ -10,8 +10,9 @@
  * 于是这张表只管一件事：**认哪个前缀**。认不出就如实返回 null（调用方照 404 处理），
  * 不回退到别的提供者、不猜、不静默。
  *
- * 为什么要有它：加第二个元数据来源时不必再改 emby 层 —— 由提供者自己注册。
- * 目标形态见 docs/plugin-contract.md（元数据插件注册域 id），决策见 docs/adr/0031。
+ * **谁往里填**：元数据插件（`server/modules/emby/meta.js` 按插件清单与开关重建这张表）。
+ * 面板这一层不认识任何具体的域 —— 加第二个元数据来源不必改这里，也不必改 emby 层。
+ * 决策见 docs/adr/0031，契约见 docs/plugin-contract.md 第六节。
  */
 const byPrefix = new Map(); // 前缀（小写）→ 提供者
 const byId = new Map(); // 提供者 id → 提供者
@@ -19,25 +20,49 @@ const byId = new Map(); // 提供者 id → 提供者
 const PREFIX_RE = /^[a-z][a-z0-9]*$/i;
 
 /**
- * 注册一个提供者。`id` 与 `prefix` 都是唯一的（`prefix` 按小写比对）。
- *   { id, prefix, series, label }
- *   · `series` —— 剧集式（有条目 → 季 → 集的层级）还是电影式（只有条目一层）。
- *     电影式的提供者仍可被拼出季集 Id，但面板不会向它要分集。
- *   · `label` —— 面板与日志里显示的名字，缺省用 `id`。
- * 重复注册会抛错（与 core/registry.js 同口径：配置错误要当场炸，不要静默覆盖）。
+ * 重建整张表（**不是**逐个追加）—— 它描述的是"现在装了哪些元数据插件、哪个开着"，
+ * 而这件事会随装/卸/启/停变。整张重建比"记得删掉旧的那条"可靠。
+ *
+ * 每条：`{ id, prefix, series, label, plugin: { type, id }, enabled }`
+ *   · `id` 与 `prefix` 都是唯一的；这一版里两者相同（域 id 就是前缀）
+ *   · `series` —— 剧集式（有序条目 → 季 → 集的层级）还是电影式（只有条目一层）
+ *   · `plugin` —— 这个域由哪个插件提供（面板要据此去发动作）
+ *   · `label` —— 面板与日志里显示的名字，缺省用 `id`
+ *
+ * 非法项**跳过并回原因**（不抛）：插件清单在安装时已经校验过，这里兜的是"两个插件申报了
+ * 同一个域"这类跨插件冲突。调用方把 `skipped` 如实写进日志 —— 不静默、也不因此拦住面板启动。
  */
-function register(p) {
-  const id = String((p && p.id) || '').trim();
-  const prefix = String((p && p.prefix) || '').trim();
-  if (!id) throw new Error('元数据提供者缺少 id');
-  if (!prefix) throw new Error(`元数据提供者 ${id} 缺少 prefix`);
-  if (!PREFIX_RE.test(prefix)) throw new Error(`元数据提供者的 prefix 不合法：${prefix}（只允许字母数字，且首字符为字母）`);
-  if (byId.has(id)) throw new Error('元数据提供者重复注册：' + id);
-  if (byPrefix.has(prefix.toLowerCase())) throw new Error('元数据提供者的 prefix 重复：' + prefix);
-  const one = { id, prefix, series: p.series !== false, label: p.label || id };
-  byId.set(id, one);
-  byPrefix.set(prefix.toLowerCase(), one);
-  return one;
+function sync(entries) {
+  byPrefix.clear();
+  byId.clear();
+  const skipped = [];
+  for (const raw of entries || []) {
+    const id = String((raw && raw.id) || '').trim();
+    const prefix = String((raw && raw.prefix) || id).trim();
+    if (!id) {
+      skipped.push({ id: '', reason: '缺少 id' });
+      continue;
+    }
+    if (!PREFIX_RE.test(prefix)) {
+      skipped.push({ id, reason: `前缀不合法：${prefix || '(空)'}（只允许字母数字，且首字符为字母）` });
+      continue;
+    }
+    if (byId.has(id) || byPrefix.has(prefix.toLowerCase())) {
+      skipped.push({ id, reason: `域 ${prefix} 重复申报` });
+      continue;
+    }
+    const one = {
+      id,
+      prefix,
+      series: raw.series !== false,
+      label: raw.label || id,
+      plugin: raw.plugin && raw.plugin.type ? { type: String(raw.plugin.type), id: String(raw.plugin.id || '') } : null,
+      enabled: raw.enabled !== false,
+    };
+    byId.set(id, one);
+    byPrefix.set(prefix.toLowerCase(), one);
+  }
+  return { registered: byId.size, skipped };
 }
 
 function get(id) {
@@ -60,7 +85,7 @@ function list() {
  * 再传 episode 就是集：`{前缀}_{条目 id}_tv_s1_e3`。
  * 电影式提供者只到 `{前缀}_{条目 id}_movie`（季集层级对它无意义，传了也不拼）。
  *
- * ⚠️ 这里**不做数值校验**：与既有实现一致，非数字会原样拼进 Id（由 `parseItemId` 那一侧把关）。
+ * 这里**不做数值校验**：与既有实现一致，非数字会原样拼进 Id（由 `parseItemId` 那一侧把关）。
  */
 function itemId(prefix, entryId, type, season, episode) {
   const kind = type === 'movie' ? 'movie' : 'tv';
@@ -92,4 +117,4 @@ function parseItemId(id) {
   return { prefix: provider.prefix, provider, entryId: Number(m[2]), type, season, episode };
 }
 
-module.exports = { register, get, byPrefixOf, list, itemId, parseItemId };
+module.exports = { sync, get, byPrefixOf, list, itemId, parseItemId };

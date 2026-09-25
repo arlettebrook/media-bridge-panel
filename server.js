@@ -80,6 +80,12 @@ const server = http.createServer(async (req, res) => {
         res.setHeader('Set-Cookie', auth.cookieHeader('', req)); // 顺手清掉过期/无效的那个 cookie
         return sendError(res, 401, deny);
       }
+      /* Emby 客户端打进来的请求：顺手同步一次**元数据域表** ——
+       * "装/启用了元数据插件"这件事要当场生效，不该等到重启面板（认哪个前缀由插件说了算，
+       * 见 core/providers.js 与 emby/meta.js；读一次插件清单，没变就什么都不做）。 */
+      if (pathname.startsWith('/api/emby/') && embyModule && typeof embyModule.ensureMetaProviders === 'function') {
+        embyModule.ensureMetaProviders();
+      }
       return await router.handle(req, res, { pathname, searchParams: parsed.searchParams });
     }
     // 其余一律当作 public/ 下的静态文件（含 core/ modules/ docs/ styles/ 子目录）
@@ -116,6 +122,18 @@ server.listen(WEB_PORT, WEB_HOST, async () => {
    * （见 modules/plugin/index.js 的 autostart）。失败不挡面板启动。
    * ⚠️ **源实例由源插件自己起**（它自己的"开机自启"那份逻辑），不在这里管。 */
   if (pluginModule && typeof pluginModule.autostart === 'function') await pluginModule.autostart();
+  /* 元数据域表：插件的清单与开关决定"哪些条目 Id 前缀认得出来"（见 core/providers.js 与 emby/meta.js）。
+   * 必须排在插件起来之后；再顺手把每个域的声明拉一份（图片基地址这类值早一点就是对的）。 */
+  if (embyModule && typeof embyModule.syncMetaProviders === 'function') {
+    embyModule.syncMetaProviders();
+    if (typeof embyModule.warmMeta === 'function') {
+      try {
+        await embyModule.warmMeta();
+      } catch (e) {
+        console.log('  ✘ 元数据域声明读取失败（面板继续）：' + ((e && e.message) || e));
+      }
+    }
+  }
   /* 更新即完整替换：**每次启动成功后**清掉当前版本之外的版本目录（旧版本不留档，也不作本地回退，
    * 决策见 docs/adr/0021-update-replaces-app-dir.md）。它自己会延迟几秒再动手，
    * 也会在非受管运行方式下跳过（直接跑源码时数据目录里的 app/ 不该被动）。 */

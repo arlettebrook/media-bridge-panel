@@ -25,9 +25,6 @@
 const crypto = require('crypto');
 const settings = require('../../core/settings');
 const tmdb = require('./tmdb');
-/* 协议层的 `search()` 直接用 core 那份（emby 层没有自己的名字搜索逻辑；
- * 缓存（name_index）也在 core —— 见 `getSearchItems` 的注释） */
-const tmdbCore = require('../../core/tmdb');
 const agg = require('../agg/api'); // 聚合层的进程内调用面（原来是打自己的 /api/agg/*，会撞面板门禁 → 见那个文件顶部）
 const BRAND = require('../../core/branding'); // 默认服务器名（客户端「服务器列表」里显示的那个）
 const home = require('./home');
@@ -596,7 +593,7 @@ function setPlayed(req, requestedUserId, rawItemId, played) {
 /**
  * 一条进度行 → 一条 `BaseItemDto`（「继续观看」/「已看」/「接下来看」共用）。
  *
- * 元数据**按坐标反查 TMDB**（走 `data/cache/tmdb.db` 缓存；播过的东西刚查过，基本是命中）。
+ * 元数据**按坐标反查元数据插件**（缓存归插件；播过的东西刚查过，基本是命中）。
  * **查不到就返回 null**，由调用方跳过 —— 不编名字、不编封面（ADR-0008）。
  * 集的拼装与 `getEpisodes()` 保持一致（同样是剧照当 Primary、`IsFolder=false`、带季集号）。
  */
@@ -926,7 +923,10 @@ function searchTypesOf(include) {
 }
 
 /**
- * TMDB **搜索结果行** → 一条 `BaseItemDto`（走 `leanItemDto`，与相似推荐同款）。
+ * **搜索结果行** → 一条 `BaseItemDto`（走 `leanItemDto`，与相似推荐同款）。
+ *
+ * 行里是**元数据插件归一化过的字段**（`entryId` / `title` / `year` / `posterPath`…）——
+ * 面板不认上游的字段形状（那是插件的事，见 docs/adr/0029 的已定 5）。
  *
  * ⚠️ **不为搜索结果再打 `lookup()`**（那会是"每类型 N 次上游"的线性账）：
  * 搜索行里已经给了名字 / 简介 / 海报 / 横图 / 年份 / 评分，`baseItem()` 需要的那几项都够；
@@ -935,18 +935,17 @@ function searchTypesOf(include) {
  * 真机的搜索项也只有 11 个字段，说明客户端对"搜索卡片"没有更多期待。
  */
 function searchRowDto(row, type) {
-  const date = String(row.release_date || row.first_air_date || '');
   return leanItemDto({
     type,
-    tmdbId: row.id,
+    tmdbId: row.entryId,
     parentId: defaultLibraryId(),
-    title: row.name || row.title || '',
-    year: date.slice(0, 4),
+    title: row.title || '',
+    year: row.year || '',
     overview: row.overview,
-    communityRating: row.vote_average,
-    posterPath: row.poster_path,
-    backdropPath: row.backdrop_path,
-    originalTitle: row.original_name || row.original_title,
+    communityRating: row.communityRating,
+    posterPath: row.posterPath,
+    backdropPath: row.backdropPath,
+    originalTitle: row.originalTitle,
   });
 }
 
@@ -1278,7 +1277,9 @@ async function getSearchItems(requestedId, query) {
   const limit = Math.min(Math.max(1, Number(val('Limit')) || SEARCH_DEFAULT_LIMIT), SEARCH_MAX_LIMIT);
   const startIndex = Math.max(0, Number(val('StartIndex')) || 0);
 
-  const settled = await Promise.allSettled(types.map((t) => tmdbCore.search(t, term)));
+  /* 按名字去**元数据插件**搜（`tmdb.search` 是转发层：哪个域、走哪个插件的「搜索」动作都在那里；
+   * 名字搜索的缓存也在插件自己那边 —— 见 plugins/metadata/tmdb/lib/tmdb.js） */
+  const settled = await Promise.allSettled(types.map((t) => tmdb.search(t, term)));
   const failures = [];
   const buckets = [];
   settled.forEach((r, i) => {

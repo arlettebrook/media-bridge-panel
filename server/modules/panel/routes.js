@@ -4,14 +4,12 @@
  *   /api/meta                     服务自述（外部可用它确认地址是不是一个面板、暴露了哪些模块）
  *   /api/modules                  模块总览（含每个模块消费的上游地址）
  *   /api/modules/:id/settings     每个模块自己的设置（通用端点，加模块不用改这里）
- *   /api/panel/tmdb/test          TMDB 设置自检（配置归面板层，自检也在同一层）
  *   /api/panel/info, /api/panel/backup|restore
  *   /api/auth/*                   面板鉴权：status / login / logout / password（见 core/auth.js）
  *   /api/logs                     面板日志（内存环形缓冲的读取/清空，见 core/logbus.js）
  */
 const settings = require('../../core/settings');
 const registry = require('../../core/registry');
-const tmdb = require('../../core/tmdb');
 const cachedb = require('../../core/cachedb');
 const logbus = require('../../core/logbus');
 const auth = require('../../core/auth');
@@ -22,41 +20,9 @@ const update = require('./update');
 const pkg = require('../../../package.json');
 
 /**
- * 一次性搬迁（已经有部署实例，所以要有这一步）：TMDB 设置原来归 **emby 层**
- * （`data/settings/emby.json` 的 `tmdb.*`），现已归**面板层**（`panel.json` 的 `tmdb.*`）——
- * 因为聚合层也要用它做「站源条目名 → tmdb id」的反查，而 `emby → agg` 是单向依赖，
- * agg 不能去读 emby 的配置。见 `core/tmdb.js` 顶部。
- *
- * 规则：**emby 那边配了 token、面板这边没配** → 搬过来并清掉 emby 那段（免得两处长得像真的）。
- * 面板已配就什么都不做（绝不覆盖新值）。跑在路由注册时，即启动那一下；干净了就是空操作。
- */
-function migrateTmdbFromEmby() {
-  const emby = settings.read('emby') || {};
-  const old = emby.tmdb;
-  if (!old || typeof old !== 'object') return;
-  if (!String(old.token || '').trim()) return; // emby 那边本来就没配 → 没什么可搬
-  if (String(((settings.read('panel') || {}).tmdb || {}).token || '').trim()) return; // 面板已配 → 不覆盖
-
-  const next = {};
-  for (const k of ['token', 'apiBase', 'imageBase', 'language']) {
-    if (old[k] !== undefined && old[k] !== null && old[k] !== '') next[k] = old[k];
-  }
-  settings.patch('panel', { tmdb: next });
-
-  /* 把 emby 那份删掉（`patch` 只能合并不能删，所以整份重写）——
-   * `write` 写的就是这份对象，缺的键下次 `read` 会由 defaults 补回来。 */
-  const embyNext = Object.assign({}, emby);
-  delete embyNext.tmdb;
-  settings.write('emby', embyNext);
-
-  const keys = Object.keys(next).join(' / ') || '(空)';
-  console.log(`  ↻ TMDB 设置已从 emby 层搬到面板层：${keys}（token 保留，面板「设置」页可改）`);
-}
-
-/**
  * 一次性搬迁（同款第二步）：缓存设置原来归 **emby 层**（`emby.json` 的 `cache.*`），
- * 现已归**面板层**（`panel.json` 的 `cache.*`）—— 因为缓存已跨两个库
- * （core 的 `data/cache/tmdb.db` 与 emby 的 `data/emby/cache.db`），
+ * 现已归**面板层**（`panel.json` 的 `cache.*`）—— 因为面板这边的缓存跨两个库
+ * （core 的 `data/cache/detail.db` 与 emby 的 `data/emby/cache.db`），
  * 用量/清空/淘汰要一把抓两个，设置跟着面板走才不会"面板管一半、模块管一半"。
  *
  * 规则：emby 那边**有这几个键**就搬过来（用户调过的数值不该静默丢失），随后清掉 emby 那段。
@@ -68,7 +34,9 @@ function migrateCacheFromEmby() {
   const old = emby.cache;
   if (!old || typeof old !== 'object') return;
 
-  const keys = ['tmdbTtlDays', 'tmdbMaxMB', 'imageTtlDays', 'imageMaxMB'];
+  /* ⚠️ 只搬**还在面板管**的那两项：`tmdbTtlDays` / `tmdbMaxMB` 已随元数据插件化归插件，
+   * 面板这边不再有这两个键（盘上老值就留着，谁都不读它）。 */
+  const keys = ['imageTtlDays', 'imageMaxMB'];
   const next = {};
   for (const k of keys) {
     if (old[k] !== undefined && old[k] !== null && old[k] !== '') next[k] = old[k];
@@ -83,7 +51,6 @@ function migrateCacheFromEmby() {
 }
 
 module.exports = function routes(r) {
-  migrateTmdbFromEmby();
   migrateCacheFromEmby();
   /* ---------------------------------------------------------------- 面板鉴权 */
   /* `/api/auth/*` 是**唯一不需要登录的面板接口**（见 core/auth.js 的 OPEN_PREFIXES）——
@@ -183,31 +150,13 @@ module.exports = function routes(r) {
   });
 
   /**
-   * POST /api/panel/tmdb/test —— 测 TMDB 设置（面板「TMDB 设置」的「测试」按钮）
-   *
-   * body 可带 token/apiBase/imageBase/language（用界面上**没保存**的当前值）与 tmdbId/type。
-   * 一律回 HTTP 200，成败看 ok / error.code —— 前端才能拿到细节而不是一句 "HTTP 4xx"。
-   * 日志只打基地址、探测对象、状态与耗时，**绝不打 token**。
-   * 逻辑在 `core/tmdb.js`（这个自检跟着配置走）；这条原在 emby 层，已随配置迁到面板层。
-   */
-  r.add('POST', '/api/panel/tmdb/test', async (req, res) => {
-    const body = await readBody(req).catch(() => ({}));
-    const out = await tmdb.test(body, (settings.read('panel') || {}).tmdb || {});
-    const mark = out.ok ? '✔' : '✘';
-    console.log(
-      `  ${mark} panel tmdb 测试 → ${out.probe.type}/${out.probe.tmdbId} auth=${(out.auth && out.auth.status) || '-'}` +
-        ` api=${out.apiBase} ${out.elapsedMs}ms${out.error ? '  ' + out.error.code : ''}`
-    );
-    return sendJson(res, 200, out);
-  });
-
-  /**
    * GET    /api/panel/cache —— 缓存用量（面板「缓存设置」显示「已用 x / 上限 y」）
    * DELETE /api/panel/cache —— **清空所有缓存**
    *
    * 建这个端点时缓存已跨两个库（原 `/api/emby/cache` 只有 emby 那张库）——
-   *   core  `data/cache/tmdb.db`  tmdb_cache（元数据）+ name_index（名字 → 搜索结果）
-   *   emby  `data/emby/cache.db`  image_index（图片索引）
+   *   core  `data/cache/detail.db`  detail_cache（聚合线路结果）
+   *   emby  `data/emby/cache.db`    image_index（图片索引）
+   * ⚠️ 元数据插件的缓存不归这里（它自己在插件的数据目录里）。
    * "清空"与"用量"**只能有一个入口**，否则以后加一张表就会漏清一处 —— 所以收敛到面板层，
    * 走 `core/cachedb.js` 的 `statsAll()` / `clearAll()`（各 store 自己登记，见那个文件）。
    * 清它**永远不动账号**（账号在 emby.db）—— 缓存出问题就删掉重建，这是当初分库的理由之一。
@@ -215,29 +164,14 @@ module.exports = function routes(r) {
   const cacheView = () => {
     const c = cachedb.cfg();
     const all = cachedb.statsAll();
-    const t = ((all.tmdb || {}).tables) || {};
     const img = ((all.image || {}).tables) || {};
     const det = ((all.detail || {}).tables) || {};
     const one = (tbl, fallback) => Object.assign({ rows: 0, bytes: 0 }, tbl || fallback);
-    const tmdbTbl = one(t.tmdb_cache);
-    const nameTbl = one(t.name_index);
     const imgTbl = one(img.image_index);
     const detTbl = one(det.detail_cache);
     return {
-      /* 四组数字一一对应 UI 上那四行；`maxBytes`/`ttl*` 是**当前策略**（面板设置里可改） */
-      tmdb: {
-        rows: tmdbTbl.rows,
-        bytes: tmdbTbl.bytes,
-        maxBytes: c.tmdbMaxBytes,
-        ttlDays: c.tmdbTtlMs / 86400000,
-        path: (all.tmdb || {}).path || '',
-      },
-      names: {
-        rows: nameTbl.rows,
-        bytes: nameTbl.bytes,
-        maxBytes: cachedb.NAME_MAX_BYTES,
-        ttlHours: cachedb.NAME_TTL_MS / 3600000,
-      },
+      /* 每组数字一一对应 UI 上那一行；`maxBytes`/`ttl*` 是**当前策略**（面板设置里可改）。
+       * ⚠️ 元数据与名字搜索的缓存**不在这里**了：它们随元数据插件走（插件自己那份设置页里看）。 */
       image: {
         rows: imgTbl.rows,
         bytes: imgTbl.bytes,
@@ -261,7 +195,7 @@ module.exports = function routes(r) {
 
   r.add('DELETE', '/api/panel/cache', (req, res) => {
     cachedb.clearAll();
-    console.log('  ✔ 缓存已清空（tmdb.db 元数据+名字索引、detail.db 聚合详情、cache.db 图片索引；账号不受影响）');
+    console.log('  ✔ 缓存已清空（detail.db 聚合线路结果、cache.db 图片索引；账号不受影响。元数据插件的缓存在它自己那边）');
     return sendJson(res, 200, cacheView());
   });
 
