@@ -79,16 +79,18 @@ async function readBody(req, limit = 8 * 1024 * 1024) {
  * 写死了根路径（`/full-config` 那类），那些请求会落到**面板任意根路径**上，得让调用方
  * （`server.js`）先问一次猫源层，接不住才 404。见 `modules/source/config-proxy.js` 顶部。
  */
-function serveStatic(req, res, pathname) {
+/* `root` 默认是面板自己的 `public/`；插件 webui 用它、但把根指到插件目录（见 plugin/routes.js）。
+ * 缓存策略（`no-cache` + ETag）对两者一视同仁 —— 插件换版本后页面也该立刻是新的。 */
+function serveStatic(req, res, pathname, root = PUBLIC_DIR) {
   const rel = pathname === '/' ? '/index.html' : pathname;
-  const full = path.join(PUBLIC_DIR, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
+  const full = path.join(root, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
   let stat = null;
   try {
     stat = fs.statSync(full);
   } catch {
     stat = null;
   }
-  if (!full.startsWith(PUBLIC_DIR) || !stat || stat.isDirectory()) return false;
+  if (!full.startsWith(root) || !stat || stat.isDirectory()) return false;
 
   /* 缓存策略：**`no-cache`（要回来校验，不是"不缓存"）+ `ETag`**。
    * 为什么不能什么都不写：那样浏览器会**启发式缓存** —— 改了 CSS/JS 刷新还是旧的
