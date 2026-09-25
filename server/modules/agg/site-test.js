@@ -1,26 +1,27 @@
 'use strict';
 /**
- * 站点测速任务（**服务端异步执行**）—— 「站点与参数」页那一列「延迟」的来源。
+ * 站点测速任务（**服务端异步执行**）—— 站点表里那一列「延迟」的来源。
  *
- * 与猫源自动更新同构（见 `source/auto-update.js`）：定时器 + **单飞** + 设置变更重排 +
- * 开机延后跑第一轮。区别是它干的事是"逐站打一发 `/search`"，一轮几十秒到十几分钟。
+ * 定时器 + **单飞** + 设置变更重排 + 开机延后跑第一轮（后三样与源插件里那份"自动更新"同构）。
+ * 它干的事是"逐站打一发搜索"，一轮几十秒到十几分钟。
  *
  * 四条口径：
- *   · **打 `/search`**，关键词从常见影视名里**随机取**，非 200 就**换一个词再测一发**
- *     （两发都非 200 才算真失败）—— 判据与实测见 `agg/api.js` 的 `probeSearch` 与
- *     `site-stats.js` 顶部；
- *   · **全部站点**（启用源下的所有站点）—— 只测"已勾选"的话，没勾的站永远没有数据，
+ *   · **打搜索**（转给源插件的「站点测速」动作），关键词从常见影视名里**随机取**，
+ *     非 200 就**换一个词再测一发**（两发都非 200 才算真失败）—— 判据与实测见
+ *     `agg/api.js` 的 `probeSearch` 与 `site-stats.js` 顶部；
+ *   · **全部站点**（启用实例下的所有站点）—— 只测"已勾选"的话，没勾的站永远没有数据，
  *     而这一列本来就是用来决定"要不要勾它"的；
  *   · **并发 3**：源是路由器上那一个 Node 进程，并发拉高会排队、把每个站都拖过超时；
- *   · **单站固定 15 秒超时**（`api.SPEED_TEST_TIMEOUT_MS`），**不读** `agg.timeoutSec`
- *     （也不读取详情那一项 —— 测速只打 `/search`）。
+ *   · **单站固定 15 秒超时**（`api.SPEED_TEST_TIMEOUT_MS`），**不读**模板里的超时项
+ *     （测速只打搜索，与业务那两档超时无关）。
  *
  * 什么时候跑：
  *   ① 每 `speedTestHours` 小时（默认 6）自动一轮 —— **跑完才排下一次**，不会因为一轮慢而堆起来；
- *   ② 手动（面板按钮 → `POST /api/agg/site-test/start`；可带 `keys` 只测当前筛选出来的站）；
- *   ③ **某个源起来/重启之后**（`server.js` 把 source 层的 `onSourceReady` 接到 `sourceUp()`）——
- *      只测那个源的站点；撞上正在跑的一轮就记下来，等这轮结束后紧接着补一轮。
- *      源重启后端口会变，`ensureInit` 的缓存键跟着变，所以这一轮顺带把该源的 init 重新做掉。
+ *   ② 手动（面板按钮 → `POST /api/agg/site-test/start`；可带 `keys` 只测当前筛选出来的站）。
+ *
+ * ⚠️ 原先还有第三条"**某个源起来/重启之后**只测那个源的站点" —— 这一版**去掉了**：
+ * 源实例现在活在源插件里，面板收不到"它起来了"这件事（插件不反向通知面板）。
+ * 开机那一轮（延迟 2 分钟）会覆盖到自启的实例；要立刻看到数字就点单站那个「测速」按钮。
  *
  * 结果**直接覆盖上一次**（单槽，不留历史），所以界面上没有"第几次测速"这种东西 ——
  * 要看的永远是"这一轮测出来多少"。
@@ -32,20 +33,13 @@ const api = require('./api');
 const CONCURRENCY = 3;
 /** 默认：**开**、每 6 小时（`speedTestAuto === false` 才算关；HOURS 取值 1~168） */
 const DEFAULTS = { enabled: true, hours: 6 };
-/** 开机后先等 2 分钟再跑第一轮（与猫源自动更新同一口径：等面板自己先稳下来） */
+/** 开机后先等 2 分钟再跑第一轮（与插件里那份自动更新同一口径：等面板自己先稳下来） */
 const BOOT_DELAY_MS = 2 * 60 * 1000;
-/** 某个源起来后，等它的 `/config` 稳下来再测（端口通了 ≠ 站点清单拿得到） */
-const SOURCE_UP_DELAY_MS = 5000;
 
 let timer = null;
 let booted = false;
 let running = false;
 let stopRequested = false;
-/** 正在跑的那一轮结束后要不要接着再来一轮（源启动撞上正在跑的一轮时记在这里） */
-const pendingSources = new Set();
-/** 待触发的"源起来了"事件（攒 `SOURCE_UP_DELAY_MS`，多个源同时起来只跑一轮） */
-const upQueue = new Set();
-let upTimer = null;
 
 const st = {
   reason: '',
@@ -101,7 +95,6 @@ function state() {
     timeoutMs: api.SPEED_TEST_TIMEOUT_MS,
     probeWords: api.PROBE_WORDS.length,
     bootDelayMs: BOOT_DELAY_MS,
-    sourceUpDelayMs: SOURCE_UP_DELAY_MS,
     running,
     stopping: !!stopRequested,
     reason: st.reason || '',
@@ -119,15 +112,14 @@ function state() {
     lastElapsedMs: st.lastElapsedMs,
     lastBad: st.lastBad,
     nextRunAt: st.nextRunAt || null,
-    pending: [...pendingSources],
   };
 }
 
 /**
  * 跑一轮。**单飞由 `start()` 保证**（`running` 在函数体第一行就置位，调用后立刻生效）。
- * `keys`（`{source,key}[]`）= 只测这些站；`sourceIds` = 只测这些源下的站（源启动后触发用）。
+ * `keys`（`{source,key}[]`）= 只测这些站。
  */
-async function run({ reason = 'manual', keys, sourceIds } = {}) {
+async function run({ reason = 'manual', keys } = {}) {
   running = true;
   stopRequested = false;
   st.reason = reason;
@@ -141,12 +133,10 @@ async function run({ reason = 'manual', keys, sourceIds } = {}) {
   st.stopped = false;
 
   const keySet = Array.isArray(keys) && keys.length ? new Set(keys.map((k) => `${k && k.source}\u0001${k && k.key}`)) : null;
-  const sourceSet = Array.isArray(sourceIds) && sourceIds.length ? new Set(sourceIds.map(String)) : null;
   let list = [];
   try {
     const { sites } = await api.loadSites();
     list = (sites || []).filter((s) => {
-      if (sourceSet && !sourceSet.has(String(s.source))) return false;
       if (keySet && !keySet.has(`${s.source}\u0001${s.key}`)) return false;
       return true;
     });
@@ -211,24 +201,16 @@ async function run({ reason = 'manual', keys, sourceIds } = {}) {
     );
   }
 
-  /* 排队的触发（源启动时撞上正在跑的一轮）：**紧接着补一轮**，不重新计时 */
-  const pend = [...pendingSources];
-  pendingSources.clear();
-  if (pend.length) {
-    console.log(`  ↻ agg 测速：还有排队的源（${pend.join('、')}）—— 紧接着补测它们`);
-    run({ reason: 'source-up', sourceIds: pend }).catch((e) => console.log('  ✘ agg 测速失败（已拦截）：' + ((e && e.message) || e)));
-    return;
-  }
   /* 跑完才排下一次；期间自动测速被关掉的话就不排（apply() 通常已经 clearTimer，这里兜一下） */
   const now = cfg();
   if (now.enabled) armTimer(now.hours);
   else clearTimer();
 }
 
-/** 开一轮（已经在跑就回 `busy` —— 路由层照此回 409，与猫源自动更新一致） */
-function start({ reason = 'manual', keys, sourceIds } = {}) {
+/** 开一轮（已经在跑就回 `busy` —— 路由层照此回 409） */
+function start({ reason = 'manual', keys } = {}) {
   if (running) return { ok: false, busy: true, error: '上一次测速还没跑完' };
-  run({ reason, keys, sourceIds }).catch((e) => console.log('  ✘ agg 测速失败（已拦截）：' + ((e && e.message) || e)));
+  run({ reason, keys }).catch((e) => console.log('  ✘ agg 测速失败（已拦截）：' + ((e && e.message) || e)));
   return Object.assign({ ok: true }, state());
 }
 
@@ -253,7 +235,7 @@ function schedule(delayMs) {
   timer = setTimeout(() => {
     timer = null;
     const r = start({ reason: 'timer' });
-    /* ⚠️ 撞上正在跑的一轮（例如"源刚起来"触发的那一轮）时**必须重排** ——
+    /* ⚠️ 撞上正在跑的一轮（例如手动点的那一轮）时**必须重排** ——
      * 否则自动测速这条线就断了（没有任何地方会再把它排回来）。隔一分钟再试。 */
     if (r.busy) {
       console.log('  · agg 测速：到点了但上一轮还在跑 —— 一分钟后重试');
@@ -299,28 +281,8 @@ function boot() {
 }
 
 /**
- * 某个源起来了（`source/runner.js` 的 `waitReady()` 广播、`server.js` 接线到这里）——
- * 延迟几秒等它会答 `/config`，然后只测**这个源**的站点。
- * 多个源同时起来（开机自启那种）只跑一轮；撞上正在测的一轮则排队，等这轮结束补测。
+ * 某个站点测速的入口已经被移到"单站按钮"那条路（`api.probeSearch`）——
+ * 这一版**去掉了"源起来了就测一轮"**，理由见文件顶部那条注记。
  */
-function sourceUp(id) {
-  const sid = String(id || '').trim();
-  if (!sid) return;
-  upQueue.add(sid);
-  if (upTimer) return;
-  upTimer = setTimeout(() => {
-    upTimer = null;
-    const ids = [...upQueue];
-    upQueue.clear();
-    if (!ids.length) return;
-    if (running) {
-      ids.forEach((x) => pendingSources.add(x));
-      console.log(`  · agg 测速：源 ${ids.join('、')} 起来了，但正在测速 —— 记下，等这轮结束补测`);
-      return;
-    }
-    start({ reason: 'source-up', sourceIds: ids });
-  }, SOURCE_UP_DELAY_MS);
-  if (upTimer.unref) upTimer.unref();
-}
 
-module.exports = { DEFAULTS, CONCURRENCY, BOOT_DELAY_MS, SOURCE_UP_DELAY_MS, cfg, state, start, stop, apply, boot, sourceUp };
+module.exports = { DEFAULTS, CONCURRENCY, BOOT_DELAY_MS, cfg, state, start, stop, apply, boot };

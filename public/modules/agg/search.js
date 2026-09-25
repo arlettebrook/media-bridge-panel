@@ -19,7 +19,7 @@
 import { el, toast, modal, codeBlock } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
-import { ensureAggSites, ensureAggSources, ensureTemplates, templateOf } from '../../core/store.js';
+import { ensureAggSites, ensureTemplates, templateOf } from '../../core/store.js';
 import { renderPage } from '../../core/shell.js';
 
 /** 一个站超过这么多条就先折叠，点「展开」再看（一个站挂上百条同名很常见） */
@@ -99,17 +99,16 @@ export async function renderAgg(v) {
   async function run() {
     const wd = wdInput.value.trim();
     if (!wd) return toast('请输入关键字', true);
-    /* 源清单是**「源列表」页负责拉的** —— 直接打开/刷新本页时它是空的，
-     * 早先这里一句"还没有源"就挡住了页面（刷新后无法搜索）。
-     * `/api/agg/sources` 不探测、几毫秒，补一次就行。 */
+    /* 源清单是「模板」页负责拉的 —— 直接打开/刷新本页时它是空的，
+     * 早先这里一句"还没有源"就挡住了页面（刷新后无法搜索）。补一次就行（面板转给源插件，很快）。 */
     if (!(S.aggSources || []).length) {
       try {
-        await ensureAggSources();
+        await ensureAggSites();
       } catch (e) {
         return toast('拿源清单失败：' + e.message, true);
       }
     }
-    if (!(S.aggSources || []).length) return toast('还没有源：先部署一个猫源，或到「聚合 · 源列表」填一个外部地址', true);
+    if (!(S.aggSources || []).length) return toast('还没有源：到「插件 → 管理 → 猫爪源 → 设置」里加一个实例', true);
     if (S.aggUseAll) await ensureAggSites();
     const keys = S.aggUseAll ? S.aggSites.filter((s) => s.searchable).map((s) => ({ source: s.source, key: s.key })) : null;
     if (!S.aggUseAll && !tplSites.length) {
@@ -542,13 +541,13 @@ function toggleRaw(btn, obj) {
 /** 分站诊断：每站一行成败 + 发出去的请求（**不回显响应体** —— 要看内容去「合并视图」） */
 function renderBySite(v, r) {
   const sites = r.sites || [];
-  const fallbackBase = (S.base && S.base.url) || '';
   v.append(el('div', { class: 'sec-title', text: `分站诊断（${sites.length} 个站源）` }));
 
   for (const s of sites) {
-    /* 请求里打的**是该条目所属源**的地址（多源下不能拿"托管源"的地址去拼别的源） */
+    /* 请求里打的是**该条目所属实例**的地址（多源下不能拿别的实例的地址去拼）。
+     * 面板自己不再知道源地址，这一串是插件在站点清单里报上来的，**只为诊断显示**。 */
     const src = (S.aggSources || []).find((x) => x.id === s.source);
-    const baseUrl = (src && src.url) || fallbackBase;
+    const baseUrl = (src && src.url) || '';
     const box = el('div', { class: 'site-group' });
     box.append(
       el(

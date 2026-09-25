@@ -1,21 +1,24 @@
 'use strict';
 /**
- * 源进程管理：spawn 宿主引导 `host-boot.js`（cwd = 源码包目录），探测监听端口，健康检查
+ * 源进程管理：spawn 宿主引导 `host-boot.js`（cwd = 源包目录），探测监听端口，健康检查
  *
- * **面板就是宿主** —— 等价于 CatPawOpen App 内嵌的 node 运行时，而不是
+ * **本插件就是宿主** —— 等价于 CatPawOpen App 内嵌的 node 运行时，而不是
  * "看源码包脸色、指望它自己起来"：
- *   1. 跑的是面板的 `host-boot.js`，由它 `require` 源码包 → 调 `start(config)`
+ *   1. 跑的是 `host-boot.js`，由它 `require` 源包 → 调 `start(config)`
  *      （`config` = `index.config.js` 的 default 导出），退出时调 `stop()`。详见该文件头部
- *   2. 端口走 **`DEV_HTTP_PORT`**（宿主约定，源码包优先认它），同时给 `PORT` 兼容「自启动型」包
- *   3. 数据目录 = `process.env.NODE_PATH`（源码包的 db / 日志 / 弹幕配置都落在这里）
- *   4. 成功判据只有一条：**目标端口真的能连上**（面板每 500ms 探一次，最多 25 秒）
+ *   2. 端口走 **`DEV_HTTP_PORT`**（宿主约定，源包优先认它），同时给 `PORT` 兼容「自启动型」包
+ *   3. 数据目录 = `process.env.NODE_PATH`（源包的 db / 日志 / 弹幕配置都落在这里）
+ *   4. 成功判据只有一条：**目标端口真的能连上**（每 500ms 探一次，最多 25 秒）
  *
  * 所以「导出 start/stop 等宿主调用」这种形态**是支持的**（那是上游 douer / Lmentor 的标准做法），
- * 不用它自启动。两种形态都能跑：宿主调用型由面板调 `start()`；自启动型（读了 PORT 就 listen）
+ * 不用它自启动。两种形态都能跑：宿主调用型由这里调 `start()`；自启动型（读了 PORT 就 listen）
  * 由 host-boot 先探端口、认出它已经起来，不重复调 `start()`。
  *
  * 起不来（`start()` 抛错、什么都没监听）时**如实报错**，并把子进程最后几行输出一起给出 ——
- * 让用户/源作者看到真正的原因，而不是一句"运行中"。
+ * 让人看到真正的原因，而不是一句"运行中"。
+ *
+ * 这一份是从面板的 `server/modules/source/runner.js` 搬过来的：实例托管归插件之后，
+ * spawn 的父进程从面板换成了插件，其余口径一字未改。
  */
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -119,6 +122,13 @@ async function findFreePort(preferred = DEFAULT_PORT, host = '0.0.0.0') {
 
 /** 从 stdout/stderr 里解析源实际监听的端口（源码包被占用时会自己 +1，得跟着认） */
 function sniffPort(st, line) {
+  /* 「启动前这个端口就被别人占着」—— host-boot 在 require 源包**之前**就探到了，那说明
+   * 占着它的不是这个实例（多半是另一个实例配了同一个端口）。这里记下来，
+   * 免得 `waitReady` 把"端口有人应答"当成"这个实例起来了"（那会让站点身份张冠李戴）。 */
+  if (/^\[host\] 端口 \d+ 在启动前就已经被别人占用/.test(line.trim())) {
+    st.foreignPort = true;
+    return;
+  }
   /* 只认源码包**自己那台服务**的成功日志，两种都见得到：
    *   - 自启动型：`… listening on http://127.0.0.1:9280`
    *   - 宿主调用型：`Server listening on http://0.0.0.0:2333`（douer）/ `服务器启动成功: http://…:19099`（Lmentor）
@@ -163,16 +173,16 @@ function checkAlive(port, timeout = 1500) {
 }
 
 /**
- * 「起不来」的统一说明。面板这边已经把宿主该做的都做了（require 源码包 + 调 start(config) +
- * 给 DEV_HTTP_PORT/NODE_PATH），所以没起来基本落在源码包自己身上：start() 抛错、start() 是空实现、
+ * 「起不来」的统一说明。宿主该做的都做了（require 源包 + 调 start(config) + 给
+ * DEV_HTTP_PORT/NODE_PATH），所以没起来基本落在源包自己身上：start() 抛错、start() 是空实现、
  * 或者包依赖 App 才有的东西（Dart 桥 / 私有全局）。把**子进程最后的输出**一起给出 —— 那才是真正的原因。
  */
 function startupProblem(st, head) {
   return (
     head +
-    '面板是照「宿主」的方式起的：require 源码包 → 调 start(config)，端口给的是 DEV_HTTP_PORT，' +
+    '宿主该做的都做了：require 源包 → 调 start(config)，端口给的是 DEV_HTTP_PORT，' +
     '数据目录给的是 NODE_PATH（和 CatPawOpen App 一样；`start`/`stop` 这种写法是支持的）。' +
-    '所以问题在源码包这边，常见是：start() 里抛了错、start() 是空实现、' +
+    '所以问题在源包这边，常见是：start() 里抛了错、start() 是空实现、' +
     '或者它依赖只有 App 才有的东西（Dart 桥之类的宿主私有能力）。' +
     (st.tail && st.tail.length ? ` 子进程最后的输出：${st.tail.slice(-3).join(' ⏎ ')}` : ' 子进程没有任何输出。')
   );
@@ -326,6 +336,8 @@ async function waitReady(id) {
   const st = getState(id);
   const deadline = Date.now() + WAIT_PORT_MS;
   while (Date.now() < deadline) {
+    /* 端口在启动前就被别人占着 → 没什么可等的（"有人应答"证明不了这个实例起来了） */
+    if (st.foreignPort) break;
     // eslint-disable-next-line no-await-in-loop
     const alive = await checkAlive(st.port, 800);
     if (alive) {
@@ -337,6 +349,21 @@ async function waitReady(id) {
     if (!st.proc) break;
     // eslint-disable-next-line no-await-in-loop
     await new Promise((r) => setTimeout(r, 500));
+  }
+
+  /* 端口是别人的 → 如实报"起不来"，并把原因说清楚（换端口，或先停掉占着它的那个实例） */
+  if (st.foreignPort) {
+    st.deliberateKill = true;
+    try {
+      st.proc && st.proc.kill('SIGKILL');
+    } catch {
+      /* 已经退了就算了 */
+    }
+    st.status = 'error';
+    st.startupFailure = true;
+    st.error = `端口 ${st.port} 在启动前就已经被别人占用（多半是另一个实例用了同一个端口）—— 换一个端口，或先把占着它的那个实例停掉`;
+    console.log(`  ✘ 实例起不来：${id} — ${st.error}`);
+    return;
   }
 
   /* 期间被别人停了/杀了 / 已经起不来并写好原因了 → 别覆盖人家的状态 */

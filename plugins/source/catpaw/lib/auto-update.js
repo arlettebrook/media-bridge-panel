@@ -9,7 +9,8 @@
  *
  * 几条既定口径（页面上/日志里都说得出来）：
  *   · **默认关**（`autoUpdate: false`）：自动重启会打断正在播放的请求，让人自己勾；
- *   · 间隔默认 **12 小时**，取值 1~168（一周），存 `data/settings/source.json`；
+ *   · 间隔默认 **12 小时**，取值 1~168（一周），与实例清单一同存在插件自己的
+ *     `data/settings.json` 里（`lib/store.js`）；
  *   · **开机后第一次**在 `BOOT_DELAY_MS`（2 分钟）后才跑 —— 等面板自己先稳下来；
  *   · **单飞**：上一次没跑完不重入（手动点「立即检查」撞上定时那次会回 409）；
  *   · 某个源失败**只记日志**，不中断、不改设置，下一轮再试（源站抖动是常态）；
@@ -19,7 +20,6 @@
  * ⚠️ 想省一次 6MB 下载靠的是 `fetcher.download` 自己：它先探 md5，一样就直接返回 `changed:false`，
  * 所以"每 12 小时探一次"的实际开销是每个源两个小请求。
  */
-const settings = require('../../core/settings');
 const store = require('./store');
 const fetcher = require('./fetcher');
 const runner = require('./runner');
@@ -40,9 +40,7 @@ const st = {
 
 /** 当前配置（带兜底：设置文件里没有/写坏了也不会把定时器搞成 NaN） */
 function cfg() {
-  const s = settings.read('source') || {};
-  const hours = Math.min(168, Math.max(1, Number(s.autoUpdateHours) || DEFAULTS.hours));
-  return { enabled: s.autoUpdate === true, hours };
+  return store.autoUpdateCfg();
 }
 
 function clearTimer() {
@@ -93,19 +91,19 @@ async function runNow({ reason = 'manual' } = {}) {
   st.lastReason = reason;
   const results = [];
   try {
-    const srcs = store.list();
+    /* 只看**本地部署**的实例：外部地址那些没有包可更新（它那台机器自己管） */
+    const srcs = store.list().filter((x) => x.mode === 'local');
     for (const raw of srcs) {
-      const src = Object.assign({}, raw, { dir: store.sourceDir(raw.id), runtimeDir: store.runtimeDir(raw.id) });
+      const src = Object.assign({}, raw, { dir: store.bundleDir(raw.id), runtimeDir: store.runtimeDir(raw.id) });
       const one = { id: raw.id, name: raw.name || raw.url, ok: true, changed: false, restarted: false, error: null };
       try {
         // eslint-disable-next-line no-await-in-loop
-        const dl = await fetcher.download(src.url, src.dir);
+        const dl = await fetcher.download(fetcher.normalizeBaseUrl(src.url), src.dir);
         if (!dl.ok) {
           one.ok = false;
           one.error = dl.error || '下载/校验失败';
         } else if (dl.changed) {
           one.changed = true;
-          store.update(raw.id, {});
           if (runner.publicState(raw.id).status === 'running') {
             // eslint-disable-next-line no-await-in-loop
             await runner.restart(src, src);

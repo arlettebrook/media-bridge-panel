@@ -7,55 +7,27 @@
  *
  * 这样 shell 只管"画外壳 + 分发"，不必认识任何具体的页；反过来页也不必认识外壳。
  */
-import { S } from './state.js';
-
-/** 本地托管中正在运行的源 */
-export function localRunningSource() {
-  return S.sources.find((x) => x.run && x.run.status === 'running' && x.run.port) || null;
-}
-
-/** 运行页是否可用：本地有运行中的源，或已配置可用的托管源 */
-export function runReady() {
-  return !!(localRunningSource() || (S.run && S.run.url));
-}
-
-/** 运行中的本地源（可以有多个）—— 每个都能有自己的「配置中心」 */
-export function runningSources() {
-  return (S.sources || []).filter((x) => x.run && x.run.status === 'running' && x.run.port);
-}
-
-/** 「配置中心」页 id = `website-<本地源id>`；从页 id 反解源 id（不是这类页就回空） */
-export const WEBSITE_PAGE_PREFIX = 'website-';
-export function websiteSourceOfPage(page) {
-  return String(page || '').startsWith(WEBSITE_PAGE_PREFIX) ? String(page).slice(WEBSITE_PAGE_PREFIX.length) : '';
-}
-
-/** 页签上显示的源名（太长就截断 —— 源名可能是整条地址） */
-export function shortSourceName(s) {
-  const raw = String((s && (s.name || s.url)) || '').trim();
-  return raw.length > 16 ? raw.slice(0, 15) + '…' : raw || '(未命名)';
-}
-
-/** `pages()` 动态算 —— 源没跑起来就没有它的「配置中心」；跑起来几个就有几个 */
+/**
+ * 导航结构。
+ *
+ * ⚠️ 原先这里还有一栏「源托管」（猫源地址 + 每个运行中的源一个「配置中心」），
+ * 随源插件化**整栏去掉**：源实例归源插件管，入口在「插件 → 管理 →（那个插件）设置」里
+ * （见 docs/plugin-migration-plan.md 批次 4）。
+ */
 export const MODULES = [
-  {
-    id: 'source',
-    label: '源托管',
-    pages: () => {
-      const pages = [['source-bundle', '猫源地址']];
-      /* **每个运行中的源一个「配置中心」**（多源时以前只有一个，只能看第一个源的那份） */
-      for (const s of runningSources()) pages.push([WEBSITE_PAGE_PREFIX + s.id, '配置中心 · ' + shortSourceName(s)]);
-      /* 本地一个都没跑、但填了外部托管源：给一个「配置中心」入口（代理那台） */
-      if (pages.length === 1 && runReady()) pages.push(['website', '配置中心']);
-      return pages;
-    },
-  },
   {
     id: 'agg',
     label: '聚合设置',
-    pages: () => [['agg-host', '源列表'], ['agg-templates', '模板'], ['agg-search', '聚合搜索']],
+    pages: () => [
+      ['agg-templates', '模板'],
+      ['agg-search', '聚合搜索'],
+    ],
   },
   { id: 'emby', label: 'Emby', pages: () => [['emby-setup', '连接设置'], ['emby-home', '首页插件']] },
+  /* 插件宿主：装 / 卸 / 启停 + 每插件一个常驻子进程（见 docs/adr/0028）。
+   * 「某个插件自己的设置页」按它的**类型**挂到对应那一栏下（见 docs/adr/0029 的已定 18），
+   * 等元数据 / 首页插件进来时装上（批次 6 / 9）；现在从「管理」页上的「设置」按钮进。 */
+  { id: 'plugin', label: '插件', pages: () => [['plugin-manage', '管理']] },
   {
     id: 'panel',
     label: '面板设置',
@@ -80,7 +52,7 @@ const RENDERERS = new Map();
 
 /**
  * 登记页渲染函数。值可以是函数，也可以带 `nopad`（该页自己管留白）：
- *   registerPages({ 'agg-search': renderAgg, website: { render: renderWebsite, nopad: true } })
+ *   registerPages({ 'agg-search': renderAgg, 'plugin-manage': renderPluginManage })
  */
 export function registerPages(map) {
   for (const [id, spec] of Object.entries(map)) {
@@ -89,9 +61,5 @@ export function registerPages(map) {
 }
 
 export function rendererOf(page) {
-  const exact = RENDERERS.get(page);
-  if (exact) return exact;
-  /* 动态页：每个源一个「配置中心」（`website-<源id>`）复用 `website` 的渲染器 */
-  if (websiteSourceOfPage(page)) return RENDERERS.get('website') || null;
-  return null;
+  return RENDERERS.get(page) || null;
 }

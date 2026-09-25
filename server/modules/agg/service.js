@@ -1,17 +1,22 @@
 'use strict';
 /**
- * 聚合层服务：一个请求并发打**多个源**的多个站源 /search，按站点顺序拼接
+ * 聚合层服务：一个请求并发打**多个源**的多个站源，按站点顺序拼接
  *
- * 协议细节（$$$ / # / $ / push://）留在本层，消费方拿到的是「(源, 站点) → 原样输出」。
+ * ⚠️ **取数一律走 `source-bridge.js`**（转给源插件的动作）：本层不再认识 `/search`、`/detail`、
+ * `/play` 这些路径，也不再知道源的地址与端口 —— 站点身份是 `插件 id / 实例 id`。
+ * 转接回来的形状与"上游 HTTP 响应"一致，所以下面这套判据（404 = 没搜到、超时单独报、
+ * 逐站记账）一个字都没改。
+ *
+ * 协议细节（`$$$` / `#` / `$`）留在本层，消费方拿到的是「(源, 站点) → 原样输出」。
  *
  * **多源**：站点身份是 `(source, key)` 这一对 ——
- *   站点 key 只在**各自源内**唯一，两个源都有 `nodejs_muou` 是常事，所以任何
+ *   站点 key 只在**各自实例内**唯一，两个实例都有 `nodejs_muou` 是常事，所以任何
  *   "按 key 对齐/去重/排序"的地方都必须带上 source（否则会静默互相覆盖）。
  *   对外形状里 source 与 key 是**两个字段**；只有内部做 Map 键时才拼成一个复合键。
  */
-const { request } = require('../../core/upstream');
-const { normName } = require('../../core/catpaw');
+const bridge = require('./source-bridge');
 const match = require('./match'); // 片名清洗 + 打分（"这是不是目标作品"的唯一判据）
+const normName = match.normName; // 片名归一化（跨站同名比较用；它属于打分知识，见 match.js）
 const siteStats = require('./site-stats'); // 顺手记测速统计（见那个文件顶部）
 
 /** 内部复合键：`源 + \\u0001 + 站点key`（用控制字符分隔，配置里不可能出现，零歧义） */
@@ -51,7 +56,7 @@ function matchDefaults(params, opts) {
 }
 
 /**
- * 单站超时：**设置里是秒、内部一律毫秒**（`request()` 的 `timeout` 就是毫秒）。
+ * 单站超时：**设置里是秒、内部一律毫秒**（两层之间传的就是毫秒）。
  *
  * 两个超时**刻意分开**（原来只有一项 `timeoutMs`）：
  *   · `searchTimeoutMs` —— 搜索 / 播放 / 首次 `/init`：这一发本来就该快，默认 5 秒；
@@ -65,29 +70,12 @@ const detailTimeoutMs = (cfg) => Math.min(120000, Math.max(1000, Math.round((Num
 const round3 = (n) => Math.round(Number(n || 0) * 1000) / 1000;
 
 /**
- * 「先 POST /init 再搜」的缓存：按「源地址 + 站点 key」。
+ * 「先 POST /init 再搜」的记账。
  *
- * **恒开** —— 原来那个 `agg.initFirst` 开关已删：有的源不 init 就搜不出来，
- * 而"要不要 init"由源的性质决定、不是可选项（原来默认就是开，删掉开关等于保持现状）。
- * 测速任务（`agg/site-test.js`）每轮都经过这里，所以**一轮测速跑完 = 全站都 init 过**，
- * 业务侧首次搜索不必再多打那一次；新加入的站、或源重启换了端口（缓存键跟着源地址变）
- * 时，业务侧照旧在这里兜底 init 一次。
- * 返回 true = 这次真打了 `/init`；false = 命中缓存或打失败（失败会删键，下次重试）。
+ * ⚠️ **init 已搬进源插件**（它属于源协议的内部逻辑，见 docs/plugin-contract.md 第十二节）：
+ * 插件按「实例地址 + 站点」记住，重启换端口后自然重来。面板这边只把插件回的
+ * `initCalled` 照实记进结果里（诊断用，不参与打分）—— 原来那份 `initialized` 集合已删。
  */
-const initialized = new Set();
-
-async function ensureInit(source, site, timeoutMs) {
-  const k = source.url + '|' + site.key;
-  if (initialized.has(k)) return false;
-  initialized.add(k);
-  try {
-    await request(source.url, site.api + '/init', { method: 'POST', body: {}, timeout: Math.min(timeoutMs, 8000) });
-    return true;
-  } catch {
-    initialized.delete(k); // 失败下次重试
-    return false;
-  }
-}
 
 async function searchSite(source, site, wd, page, timeoutMs) {
   const t0 = Date.now();
@@ -107,13 +95,13 @@ async function searchSite(source, site, wd, page, timeoutMs) {
     noResultBy: null, // 有值 = "无结果"是由站源的哪种表达推出来的（如 http-404），见 searchSite
     response: null, // 站源 /search 的原样响应体
     responseStatus: null,
-    request: { method: 'POST', url: source.url + site.api + '/search', body: { wd, page: String(page) } },
-    initRequest: { method: 'POST', url: source.url + site.api + '/init', body: {} },
+    request: { action: 'search', source: source.id, site: site.key, body: { wd, page: String(page) } },
+    initRequest: { action: 'search 内先打 init', source: source.id, site: site.key },
     initCalled: false,
   };
   try {
-    r.initCalled = await ensureInit(source, site, timeoutMs);
-    const res = await request(source.url, site.api + '/search', { method: 'POST', body: { wd, page }, timeout: timeoutMs });
+    const res = await bridge.search(source.id, { key: site.key, wd, page, timeoutMs });
+    r.initCalled = !!res.initCalled;
     r.responseStatus = res.status;
 
     /* 站源表达「没搜到」的方式**不止一种**，这里把两种都归成**无结果**（`ok: true` + 空列表）：
@@ -662,7 +650,7 @@ async function fetchDetailOnce(source, site, vodId, timeoutMs, season, episode, 
   const r0 = { source: source.id, key: site.key, name: site.name, api: site.api, ok: false, ms: 0, data: null, detail: null, error: null };
   const t0 = Date.now();
   try {
-    const res = await request(source.url, site.api + '/detail', { method: 'POST', body: { id: vodId }, timeout: timeoutMs });
+    const res = await bridge.detail(source.id, { key: site.key, id: vodId, timeoutMs });
     r0.ms = Date.now() - t0;
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const j = res.json;
@@ -1118,8 +1106,9 @@ function normalizeUrls(url) {
 const NON_HTTP_URL = /^(push|magnet|ed2k|thunder|ftp|rtmp):/i;
 
 /**
- * 播放：`{source, site, flag, episodeId}` → 站源 `POST {api}/play {flag, id}` → 归一化。
- * 站点 api 前缀由 `(source, site)` 反查（调用方不用带），地址会过期，**每次播放都现取、不缓存**。
+ * 播放：`{source, site, flag, episodeId}` → 插件动作「解析地址」→ 归一化。
+ * 站点身份由 `(source, site)` 给出（调用方不用带地址与接口前缀），地址会过期，
+ * **每次播放都现取、不缓存**（缓存在插件自己那边，它自己管有效期 —— 见契约第八节）。
  */
 async function playEpisode(sources, sites, opts = {}) {
   const cfg = opts.params || {};
@@ -1138,7 +1127,12 @@ async function playEpisode(sources, sites, opts = {}) {
 
   let res;
   try {
-    res = await request(needSource(byId, site.source).url, site.api + '/play', { method: 'POST', body: { flag: opts.flag, id: opts.episodeId }, timeout: timeoutMs });
+    res = await bridge.play(needSource(byId, site.source).id, {
+      key: site.key,
+      flag: opts.flag,
+      id: opts.episodeId,
+      timeoutMs,
+    });
   } catch (e) {
     return done({ ok: false, error: { code: 'NETWORK', status: 502, message: e && e.name === 'AbortError' ? `超时(${timeoutMs}ms)` : '连不上源：' + ((e && e.message) || '') } });
   }
@@ -1168,7 +1162,6 @@ async function playEpisode(sources, sites, opts = {}) {
 module.exports = {
   aggregateSearch,
   searchSite,
-  ensureInit,
   normName,
   sid,
   sourceMap,

@@ -2,11 +2,14 @@
 /**
  * 面板配置备份 / 还原（原「导出」模块的能力）
  *
- * 只备份「配置」：settings/<模块>.json + 源清单。
- * 不含 index.js（6MB 级产物，可重新下载）与 runtime/（源自己的凭证缓存，含 cookie/token，不导出）。
+ * 只备份**面板自己的配置**：`settings/<模块>.json`。
+ * 不含：
+ *   · 插件的数据（`data/plugins/<类型>/<id>/data/`）—— 那是**插件自己的东西**，
+ *     源实例清单、自动更新设置都在里面；按"声明归插件、存储也归插件"的口径，由它自己导出
+ *   · 源包本体（6MB 级产物，可重新下载）与 runtime/（源自己的凭证缓存，含 cookie/token，不导出）
  */
 const fs = require('fs');
-const { SETTINGS_DIR, SOURCES_FILE } = require('../../core/paths');
+const { SETTINGS_DIR } = require('../../core/paths');
 const settings = require('../../core/settings');
 const registry = require('../../core/registry');
 
@@ -16,14 +19,8 @@ function exportAll() {
     exportedAt: new Date().toISOString(),
     settingsDir: SETTINGS_DIR,
     settings: {},
-    sources: [],
   };
   for (const id of settings.ids()) out.settings[id] = settings.read(id);
-  try {
-    out.sources = JSON.parse(fs.readFileSync(SOURCES_FILE, 'utf8')).sources || [];
-  } catch {
-    out.sources = [];
-  }
   return out;
 }
 
@@ -47,9 +44,8 @@ function restore(bundle) {
   return {
     ok: true,
     restored,
-    // 源清单不自动覆盖：本机托管源的目录/进程状态与清单强相关，误覆盖会造成孤儿目录
     note: restored.length
-      ? '源清单未覆盖（如需迁移请手动编辑 data/sources.json）；进程里的设置已按新值生效'
+      ? '插件的数据没有随备份走（源实例清单在插件自己的 data/ 里）—— 需要迁移时到插件的设置页重新加一遍实例'
       : '没有可还原的模块设置',
   };
 }

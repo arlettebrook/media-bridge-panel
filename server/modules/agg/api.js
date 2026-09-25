@@ -13,25 +13,21 @@
  * 看不出是 401 —— 因为 401 发生在进路由之前，连一条 agg 请求日志都没有）。
  * 两层本来就在**同一个进程**里，「地址 + HTTP」那层壳除了多一次鉴权与一次 JSON 往返，没有任何价值。
  *
- * ⚠️ 模块间直连有两处，都是**同一个进程里的本地状态**，不是"地址 + HTTP"：
- *   ① emby → agg（本文件，原因见上）；
- *   ② agg → source（`require('../source/service').deployed()`）—— 本地部署的源就活在本进程里
- *      （`store` + `runner`），"读它的名字与当前端口"没有第二种拿法：写进配置会随重启过期。
- *   别的地方（source → agg 读配置、面板 → 外部聚合地址）仍走「地址 + HTTP」—— 那些地址
- *   **可以在别的机器上**。
+ * ⚠️ 模块间直连只剩一处：emby → agg（本文件，原因见上）。
+ * 源那侧**不再直连** —— 取数与"有哪些源、有哪些站点"都走 `source-bridge.js` 转给源插件
+ * （`agg → source` 那份直连随源插件化去掉了：源不活在本进程里，它们由插件托管）。
+ * 别的地方（面板 → 外部聚合地址）仍走「地址 + HTTP」—— 那些地址**可以在别的机器上**。
  *
  * 约定：**不抛异常**，成败看 `ok`。失败一律 `{ ok:false, error:{ code, status, message } }` ——
  * `status` 是"同样的错在 HTTP 上该回几"，路由层直接照搬，emby 层则拿 code/message 写日志。
  * 站点身份是 `(source, site)` 这一对，任何按 key 对齐的地方都必须带上 source。
  */
 const settings = require('../../core/settings');
-const catpaw = require('../../core/catpaw');
-const { request } = require('../../core/upstream');
-const sourceService = require('../source/service');
+const bridge = require('./source-bridge');
 const cache = require('./cache');
 const templates = require('./templates');
 const siteStats = require('./site-stats');
-const { aggregateSearch, aggregateDetail, playEpisode, selectSites, matchDefaults, ensureInit, detailTimeoutMs, lineFilter: serviceLineFilter } = require('./service');
+const { aggregateSearch, aggregateDetail, playEpisode, selectSites, matchDefaults, detailTimeoutMs, lineFilter: serviceLineFilter } = require('./service');
 
 /** 失败的统一形状（不抛异常：调用方可能是路由，也可能是 emby 层，各自决定怎么呈现） */
 function fail(code, status, message) {
@@ -66,85 +62,28 @@ function ensureDomain(domain) {
 }
 
 /**
- * 聚合用哪些源 = **本地部署的源（自动，不需要配置）** + **自定义源（`agg.sources`，外部地址）**。
- *
- * 设计口径：部署的源不必再手动往聚合里加一遍 —— 名字就取**部署源自己的名字**
- * （否则会出现"聚合里叫 A、源页上叫 B"、看着像两个源）。所以清单每次现算：
- *   · 部署源的名字/端口都**当场问**（源改名、换端口立刻反映；存下来必然过期）
- *   · 自定义源照旧读配置（那是外部地址，面板不知道它后面是什么）
- * 前端「聚合 · 源列表」用 `deployed` 这个标记区分两类（部署的不可删、也没有地址可编辑）。
- */
-function listSources() {
-  /* 源清单仍读 `agg.json`：源本身的插件化在后面的批次（批次 4/5），这一批只把
-   * 「选哪些站点、按什么参数聚合」搬到模板。 */
-  const cfg = settings.read('agg');
-  const custom = (cfg.sources || []).map((s) => ({
-    id: s.id,
-    url: s.url,
-    name: s.name || '',
-    enabled: s.enabled !== false,
-    deployed: false,
-  }));
-  return sourceService.deployed().concat(custom);
-}
-
-/**
  * 拉所有**参与聚合**的源的站点清单；给每个站点打上 `source` / `sourceName`。
- * 单源失败只影响自己（回到 `sources[].ok/error`，它的站点就不出现在 `sites` 里）。
+ *
+ * **源与站点都来自源插件**（`站点清单` 动作）：面板这边不再有"聚合源配置"，
+ * 也不再自己去问每个源的 `/config`。每个实例一行，实例自己的失败只影响它自己
+ *（`sources[].ok/error`），它的站点就不出现在 `sites` 里。
  * 返回 `{ sources, sites }`；`sources` 里不含站点数组（响应不必背两份）。
  */
 async function loadSites() {
-  const list = listSources();
-  const rows = await Promise.all(
-    list.map(async (s) => {
-      const t0 = Date.now();
-      const row = {
-        id: s.id,
-        url: s.url,
-        name: s.name || '',
-        enabled: s.enabled,
-        deployed: !!s.deployed,
-        /* 部署源的端口/运行态**要一起带上**（前端用它显示「:9988」、emby 层 302 时要拿它改写地址）。
-         * 漏了的话前端那一遍探测回来就把端口冲掉了。 */
-        port: s.port || null,
-        status: s.status || '',
-        running: !!s.running,
-        ok: false,
-        ms: 0,
-        siteCount: 0,
-        error: null,
-      };
-      let sites = [];
-      if (!s.url) {
-        /* 本地部署但没在跑（`deployed()` 只在运行时给 url）—— 如实说，别报成"请求超时" */
-        row.error = s.deployed ? '这个源没在运行（去「源托管」启动它）' : '没有地址';
-      } else {
-        try {
-          const r = await catpaw.fetchSites(s.url);
-          sites = (r.sites || []).map((x) =>
-            Object.assign({}, x, {
-              source: s.id,
-              sourceName: s.name || s.url,
-              /* 把**已记下的统计**带上（见 site-stats.js）：界面那一列「延迟」= `stat.home`（测速结果），
-               * title 里的"最近一次真实搜索 / 取详情"= `stat.call.*`（顺手记账）。
-               * 什么都没记过的站点这里是 null，界面显示 `—`（如实，不编）。 */
-              stat: siteStats.view(s.id, x.key),
-            })
-          );
-          row.ok = true;
-          row.siteCount = sites.length;
-        } catch (e) {
-          row.error = e && e.name === 'AbortError' ? '请求超时' : String((e && e.message) || e);
-        }
-      }
-      row.ms = Date.now() - t0;
-      return { row, sites };
-    })
-  );
+  const { sources, sites } = await bridge.loadSites();
+  const byId = new Map(sources.map((s) => [s.id, s]));
   return {
-    sources: rows.map((x) => x.row),
+    sources,
     /* 站点清单只收"启用的源"的；关掉的源整体不参与聚合（站点勾选不用逐个取消） */
-    sites: rows.filter((x) => x.row.enabled).flatMap((x) => x.sites),
+    sites: sites.map((x) =>
+      Object.assign({}, x, {
+        sourceName: (byId.get(x.source) || {}).name || x.source,
+        /* 把**已记下的统计**带上（见 site-stats.js）：界面那一列「延迟」= `stat.home`（测速结果），
+         * title 里的"最近一次真实搜索 / 取详情"= `stat.call.*`（顺手记账）。
+         * 什么都没记过的站点这里是 null，界面显示 `—`（如实，不编）。 */
+        stat: siteStats.view(x.source, x.key),
+      })
+    ),
   };
 }
 
@@ -443,51 +382,38 @@ function pickProbeWord(exclude) {
 }
 
 /**
- * **单站测速**：`POST {api}/search`（关键词随机取），量往返耗时并覆盖统计里的那一槽。
+ * **单站测速**：向源插件要一发搜索探针（关键词随机取），量往返耗时并覆盖统计里的那一槽。
  *
- * 为什么是 `/search`：聚合真正走的就是它，只有它的数字对得上"用户会等多久"。
+ * 为什么是搜索：聚合真正走的就是它，只有它的数字对得上"用户会等多久"。
  * （`/home` 实测虽然普遍可用，但它返回的是**首页分类树** —— huban/duoduo 各 62KB / 208 个分类、
  * 盘搜类站是空壳 10ms —— 与搜索耗时背离：实测 duoduo 首页 2.0s / 搜索 0.4s、huban 1.4s / 0.1s，
  * 当"延迟"列会误导，所以不用它。）
  *
  * **失败换词再测一发**：非 200（404 / 5xx / 403 …）就换一个探测词重测；**两发都非 200 才算真失败**。
  * 这样"这站恰好没有那个词"不会被记成一次失败，而真的坏站（两发都失败）会如实标出来。
+ * （"换词重测"是**面板侧的判据**，所以留在这一层；插件那边只负责"打一发、报结果"。）
  *
  * **口径与业务刻意不同**（见 `site-stats.js` 顶部）：`200 = 成功`，**列表为空也算**
  * （它已经尽了搜索的义务）；非 200 记失败并记下状态码；超时 / 网络错记失败。
  *
- * `init` 走 `ensureInit()`（与业务同一个函数、同一份缓存）：测速顺带把"已初始化"标记做好，
- * 业务侧首次搜索不必再多打一次（`initFirst` 开关已删，见 service.js 的 ensureInit）。
+ * `init` 由插件自己做（它按「实例 + 站点」记住），返回里带 `initCalled` —— 测速顺手把
+ * 那一标记做好，业务侧首次搜索不必再多打一次。
  *
  * 失败不可怕：`ok:true` 只表示"这次测速动作本身完成了"，站点结论在返回的 `search` 里。
  * `routeMissing` —— 404 且文案是 `Route POST:… not found`（**源里这个站没实现 /search**，
  * 不是站坏了）；其余非 200 / 超时 = 上游真实的错（HTTP 404 / 500 / 403 / 超时）。
  */
-async function probeSearch({ source, key, api, wd, timeoutMs } = {}) {
+async function probeSearch({ source, key, wd, timeoutMs } = {}) {
   const siteKey = String(key || '').trim();
   const sourceId = String(source || '').trim();
   if (!siteKey) return fail('BAD_INPUT', 400, '请提供站点 key');
   if (!sourceId) return fail('BAD_INPUT', 400, '请提供源 id');
-  const row = listSources().find((s) => s.id === sourceId);
-  if (!row || !row.url) return fail('NO_SOURCE', 400, `源 ${sourceId} 现在不可用（没在运行？）`);
-
-  /* 站的接口前缀：调用方手上一般就有（站点清单里的 `api`），没带就问一次源自己的 /config */
-  let apiPath = String(api || '').trim();
-  if (!apiPath) {
-    try {
-      const r = await catpaw.fetchSites(row.url);
-      const hit = (r.sites || []).find((x) => x.key === siteKey);
-      apiPath = hit ? hit.api : '';
-    } catch (e) {
-      return fail('UPSTREAM_HTTP', 502, '取站点清单失败：' + String((e && e.message) || e));
-    }
-  }
-  if (!apiPath || !apiPath.startsWith('/')) return fail('BAD_INPUT', 400, `认不出站点 ${siteKey} 的接口路径`);
 
   const timeout = Math.max(1000, Number(timeoutMs) || SPEED_TEST_TIMEOUT_MS);
-  const initCalled = await ensureInit(row, { key: siteKey, api: apiPath }, timeout);
+  let initCalled = false;
+  let sourceName = '';
 
-  /** 打一发搜索（`/init` 上面已经处理过，这里不再重复） */
+  /** 打一发搜索（`init` 由插件在第一次调用时自己兜） */
   const callSearch = async (word) => {
     const t0 = Date.now();
     let status = 0;
@@ -496,13 +422,24 @@ async function probeSearch({ source, key, api, wd, timeoutMs } = {}) {
     let text = '';
     let body = null;
     try {
-      const r = await request(row.url, apiPath + '/search', { method: 'POST', body: { wd: word, page: '1' }, timeout });
+      const r = await bridge.probe(sourceId, { key: siteKey, wd: word, timeoutMs: timeout });
       status = r.status;
       ok = r.ok;
       text = String(r.text || '');
       body = r.json;
+      if (r.initCalled) initCalled = true;
+      if (r.name) sourceName = String(r.name);
       if (!ok) error = 'HTTP ' + r.status;
     } catch (e) {
+      /* 这两种不是"这一发测速失败"，而是**请求本身就不成立**（认不出站点 / 实例没在跑）——
+       * 如实按业务错误回，不混进测速统计里（否则统计里会多一条"这个站坏了"的假账）。 */
+      if (e && (e.code === 'NO_SITE' || e.code === 'NO_SOURCE')) {
+        const err = new Error((e && e.message) || String(e));
+        err.probeFail = e.code === 'NO_SITE'
+          ? fail('BAD_INPUT', 400, `认不出站点 ${siteKey}（插件那边的站点清单里没有它）`)
+          : fail('NO_SOURCE', 400, `源 ${sourceId} 现在不可用（没在运行？）`);
+        throw err;
+      }
       error = e && e.name === 'AbortError' ? `超时(${timeout}ms)` : String((e && e.message) || e);
     }
     const list = (body && Array.isArray(body.list) && body.list) || [];
@@ -521,8 +458,14 @@ async function probeSearch({ source, key, api, wd, timeoutMs } = {}) {
 
   /* 第一发用调用方给的词（缺省随机取一个），非 200 就**换一个词再测一发**（只重试一次） */
   const first = String(wd || '').trim() || pickProbeWord();
-  const attempts = [await callSearch(first)];
-  if (!attempts[0].ok) attempts.push(await callSearch(pickProbeWord(first)));
+  let attempts;
+  try {
+    attempts = [await callSearch(first)];
+    if (!attempts[0].ok) attempts.push(await callSearch(pickProbeWord(first)));
+  } catch (e) {
+    if (e && e.probeFail) return e.probeFail;
+    throw e;
+  }
 
   const last = attempts[attempts.length - 1];
   const tries = attempts.length;
@@ -532,7 +475,7 @@ async function probeSearch({ source, key, api, wd, timeoutMs } = {}) {
     ok: true,
     source: sourceId,
     key: siteKey,
-    name: row.name,
+    name: sourceName || sourceId,
     timeoutMs: timeout,
     initCalled,
     search: Object.assign({}, last, { tries }),
@@ -548,7 +491,6 @@ module.exports = {
   /** 某个域的参数（emby 层拼版本列表时要按同一套规则过滤线路，见 docs/adr/0025） */
   paramsFor: (domain) => templates.paramsFor(String(domain || '').trim()),
   lineFilter,
-  listSources,
   loadSites,
   liveSources,
   detail,

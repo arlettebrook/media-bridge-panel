@@ -30,9 +30,13 @@
     <div id="workspace" class="workspace hidden">
       <div class="body">
         <nav class="nav" id="nav">
-          <button data-module="source" class="active">源托管<span class="nav-badge" id="navSrcBadge"></span></button>
-          <button data-module="agg">聚合设置<span class="nav-badge" id="navAggBadge"></span></button>
+          <button data-module="agg" class="active">聚合设置</button>
           <button data-module="emby">Emby</button>
+          <!-- ⚠️ 导航按钮在本文件里，而"这一栏有哪些页"在 core/registry.js 的 MODULES 里 ——
+               加一栏要**两处都改**（下面的 subnav 是照 MODULES 现画的）。
+               「源托管」那一栏已随源插件化去掉：源与实例都归源插件（见 docs/plugin-migration-plan.md 批次 4），
+               入口在「插件 → 管理」里。 -->
+          <button data-module="plugin">插件</button>
           <button data-module="panel">面板设置</button>
         </nav>
         <div class="content">

@@ -16,7 +16,7 @@
 import { $, el, toast } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
-import { sid, ensureAggSites, ensureTemplates, sourcesForDisplay } from '../../core/store.js';
+import { sid, ensureAggSites, ensureTemplates } from '../../core/store.js';
 import { renderPage, renderNav } from '../../core/shell.js';
 
 /** 当前编辑的模板 id（放在 `S` 上：翻页回来还是同一套） */
@@ -52,10 +52,12 @@ export async function renderTemplates(v) {
     paintSites(t);
     return;
   }
-  /* 站点表要等各源 /config 探测完（连不上的要等超时）—— 先画上面的卡片 */
+  /* 站点清单归源插件：它要挨个问自己那些实例的 `/config`（连不上的要等超时），先画上面的卡片。
+   * ⚠️ 这一块用的是**另一个宿主**（`siteAreaHost`），拿到之后必须把它清掉 ——
+   * 否则那句"正在取…"会一直挂在站点表下面（实测就是这么留着的）。 */
   const host = el('div', { id: 'siteAreaHost' });
   v.append(host);
-  host.append(el('div', { class: 'hint', text: '正在探测各源…（连不上的要等超时；模板与参数可以先改）' }));
+  host.append(el('div', { class: 'hint', text: '正在取站点清单…（连不上的实例要等超时；模板与参数可以先改）' }));
   try {
     await ensureAggSites();
   } catch (e) {
@@ -65,6 +67,7 @@ export async function renderTemplates(v) {
     return;
   }
   if (!host.isConnected) return;
+  host.textContent = '';
   paintSites(curTpl());
 }
 
@@ -351,9 +354,9 @@ function paintSites(t) {
   const host = $('#siteTableHost');
   if (!host) return;
   if (!t) return;
-  if (!sourcesForDisplay().length) {
+  if (!(S.aggSources || []).length) {
     host.textContent = '';
-    host.append(el('div', { class: 'hint warn' }, '还没有源 —— 到「源托管 · 猫源地址」部署一个（会自动进聚合），或到「源列表」填一个外部地址。'));
+    host.append(el('div', { class: 'hint warn' }, '还没有源 —— 到「插件 → 管理」找到源插件（猫爪源），在它自己的设置页里加一个实例。'));
     return;
   }
   if (!(S.aggSites || []).length) {
@@ -505,7 +508,8 @@ function delayCell(s, timeoutMs) {
       b.disabled = true;
       b.textContent = '…';
       try {
-        const r = await api('/api/agg/site-test/one', { method: 'POST', body: { source: s.source, key: s.key, api: s.api } });
+        /* 单站测速：只要「实例 + 站点 key」—— 接口前缀由插件自己知道（面板不再拼路径） */
+        const r = await api('/api/agg/site-test/one', { method: 'POST', body: { source: s.source, key: s.key } });
         if (td.isConnected) td.replaceWith(delayCell(Object.assign({}, s, { stat: r.stat }), timeoutMs));
         toast(`${s.name || s.key}：${r.search.ok ? fmtMs(r.search.ms) + ` · ${r.search.count} 条` : r.search.error || '失败'}`);
       } catch (err) {
@@ -529,7 +533,7 @@ function delayCell(s, timeoutMs) {
       'td',
       {
         class: 'note err-note',
-        title: `测速失败：${why}\n用的片名「${one.wd}」${one.tries > 1 ? `（第 ${one.tries} 发，首发失败后换过词）` : ''}\n聚合搜索会**先跳过**这一列失败的站 —— 点「测速」复测成功即恢复。\n${callNote}`,
+        title: `测速失败：${why}\n用的片名「${one.wd}」${one.tries > 1 ? `（第 ${one.tries} 发，首发失败后换过词）` : ''}\n聚合搜索会先跳过这一列失败的站 —— 点「测速」复测成功即恢复。\n${callNote}`,
       },
       one.status ? 'HTTP ' + one.status : '失败',
       btn

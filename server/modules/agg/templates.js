@@ -16,9 +16,9 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { DATA_DIR } = require('../../core/paths');
+const { TEMPLATES_DIR } = require('../../core/paths');
 
-const DIR = path.join(DATA_DIR, 'templates');
+const DIR = TEMPLATES_DIR;
 const DOMAINS = path.join(DIR, 'domains.json');
 const ID_RE = /^tpl_[a-z0-9]{6,32}$/;
 

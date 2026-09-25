@@ -1,11 +1,13 @@
 'use strict';
 /**
- * 猫爪源协议层（跨模块共享的纯协议知识，不含任何模块状态）
+ * 猫爪源协议层（**协议知识全在这里**，不含任何面板状态）
  *
- *   - 地址归一化：把用户填的地址规范成源服务基地址
- *   - /config 解析：按 video/read/comic/music/pan 摊平成站点数组
- *   - 探测：GET /check + GET /config
- *   - 片名归一化：跨站同名比较用
+ *   - 地址归一化：把填的地址规范成源服务基地址
+ *   - `/config` 解析：按 video/read/comic/music/pan 摊平成站点数组
+ *   - 探测：`GET /check` + `GET /config`
+ *
+ * 这一份是从面板的 `server/core/catpaw.js` 搬过来的（面板那边已删掉）：协议属于源插件，
+ * 面板只做编排与打分，不再认识 `/config`、`/search` 这些路径。
  */
 const { request } = require('./upstream');
 
@@ -29,7 +31,7 @@ function normSourceUrl(raw) {
   return u;
 }
 
-/** /config 摊平成站点数组 */
+/** `/config` 摊平成站点数组（每个站点带上它属于哪一组） */
 function normalizeSites(config) {
   const out = [];
   for (const [g, label] of GROUPS) {
@@ -37,14 +39,6 @@ function normalizeSites(config) {
     for (const s of arr) out.push(Object.assign({}, s, { group: g, groupLabel: label }));
   }
   return out;
-}
-
-/** 片名归一化：去空格、全角半角标点、括号、破折号等，小写比较 */
-function normName(s) {
-  return String(s || '')
-    .toLowerCase()
-    .replace(/[\s\u3000]+/g, '')
-    .replace(/[·・.,，。:：;；!！?？'"“”‘’()（）\[\]【】《》\-_—~～、/\\|+*&#@%$^]/g, '');
 }
 
 async function fetchConfig(baseUrl, { timeout = 20000 } = {}) {
@@ -58,7 +52,7 @@ async function fetchSites(baseUrl, opts) {
   return { config, sites: normalizeSites(config) };
 }
 
-/** 探测一个源地址是否可用（/check + /config） */
+/** 探测一个源地址是否可用（`/check` + `/config`）—— 手动"能不能用"的那一发 */
 async function probe(baseUrl, { timeout = 8000 } = {}) {
   const out = { url: baseUrl, ok: false, check: null, siteCount: 0, elapsed: 0, error: null };
   const t0 = Date.now();
@@ -81,4 +75,4 @@ async function probe(baseUrl, { timeout = 8000 } = {}) {
   return out;
 }
 
-module.exports = { GROUPS, normSourceUrl, normalizeSites, normName, fetchConfig, fetchSites, probe };
+module.exports = { GROUPS, normSourceUrl, normalizeSites, fetchConfig, fetchSites, probe };

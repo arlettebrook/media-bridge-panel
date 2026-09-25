@@ -12,9 +12,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-/* 对外自称读 core/branding.js（改名只改那一处）—— 源站那边只看得到这个 UA */
-const BRAND = require('../../core/branding');
-const UA = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ${BRAND.ua}`;
+/* 下载源包时对外自称的 UA —— 与面板那份**保持同一个串**（源站只看得到它；
+ * 换一个等于"换了个人来下载"，属于显式决定，所以写死在这里而不是跟着插件版本走） */
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) MediaBridgePanel/1.0';
 const REQUIRED_FILES = ['index.js'];
 const ALL_FILES = ['index.js', 'index.config.js', 'index.js.md5', 'index.config.js.md5'];
 

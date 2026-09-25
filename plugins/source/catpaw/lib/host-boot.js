@@ -115,7 +115,16 @@ function shutdown(sig) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+/* ⚠️ **在 require 源包之前**先看一眼目标端口：有人应答 = 那是**别人的**进程（不是这个包）。
+ * 不看这一眼的后果很具体：两个实例被配到同一个端口时，后起的那个也会"看到端口通了"，
+ * 于是被当成"这个实例起来了" —— 它顶着别人的站点装成自己（站点身份张冠李戴）。
+ * 如实失败更好：进程非 0 退出、原因写在输出里，面板把它显示出来。 */
 (async () => {
+  if (PORT && (await portOpen(PORT))) {
+    console.error(`[host] 端口 ${PORT} 在启动前就已经被别人占用（多半是另一个实例用了同一个端口）`);
+    process.exit(1);
+  }
+
   const config = loadConfig();
   try {
     mod = require(path.join(DIR, 'index.js'));

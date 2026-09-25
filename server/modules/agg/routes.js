@@ -1,8 +1,8 @@
 'use strict';
 /**
  * 聚合层路由（**多源**）：
- *   GET  /api/agg/sources 源清单（**不探测**：本地部署的源 + 自定义地址，读文件/进程状态，几毫秒）
- *   GET  /api/agg/sites   源清单 + 站点清单（每个源并发拉自己的 /config）
+ *   GET  /api/agg/sources 源清单（来自源插件的申报）
+ *   GET  /api/agg/sites   源清单 + 站点清单（同一趟拿全；插件自己那个动作一次给齐）
  *   POST /api/agg/search  按片名并发搜**多个源的多个站源**，并**顺手打分**：
  *                         `{wd, page?, year?, season?, episode?, minScore?, maxItems?, keys?}` →
  *                         出参里每个条目带 `score`/`matched`/`matchReason`，顶层给 `matched` 与
@@ -11,80 +11,20 @@
  *                         把站源协议（`$$$` / `#` / `$`）拆成「线路 → 选集」，需要时可定位某一集
  *   POST /api/agg/play    按 `{source, site, flag, episodeId}` 取播放地址（归一化 url / header / parse）
  *
- * 源清单 = **本地部署的源（自动）** + 设置里的**自定义地址**（见 api.listSources）。
- * 部署源不需要在聚合里配一遍：名字取部署源自己的名字，地址每次现算（端口会变）。
- * 站点身份是 `(source, key)` 这一对：key 只在各自源内唯一，跨源同名是常事 ——
- * 所以入参/出参里 source 与 key 是**两个字段**，绝不用裸 key 对齐。
+ * 源清单与站点清单都**来自源插件**（`站点清单` 动作，见 `agg/source-bridge.js`）：
+ * 面板这边不再有"聚合源配置"，也不再自己去打每个源的 `/config`。
+ * 站点身份是 `(source, key)` 这一对：source 是「插件 id / 实例 id」，key 只在各自实例内唯一，
+ * 跨实例同名是常事 —— 所以入参/出参里 source 与 key 是**两个字段**，绝不用裸 key 对齐。
  *
- * ⚠️ 本层**不直接 require source 层**（那件事在 `./api.js` 里做，只有它需要"部署源现在在哪个端口"）：
- * 这里只管 HTTP：解 body → 调 api → 按 `error.status` 决定状态码。
+ * 本层只管 HTTP：解 body → 调 api → 按 `error.status` 决定状态码。
  * emby 层走的是同一个 api（见 api.js 的说明）。
  */
-const fs = require('fs');
-const settings = require('../../core/settings');
 const { sendJson, sendError, readBody } = require('../../core/http');
 const api = require('./api');
 const templates = require('./templates');
 const providers = require('../../core/providers');
 const siteTest = require('./site-test');
 const { aggregateSearch, selectSites } = require('./service');
-
-/**
- * 一次性搬迁（项目未发布，不做兼容分支）：把多源之前的两样东西搬成新形状。
- *   ① `upstream.source`（**单个**猫源地址）→ `sources[0]`（地址本身有价值，不能丢）
- *   ② `enabled` / `order` 里的**裸站点 key** → 丢弃（"它属于哪个源"无从得知，提示重新勾选）
- *   ③ `timeoutMs`（毫秒，单项）→ `timeoutSec`（秒，搜索用）：单位统一成秒，旧值四舍五入搬过去；
- *      详情那一项（`detailTimeoutSec`）是新加的，没有旧值可搬，直接取默认 10 秒
- * 不搬 ② 的话，新的 validate 会一直拒掉后续保存（旧非法项还留在数组里）。
- * 只在启动注册路由时跑一次；干净了就什么也不做。
- */
-/**
- * 盘上**原样**的那份 agg 设置（不经默认值合并）。
- * 判断"某个键有没有被写过"只能看它 —— `settings.read()` 会把 defaults 合并进来，
- * 于是 `timeoutSec` 永远是 5，拿合并后的值判"没写过"必然判错（旧值会静默丢掉）。
- */
-function readAggFile() {
-  try {
-    const v = JSON.parse(fs.readFileSync(settings.fileOf('agg'), 'utf8'));
-    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
-  } catch {
-    return {};
-  }
-}
-
-function migrateLegacy() {
-  const cfg = settings.read('agg');
-  const file = readAggFile();
-  const isPair = (x) => !!x && typeof x === 'object' && x.source && x.key;
-  const next = Object.assign({}, cfg);
-  const notes = [];
-
-  const old = cfg.upstream && cfg.upstream.source;
-  if (old && !(cfg.sources || []).length) {
-    next.sources = [{ id: 's1', url: String(old), name: /^https?:\/\/(127\.0\.0\.1|localhost)/i.test(old) ? '本地源' : '', enabled: true }];
-    notes.push(`猫源地址 ${old} → 源列表 s1`);
-  }
-  if (next.upstream !== undefined) delete next.upstream; // 旧字段整体去掉（已被 sources 取代）
-
-  if (['enabled', 'order'].some((k) => (cfg[k] || []).some((x) => !isPair(x)))) {
-    next.enabled = [];
-    next.order = [];
-    notes.push('旧的裸站点 key 已丢弃（请重新勾选站点）');
-  }
-
-  /* 单站超时：毫秒 → 秒（`timeoutMs` → `timeoutSec`）。**必须搬**：用户调过的 12000 不能
-   * 被静默退回默认 5 秒（那是两倍多的差别）。判据看 `file`（盘上原样那份），见 readAggFile。 */
-  if (file.timeoutMs !== undefined && file.timeoutSec === undefined) {
-    const sec = Math.min(60, Math.max(1, Math.round(Number(file.timeoutMs) / 1000) || 5));
-    next.timeoutSec = sec;
-    notes.push(`单站超时 ${file.timeoutMs}ms → ${sec}s`);
-  }
-  if (next.timeoutMs !== undefined) delete next.timeoutMs;
-
-  if (!notes.length) return;
-  settings.write('agg', next);
-  console.log('  ↻ agg 设置搬迁：' + notes.join('；'));
-}
 
 /** api 的失败形状（`{ok:false, error:{code,status,message}}`）→ HTTP */
 function fail(res, out) {
@@ -93,15 +33,18 @@ function fail(res, out) {
 }
 
 module.exports = function routes(r) {
-  migrateLegacy();
 
   /**
-   * GET /api/agg/sources —— **不探测的源清单**（前端"先渲染、后台探测"的第一遍）。
-   * 与 `/api/agg/sites` 同形状，只是没有 `ok/ms/siteCount/error`（那是探测结果）。
-   * 单列这一条是因为源清单是**本机状态**（读文件 + 问进程），几毫秒就回来；
-   * 而探测要挨个打源的 `/config`，连不上的源得等超时。
+   * GET /api/agg/sources —— 源清单（前端"先渲染、后台探测"的第一遍）。
+   *
+   * ⚠️ 它现在也要**过插件**（源与站点都归源插件申报）：插件那边缓存着站点清单（一分钟），
+   * 所以除了缓存到期那一发，这就是一次管道往返 —— 比原先"挨个打源的 `/config`"更快。
+   * 形状与 `/api/agg/sites` 一致（都带 `ok/ms/siteCount`），不再有"探测 vs 不探测"之分。
    */
-  r.add('GET', '/api/agg/sources', (req, res) => sendJson(res, 200, { sources: api.listSources() }));
+  r.add('GET', '/api/agg/sources', async (req, res) => {
+    const { sources } = await api.loadSites();
+    return sendJson(res, 200, { sources });
+  });
 
   r.add('GET', '/api/agg/sites', async (req, res) => {
     const { sources, sites } = await api.loadSites();
@@ -183,7 +126,7 @@ module.exports = function routes(r) {
     if (dom.error) return fail(res, dom.error);
     const cfg = dom.params;
     const { sources, sites } = await api.loadSites();
-    if (!sources.length) return sendError(res, 400, '还没有聚合源：本地部署一个源，或到「聚合设置 → 源列表」填一个外部地址');
+    if (!sources.length) return sendError(res, 400, '还没有可用的源：到「插件 → 管理 → 猫爪源 → 设置」里加一个实例（本地部署或外部地址）');
     const picked = selectSites(sites, dom.selection, body.keys);
     if (!picked.length) {
       if (!api.liveSources(sources).length) {

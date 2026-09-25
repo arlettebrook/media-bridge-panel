@@ -23,9 +23,9 @@ logbus.install();
 
 // ————————————————— 模块清单（加模块只改这里）—————————————————
 const MODULES = [
-  require('./server/modules/source'), // 数据源层：本地托管源 / 运行中的源 / 托管源代理
-  require('./server/modules/agg'), // 聚合层：多站并发聚合
+  require('./server/modules/agg'), // 聚合层：多站并发聚合（取数转给源插件）
   require('./server/modules/emby'), // 消费层：待开发（基于聚合）
+  require('./server/modules/plugin'), // 插件宿主：装/卸/启停 + 每插件一个常驻子进程（见 docs/adr/0028）
   require('./server/modules/panel'), // 宿主层：面板自身与模块总览
 ];
 
@@ -37,22 +37,6 @@ for (const m of MODULES) {
 
 // 旧版单文件 data/settings.json → data/settings/<模块>.json
 const migrated = settings.migrateLegacy();
-
-/* Emby 的「线路过滤」已搬到聚合层（`agg.json` 的 `lineFilter`，理由见 agg/api.js 的 lineFilter）。
- * 已有部署的 `emby.json` 的 `play.filter` 可能填过值 —— **搬一次，避免旧配置悄然失效**。
- * 只在 agg 侧为空、且 emby 侧有值时搬；搬完把老键清掉（避免两处都有值、分不清哪个生效）。 */
-try {
-  const aggCfg = settings.read('agg');
-  const embyCfg = settings.read('emby');
-  const oldFilter = String(((embyCfg.play || {}).filter) || '').trim();
-  if (!String(aggCfg.lineFilter || '').trim() && oldFilter) {
-    settings.patch('agg', { lineFilter: oldFilter });
-    settings.patch('emby', { play: { filter: '' } });
-    console.log(`  ↻ 线路过滤已搬到聚合设置（原 emby.json 的 play.filter：${oldFilter}）`);
-  }
-} catch (e) {
-  console.log('  ✘ 线路过滤搬迁失败（不影响启动）：' + ((e && e.message) || e));
-}
 
 const panel = settings.read('panel');
 const WEB_PORT = Number(process.env.WEB_PORT || panel.port || 8099);
@@ -85,9 +69,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    // 面板接口（各模块注册的路由）+ 配置中心同源代理
-    if (pathname.startsWith('/api/') || pathname.startsWith('/website')) {
-      /* 面板门禁（单密码，见 core/auth.js）：**只拦面板自己的接口与被代理的源配置页**。
+    // 面板接口（各模块注册的路由；插件宿主那几条也在其中）
+    if (pathname.startsWith('/api/')) {
+      /* 面板门禁（单密码，见 core/auth.js）：**只拦面板自己的接口**。
        * `/api/auth/*` 与 `/api/emby/*` 由 auth.needsAuth 直接放行 —— 前者不然登录不了；
        * 后者是 Emby 客户端打的（它们有自己的 AccessToken 校验，拦了等于把所有客户端断掉，
        * docker 的健康检查也走那条路）。 */
@@ -100,11 +84,6 @@ const server = http.createServer(async (req, res) => {
     }
     // 其余一律当作 public/ 下的静态文件（含 core/ modules/ docs/ styles/ 子目录）
     if (serveStatic(req, res, pathname)) return;
-
-    /* 静态里也没有 → **再问一次猫源层**：源的配置中心前端写死了根路径（`/full-config` 那类），
-     * 请求会直接落到面板的根路径上。只有猫源层知道"当前配置中心是哪个源"，所以由它兜底转发；
-     * 没人认领（没人看配置中心）就照旧 404 —— 行为与以前完全一致。理由见 config-proxy.js 顶部。 */
-    if (await sourceModule.proxyConfigCenter(req, res, { pathname, searchParams: parsed.searchParams })) return;
     return notFound(res);
   } catch (e) {
     const code = e.code === 404 ? 404 : e.code === 400 ? 400 : 500;
@@ -112,9 +91,9 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const sourceModule = registry.get('source');
 const aggModule = registry.get('agg');
 const embyModule = registry.get('emby');
+const pluginModule = registry.get('plugin');
 const panelModule = registry.get('panel');
 
 server.listen(WEB_PORT, WEB_HOST, async () => {
@@ -126,20 +105,17 @@ server.listen(WEB_PORT, WEB_HOST, async () => {
   console.log(`     模块: ${registry.list().map((m) => m.id).join(' · ')}`);
   if (migrated) console.log(`     ↻ 设置已拆分: settings.json → ${migrated.to}（旧文件留档 ${migrated.backup}）`);
   console.log('');
-  /* 站点测速的两处接线（都在这儿做，理由见 agg/index.js 与 source/runner.js 的 onReady）：
-   *   ① 某个源起来/重启后 → 测一轮**它的**站点（source 层只广播 id，不反向依赖聚合层）；
-   *   ② 开机计时：默认每 6 小时自动一轮，2 分钟后先跑一次（见 agg/site-test.js 的 boot）。
-   * ⚠️ ①**必须在 autostartAll 之前接上**，否则开机自启的那些源起来时还没人听。 */
-  if (sourceModule && aggModule && typeof sourceModule.onSourceReady === 'function') {
-    sourceModule.onSourceReady((id) => aggModule.siteTestSourceUp(id));
-  }
+  /* 站点测速的开机计时（接线在这儿做，理由见 agg/site-test.js 顶部）：
+   * 默认每 6 小时自动一轮，2 分钟后先跑一次。
+   * ⚠️ 原先还有"某个源起来就测一轮它的站点"那条 —— 源实例现在活在源插件里，
+   * 面板收不到"它起来了"，已随源插件化去掉（开机那一轮会覆盖自启的实例）。 */
   if (aggModule && typeof aggModule.startSiteTest === 'function') aggModule.startSiteTest();
-  if (sourceModule) await sourceModule.autostartAll();
-  /* 猫源自动更新（可选，默认关）：勾选与间隔在「源托管 · 猫源地址」页，见 source/auto-update.js。
-   * 放这儿 = 面板起来之后才开始计时（不是模块 require 的时候就跑）。 */
-  if (sourceModule && typeof sourceModule.startAutoUpdate === 'function') sourceModule.startAutoUpdate();
-  /* emby 层同理：把随包的内置首页示例同步进插件列表（md5 一致就跳过，见 emby/index.js autostart） */
+  /* emby 层：把随包的内置首页示例同步进插件列表（md5 一致就跳过，见 emby/index.js autostart） */
   if (embyModule && typeof embyModule.autostart === 'function') await embyModule.autostart();
+  /* 插件：把随包发行的内置插件同步进数据目录，再拉起所有**启用中**的插件
+   * （见 modules/plugin/index.js 的 autostart）。失败不挡面板启动。
+   * ⚠️ **源实例由源插件自己起**（它自己的"开机自启"那份逻辑），不在这里管。 */
+  if (pluginModule && typeof pluginModule.autostart === 'function') await pluginModule.autostart();
   /* 更新即完整替换：**每次启动成功后**清掉当前版本之外的版本目录（旧版本不留档，也不作本地回退，
    * 决策见 docs/adr/0021-update-replaces-app-dir.md）。它自己会延迟几秒再动手，
    * 也会在非受管运行方式下跳过（直接跑源码时数据目录里的 app/ 不该被动）。 */
@@ -157,12 +133,15 @@ process.on('unhandledRejection', (e) => {
 });
 
 async function shutdown() {
-  console.log('\n  正在停止所有源服务…');
-  if (sourceModule) {
+  /* 插件子进程（含源插件**自己**起的那些源实例）由**宿主**直接终止 —— 见 docs/adr/0028：
+   * 宿主杀了插件，插件自己起的进程也跟着没（它的子进程挂在它下面）。
+   * 插件要额外清理的东西，由它在收到停止指令时自行处理。 */
+  if (pluginModule && typeof pluginModule.stopAll === 'function') {
     try {
-      await sourceModule.stopAll();
+      const n = pluginModule.stopAll().length;
+      if (n) console.log(`  已停止 ${n} 个插件进程`);
     } catch (e) {
-      console.error('  ✗ 停止源失败：' + e.message);
+      console.error('  ✗ 停止插件失败：' + e.message);
     }
   }
   server.close(() => process.exit(0));

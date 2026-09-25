@@ -8,11 +8,9 @@
  *   /api/panel/info, /api/panel/backup|restore
  *   /api/auth/*                   面板鉴权：status / login / logout / password（见 core/auth.js）
  *   /api/logs                     面板日志（内存环形缓冲的读取/清空，见 core/logbus.js）
- *   /api/settings                 兼容层：前端迁移到 /api/modules/agg/settings 后删除
  */
 const settings = require('../../core/settings');
 const registry = require('../../core/registry');
-const catpaw = require('../../core/catpaw');
 const tmdb = require('../../core/tmdb');
 const cachedb = require('../../core/cachedb');
 const logbus = require('../../core/logbus');
@@ -82,35 +80,6 @@ function migrateCacheFromEmby() {
   settings.write('emby', embyNext);
 
   console.log(`  ↻ 缓存设置已从 emby 层搬到面板层：${Object.keys(next).join(' / ') || '(空)'}（面板「缓存设置」可改）`);
-}
-
-/** 前端设置页当前用到的 agg 形状（兼容层用） */
-function legacyAggView() {
-  const a = settings.read('agg');
-  return {
-    baseUrl: (a.upstream && a.upstream.source) || '',
-    agg: {
-      enabled: a.enabled,
-      order: a.order,
-      /* 设置里是**秒**（`timeoutSec` / `detailTimeoutSec`），这里换算成毫秒给前端用：
-       * 「站点与参数」页拿 `timeoutMs` 与测速结果比（比它慢的站聚合里必被判超时）。 */
-      timeoutMs: Math.max(1000, Math.round((Number(a.timeoutSec) || 5) * 1000)),
-      detailTimeoutMs: Math.max(1000, Math.round((Number(a.detailTimeoutSec) || 10) * 1000)),
-      concurrency: a.concurrency,
-      /* 测速的两个旋钮（`initFirst` 已删：init 恒开，见 agg/service.js 的 ensureInit） */
-      speedTestAuto: a.speedTestAuto,
-      speedTestHours: a.speedTestHours,
-      /* ⚠️ **这里必须把 agg 的设置全带上**：前端启动时读的就是这份（`S.settings.agg`），
-       * 少一个键，页面刷新后就当它不存在 —— 实测：`lineFilter` 没带 → "保存完刷新编辑框还是空的"，
-       * `matchExtraK` 没带 → 打分设置那页刷新后显示默认值，一点保存就把用户设的值覆盖掉（8 → 3）。
-       * 加键的时候**两边都要加**（或让设置页直接读 `/api/modules/<id>/settings`）。 */
-      matchMinScore: a.matchMinScore,
-      matchMaxItems: a.matchMaxItems,
-      matchExtraK: a.matchExtraK,
-      matchExtraAll: a.matchExtraAll,
-      lineFilter: a.lineFilter,
-    },
-  };
 }
 
 module.exports = function routes(r) {
@@ -340,26 +309,8 @@ module.exports = function routes(r) {
     return sendJson(res, 200, { ok: true });
   });
 
-  /* ---------------- 兼容层（前端迁移完成后删除） ---------------- */
-  r.add('GET', '/api/settings', (req, res) => {
-    const view = legacyAggView();
-    return sendJson(res, 200, {
-      settings: view,
-      base: require('../source/service').resolve(),
-    });
-  });
-
-  r.add('PUT', '/api/settings', async (req, res) => {
-    const body = (await readBody(req)) || {};
-    const patch = {};
-    if (body.baseUrl !== undefined) patch.upstream = { source: catpaw.normSourceUrl(body.baseUrl) };
-    if (body.agg && typeof body.agg === 'object') Object.assign(patch, body.agg);
-    const next = settings.patch('agg', patch);
-    return sendJson(res, 200, {
-      settings: Object.assign(legacyAggView(), {
-        baseUrl: (next.upstream && next.upstream.source) || '',
-      }),
-      base: require('../source/service').resolve(),
-    });
-  });
+  /* 兼容层（`GET/PUT /api/settings` 那份聚合视图）已随源插件化删除：
+   * 前端的「源托管」「聚合参数」「源列表」三页先后没了，没有调用方；
+   * 而它读的 `agg.json`（`upstream.source` / `sources` / `enabled` / `order`）也都不再是设置的来源
+   * —— 源与站点归源插件，站点与参数归模板（见 docs/plugin-migration-plan.md 批次 2 / 4）。 */
 };

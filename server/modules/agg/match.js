@@ -27,7 +27,19 @@
  * 年份只能从**标题里的四位数字**猜（`[2025]`、`(2026)`、`斗破苍穹2018`），猜不到就当没有这项信号。
  */
 
-const { normName } = require('../../core/catpaw');
+/**
+ * **片名归一化**：去空格、全角半角标点、括号、破折号等，小写比较。
+ *
+ * 放在本文件（而不是上游协议层）是因为它属于**打分知识**：它是"这两个名字是不是同一个名字"的
+ * 判据之一，与 `cleanTitle` / 相似度同源。协议层（原先那份 `core/catpaw.js`）已随源插件搬走，
+ * 面板这边只留"怎么判"。
+ */
+function normName(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[\s\u3000]+/g, '')
+    .replace(/[·・.,，。:：;；!！?？'"“”‘’()（）\[\]【】《》\-_—~～、/\\|+*&#@%$^]/g, '');
+}
 
 /* ---------------------------------------------------------------- 词表 */
 
@@ -413,4 +425,4 @@ function sameNameSameSiteCount(scored) {
   return extra;
 }
 
-module.exports = { cleanTitle, extractSignals, nameScore, episodeScore, yearScore, scoreItem, select, normWant, W, QUALIFIER_RE };
+module.exports = { cleanTitle, extractSignals, nameScore, episodeScore, yearScore, scoreItem, select, normWant, normName, W, QUALIFIER_RE };

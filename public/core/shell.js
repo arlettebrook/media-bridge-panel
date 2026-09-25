@@ -126,22 +126,15 @@ export function renderSubnav() {
   }
 }
 
-/** 模块高亮 + 两个角标 */
+/**
+ * 模块高亮。
+ *
+ * ⚠️ 原先这里还给两个角标写数字（顶栏那个源站点数 / 聚合勾选数）—— 都随源插件化去掉了：
+ * 「源托管」那一栏没了，而"勾了几个站点"现在按**模板**算（不同域各一套），顶栏写一个数必然误导。
+ */
 export function renderNav() {
   const mod = moduleOf(S.page);
   document.querySelectorAll('#nav button[data-module]').forEach((b) => b.classList.toggle('active', b.dataset.module === mod.id));
-  const cur = S.base || {};
-  const sb = $('#navSrcBadge');
-  if (sb) {
-    const p = S.probe;
-    sb.textContent = !cur.url ? '未设置' : p ? (p.ok ? `${p.siteCount} 站点` : '不可用') : '';
-  }
-  const ab = $('#navAggBadge');
-  if (ab) {
-    const en = (S.settings && S.settings.agg && S.settings.agg.enabled) || [];
-    const srcN = (S.aggSources || []).length;
-    ab.textContent = en.length ? `${en.length} 站点` : srcN ? '未选站点' : '未配源';
-  }
   renderSubnav();
 }
 

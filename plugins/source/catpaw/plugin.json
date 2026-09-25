@@ -1,0 +1,9 @@
+{
+  "id": "catpaw",
+  "name": "猫爪源",
+  "version": "1.0.0",
+  "type": "source",
+  "main": "index.js",
+  "webui": "ui/index.html",
+  "description": "猫爪源协议：自己托管源实例（下载包 / 起进程 / 端口 / 自动更新），对外给站点清单、候选、取播放项、解析地址与站点测速"
+}

@@ -187,7 +187,9 @@ const EMBY_PANEL_RE = [/^\/api\/emby\/accounts\b/, /^\/api\/emby\/home\//];
 function needsAuth(pathname) {
   if (pathname.startsWith('/api/auth/')) return false; // 登录本身（还有 status/logout）
   if (pathname.startsWith('/api/emby/')) return EMBY_PANEL_RE.some((re) => re.test(pathname));
-  return pathname.startsWith('/api/') || pathname.startsWith('/website');
+  /* ⚠️ 原先这里还带 `/website`：那是"配置中心同源代理"的路径，随源插件化去掉了
+   * （配置中心现在由插件的设置页直连实例端口，不再过面板）。 */
+  return pathname.startsWith('/api/');
 }
 
 const fails = new Map(); // ip → { n, until }
@@ -200,12 +202,12 @@ function clientIp(req) {
  * 拦一道：需要鉴权且没通过 → 返回一句给前端看的错误（调用方回 401）；通过 → null。
  * 顺带把"会话过期"的 cookie 清掉，免得浏览器一直带着一个再也用不了的旧 token。
  *
- * `force: true` = **不看 needsAuth 名单，一律要登录**。给"配置中心的兜底转发"用
- * （`modules/source/config-proxy.js`）：那些路径面板本来就不认识（`/full-config` 之类，
- * 没法写进名单），但转出去的是**源的接口** —— 不拦就等于把源无鉴权端到公网上。
+ * 只有一处调用点：`server.js` 在处理 `/api/*` 之前。原先还有个 `force` 选项，
+ * 是给"配置中心的兜底转发"用的（那些路径不在名单里，只能一律要登录）——
+ * 那条兜底随源插件化去掉了（配置中心由插件设置页直连实例端口），这个选项也一起删掉。
  */
-function guard(req, pathname, { force = false } = {}) {
-  if (!force && !needsAuth(pathname)) return null;
+function guard(req, pathname) {
+  if (!needsAuth(pathname)) return null;
   if (isAuthed(req)) return null;
   return '需要登录面板（浏览器里打开面板首页登录一次即可；接口调用请先登录拿 cookie）';
 }
