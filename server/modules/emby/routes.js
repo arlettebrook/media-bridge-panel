@@ -94,7 +94,11 @@ function serveStream(req, res, out, label, verb = '拉流') {
     return sendJson(res, out.status, out.body);
   }
   log.logResult(req, `${verb} ${label}`, { status: 302, log: out.log });
-  res.writeHead(302, { Location: out.stream.url, 'Cache-Control': 'no-store' });
+  /* ⚠️ `Location` 里的**非 ASCII 必须先编码**：HTTP 头的值只认 ASCII，Node 碰上中文会直接抛
+   * `Invalid character in header content ["Location"]` —— 那时状态行已经写了一半，
+   * 客户端看到的是一个莫名其妙的 500（实测：源回的地址里带中文站名时会这样）。
+   * `encodeURI` 只动非 ASCII 与空格，`?`/`&`/`=`/`/` 这些保留字符照旧（不会破坏 query）。 */
+  res.writeHead(302, { Location: encodeURI(out.stream.url), 'Cache-Control': 'no-store' });
   return res.end();
 }
 
@@ -356,10 +360,10 @@ module.exports = function routes(r) {
     if (!src) {
       console.log(`  ✘ emby 拉流 Items/${params.itemId}/Stream → HTTP 400  token 认不出：${params.token}${log.clientTag(req)}`);
       return sendJson(res, 400, {
-        error: '路径里的 token 认不出（应是 base64url 的 catpaw:<JSON {s,t,f,v}>，或旧的 catpaw:<站点>:<线路>|<vod>）',
+        error: '路径里的 token 认不出（应是 base64url 的 catpaw:<JSON {r: ref}>）',
       });
     }
-    const out = await service.resolveStream(params.itemId, src, null, query.get('UserId'), req.headers.host || '');
+    const out = await service.resolveStream(params.itemId, src, query.get('UserId'), req.headers.host || '');
     return serveStream(req, res, out, `Items/${params.itemId}/Stream`);
   };
   r.add('GET', '/api/emby/Items/:itemId/Stream/:token', streamByPath);
@@ -374,7 +378,7 @@ module.exports = function routes(r) {
       return sendJson(res, denied.status, denied.body);
     }
 
-    const out = await service.resolveStream(params.itemId, query.get('src'), query.get('vod'), query.get('UserId'), req.headers.host || '');
+    const out = await service.resolveStream(params.itemId, query.get('src'), query.get('UserId'), req.headers.host || '');
     return serveStream(req, res, out, `Items/${params.itemId}/Stream`);
   });
 
@@ -401,9 +405,8 @@ module.exports = function routes(r) {
     const out = await service.resolveStream(
       params.itemId,
       query.get('MediaSourceId'),
-      null, // vod 已编码在 MediaSourceId 里，不需要另外传
       query.get('UserId'),
-      req.headers.host || '' // 本地部署的源回的地址是回环地址，302 前要用它换成客户端那个域名
+      req.headers.host || '' // 客户端访问用的主机名：本地实例回的是回环地址，插件拿它拼成客户端够得着的
     );
     return serveStream(req, res, out, `videos/${params.itemId}/${params.file}`);
   };
@@ -438,9 +441,8 @@ module.exports = function routes(r) {
     const out = await service.resolveStream(
       params.itemId,
       query.get('MediaSourceId'),
-      null, // vod 已编码在 MediaSourceId 里，不需要另外传
       query.get('UserId'),
-      req.headers.host || '' // 本地部署的源回的地址是回环地址，302 前要用它换成客户端那个域名
+      req.headers.host || '' // 客户端访问用的主机名：本地实例回的是回环地址，插件拿它拼成客户端够得着的
     );
     return serveStream(req, res, out, `Items/${params.itemId}/Download`, '下载');
   });

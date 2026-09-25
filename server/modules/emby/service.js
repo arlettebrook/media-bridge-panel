@@ -1952,6 +1952,7 @@ async function getItem(itemId, requestedId, host = '') {
   let totalLines = 0; // 过滤前的线路总数（日志与诊断字段要说清"源里有多少条"）
   let afterFilter = 0; // 过了线路过滤、还没过"定位"这一关的条数
   let noTarget = 0; // 因"没定位到这一集"而不进版本列表的线路数（见下面那处 continue）
+  let noRef = 0; // 插件没给 `ref` 的播放项数（正常不会发生：没它这一项点了必然播不了）
   for (const entry of entries) {
     const siteKey = entry.key;
     const siteLabel = (multiSource && entry.sourceName ? `${entry.sourceName} ` : '') + (entry.name || siteKey);
@@ -2008,6 +2009,13 @@ async function getItem(itemId, requestedId, host = '') {
         /* 电影多版本：同一条线路下的各项要生成**互不相同**的短标签（规格优先，重了补项序号） */
         const itemLabels = movie ? itemLabelsOf(targets) : [];
         targets.forEach((t, i) => {
+          /* 播放项必须带 `ref` —— 播放时面板把它原样交回插件换地址，没有它这一项点了必然播不了，
+           * 所以**不进版本列表**（与上面"没有可播目标的线路不进版本列表"同一口径：宁可少给）。
+           * 正常情况下插件每项都会给 ref，走到这里说明插件没照契约做，如实数出来记进诊断。 */
+          if (!t.ref) {
+            noRef += 1;
+            return;
+          }
           /* 第一条版本**那个文件**的名字 = 条目级 `FileName` 的真来源
            * （真机给的就是文件名 `10间敢死队.2026….mkv`；版本名是"站点 · 线路"，不是文件名）。 */
           if (!firstFileName && t.name) firstFileName = String(t.name);
@@ -2015,15 +2023,11 @@ async function getItem(itemId, requestedId, host = '') {
             buildMediaSource({
               itemId,
               host,
-              source: entry.source,
-              siteKey,
               siteLabel,
-              vodId: det.vodId,
               line,
               runtimeTicks: found.RunTimeTicks,
               variantLabel: item.label || '',
               item: t,
-              itemIndex: movie ? i : 0,
               itemLabel: itemLabels[i] || '',
             })
           );
@@ -2104,6 +2108,7 @@ async function getItem(itemId, requestedId, host = '') {
   const noTargetNote = noTarget
     ? `（另有 ${noTarget} 条线路${isMovie ? '没有播放项' : `没定位到 ${locatorLabel(found.Type, p)}`}，不进版本列表）`
     : '';
+  const noRefNote = noRef ? `（另有 ${noRef} 个播放项没有 ref，不进版本列表 —— 插件没照契约给）` : '';
   const filterNote =
     !isPlayable(found.Type)
       ? ` 非可播类型「${found.Type}」，按设计不给版本列表（源里 ${totalLines} 条线路）` /* 兜底：早返回之后正常走不到 */
@@ -2112,7 +2117,7 @@ async function getItem(itemId, requestedId, host = '') {
             (filter.re && totalLines > 0 && afterFilter === 0 ? '（规则把线路全滤掉了）' : '')
           : noTarget
             ? ` 源里 ${totalLines} 条 → 列出 ${sources.length} 条`
-            : '') + noTargetNote;
+            : '') + noTargetNote + noRefNote;
   return {
     status: 200,
     body: found,
@@ -2237,48 +2242,6 @@ function directStreamUrl({ itemId, host, token, src, container }) {
   );
 }
 
-/* ---------------------------------------------------------------- 播放快路径备忘 */
-
-/**
- * **播放快路径备忘**：构建版本列表时，本层其实**已经知道**"这一集在源里的播放 id"（`line.target.id`），
- * 而播放时却要为此再取一次源详情 —— 实测那次详情约 2 秒，而源自己的 `/play` 只要 0.07 秒。
- *
- * 为什么**不把它编进 `MediaSourceId`**：那个 id 又长又只对一条线路有效（夸克类 ≈460 字符），
- * 编进去会让客户端要访问的 URL 涨到 700 字符上下。客户端与中间代理对 URL 长度的容忍度未知，
- * 一旦被截断就是"点了播不了"，比慢两秒糟得多。
- *
- * 所以改为**服务端记住**：key = `(条目 Id, 源, 站点, 线路, vod)` → 集 id。
- *   · 命中 → 直接调 `/play`，省掉那次详情；
- *   · 未命中（面板重启、过期、换了源）→ 照旧取详情，**行为与没有这条备忘时完全一致**，只是慢。
- * 因此这条备忘只影响快慢，不影响对错。
- */
-const PLAY_HINT_TTL_MS = 30 * 60 * 1000;
-const PLAY_HINT_MAX = 500;
-const playHints = new Map();
-
-/* key 里带 `i`（第几个播放项）：电影同一条线路下有多个版本，不带项序号会互相覆盖 —— 结果是"永远播第 1 项" */
-const playHintKey = (itemId, source, site, flag, vodId, itemIndex) =>
-  [itemId, source, site, flag, vodId, Number(itemIndex) || 0].join('\u0001');
-
-function rememberPlayHint(itemId, source, site, flag, vodId, itemIndex, episodeId) {
-  if (!episodeId) return;
-  playHints.set(playHintKey(itemId, source, site, flag, vodId, itemIndex), { episodeId: String(episodeId), at: Date.now() });
-  /* 超上限按插入顺序淘汰最旧的（Map 保序） */
-  while (playHints.size > PLAY_HINT_MAX) playHints.delete(playHints.keys().next().value);
-}
-
-/** 取出备忘的集 id；过期即删。**取走不删** —— 同一集客户端会反复请求。 */
-function playHintOf(itemId, source, site, flag, vodId, itemIndex) {
-  const key = playHintKey(itemId, source, site, flag, vodId, itemIndex);
-  const hit = playHints.get(key);
-  if (!hit) return '';
-  if (Date.now() - hit.at > PLAY_HINT_TTL_MS) {
-    playHints.delete(key);
-    return '';
-  }
-  return hit.episodeId;
-}
-
 /**
  * 电影多版本时，版本行标题要能**区分**同一条线路下的各个播放项 —— 用源标的规格拼一句短标签。
  * 读不出规格就返回空（调用方退回「第 N 项」，不编）。例：`5.0GB 1080p`。
@@ -2308,13 +2271,11 @@ function itemLabelsOf(items) {
   return specs.map((s, i) => (dup.has(s) ? `${s || '播放项'} · 第 ${i + 1} 项` : s));
 }
 
-function buildMediaSource({ itemId, source, siteKey, siteLabel, vodId, line, runtimeTicks, variantLabel = '', host = '', headers = {}, item, itemIndex = 0, itemLabel = '' }) {
-  const src = catpawSourceId(source, siteKey, line.flag, vodId, itemIndex);
-  /* 这个版本要播的那一项：电影 = 该线路下的**第 `itemIndex` 个播放项**；剧集 = **定位到的这一集**。
-   * 两者都带集名里源标的规格（容器/分辨率/编码/体积）。 */
+function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel = '', host = '', headers = {}, item, itemLabel = '' }) {
+  /* 这个版本要播的那一项：电影 = 该线路下的某个播放项；剧集 = **定位到的这一集**。
+   * 两者都带集名里源标的规格（容器/分辨率/编码/体积），也带**插件给它编的 `ref`**。 */
   const t = item || line.target || {};
-  /* 记下这一项的播放 id：播放时就不必再取一次详情（见上面 playHintOf 那段）。 */
-  if (t.id) rememberPlayHint(itemId, source, siteKey, line.flag, vodId, itemIndex, t.id);
+  const src = catpawSourceId(t.ref);
   /* 站点标签用**完整 `name`**（`木偶|4K`）—— 带着 `|4K` 这类画质后缀，比截短的"木偶"信息更全；
    * 标题位与副标题（Path 末段）用**同一个标签**，两行格式统一。
    * 同片别名（`（臻彩）`/`（4K 偷跑）`）**必须**进标题位：同一部片的两个条目常常线路名完全一样
@@ -2421,39 +2382,21 @@ function buildMediaSource({ itemId, source, siteKey, siteLabel, vodId, line, run
 }
 
 /**
- * MediaSource 的 Id：把「站点 + 线路 + 绑定的站源条目」编码进去。
+ * MediaSource 的 Id：把**源插件编的那个 `ref`** 包一层。
  *
- * 形状：`catpaw:` + **base64url**(`<site>:<flag>|<vod>`)。
+ * 形状：`catpaw:` + **base64url**(JSON `{r: ref}`)。
  *
  * **为什么必须编码**（实测）：客户端把 Id 拼进 query 时，中文它会编码
  * （日志里是 `%E5%A4%B8%E5%85%8B…`），但 **`#` 它不编码** —— 而线路名里就有 `#`（如 `夸克原画#01`），
- * 于是 `#` 之后的 `01|/voddetail/130077.html` 被当成 URL 锚点，**根本发不到服务端**：服务端收到
- * 一个没有 vod 的 Id → 400，客户端反复重试（实测 e1/e2 各 34 次）。线路名不含 `#` 的站点
- * （`nodejs_muou` / `nodejs_huban`）则一路正常 —— 这正是"有些能播、有些播不了"的全部原因。
- * base64url 字符集只有 `[A-Za-z0-9_-]`，客户端编不编码都是同一串，对该问题**免疫**。
+ * 于是 `#` 之后的内容被当成 URL 锚点，**根本发不到服务端**：服务端收到一个不带线路的 Id → 400，
+ * 客户端反复重试（实测 e1/e2 各 34 次）。base64url 字符集只有 `[A-Za-z0-9_-]`，
+ * 客户端编不编码都是同一串，对该问题**免疫**。
  *
- * **为什么要自带 vod**：客户端播直连时只会回传 `MediaSourceId`，**不读本面板给的 `Path`**
- * （实测 Rex 打的是 `/videos/{ItemId}/stream.{Container}?MediaSourceId=…`，见 routes.js）。而拉流要
- * vod 才能走 detail 快路径（拿新鲜集 ID）—— 让 Id 自包含，播放链路就不看客户端的脸色。
+ * **面板不解释 `ref` 的内容**（契约第八节）：里面是什么、怎么换成一个地址，都是源插件的事。
+ * 这一层只做两件事：编码成客户端安全的一串、播放时原样交回插件。
  */
-function catpawSourceId(source, site, flag, vodId, itemIndex = 0) {
-  /* 载荷 = 五个字段的 **JSON**（再整体 base64url）：
-   *   `{s: 源id, t: 站点key, f: 线路, v: vod, i: 第几个播放项}`（`i = 0` 时**不写**）
-   *
-   * 为什么不是 `<源>:<站点>:<线路>|<vod>` 那种"分隔符拼串"：
-   * **vod 里可能就有 `|`** —— 站源给 `vod_id` 塞 JSON 是常态，里面的 `vod_remarks`
-   * 就带竖线（实测 Lmentor 的 `nodejs_bili_all`：`{"…","vod_remarks":"5分18秒|2.6万|19天前"}`）。
-   * 老写法按「最后一个 `|`」切 vod，于是一播就切成 `19天前"}}` → 聚合层查不到这条绑定 → 404，
-   * 客户端表现为"这个视频点了没反应"。JSON 里字段边界是结构化的，`|`/`:`/`#` 一律不是问题。
-   *
-   * 多源之后**必须带源**：否则拉流回查不知道去哪个源（同一站点 key 在多个源里都可能存在）。
-   *
-   * `i` 是**电影**多版本才需要的坐标（同一线路下挂了多个压制版本，客户端回传时靠它区分是哪一个）。
-   * `i = 0` 时不写进载荷 ⇒ **第 1 项的 Id 与改动前逐字相同**，客户端手里缓存的旧 Id 天然就是
-   * "第 1 项"，不需要单独的兼容分支（见 docs/adr/0022）。 */
-  const body = { s: String(source || ''), t: String(site || ''), f: String(flag || ''), v: String(vodId || '') };
-  if (Number(itemIndex) > 0) body.i = Number(itemIndex);
-  const payload = JSON.stringify(body);
+function catpawSourceId(ref) {
+  const payload = JSON.stringify({ r: String(ref || '') });
   return 'catpaw:' + Buffer.from(payload, 'utf8').toString('base64url');
 }
 
@@ -2461,136 +2404,33 @@ function catpawSourceId(source, site, flag, vodId, itemIndex = 0) {
  *
  * 为什么删代理：面板在路由器上（2G 内存、U 盘），把每条流的字节都接一遍是最贵的那种"省事"——
  * 而 302 把流量留在源与客户端之间，面板只回一个 Location。代价是**客户端得连得到源地址**，
- * 所以同一时间加了下面 `redirectUrl()` 的地址改写：本地部署的源回的是回环地址，
- * 302 前换成客户端访问用的那个域名（够得着）。
+ * 而"把地址变成客户端够得着的那一个"现在是**源插件**在做（见 plugins/source/catpaw/lib/address.js）：
+ * 面板不再知道实例端口，也没法再做那一步 —— 它只把客户端主机名交给插件。
  *
  * 老配置里残留的 `play.mode` 不再读、也不再校验（`PLAY_MODE_VALUES` 已删）——
  * 盘上留着那个键不影响任何事。
  */
 
-/** 回环地址的各种写法：源按「谁访问它」回填 host，聚合层从 127.0.0.1 打过去，源就回这些 */
-const LOOPBACK_HOST = /^(127\.\d+\.\d+\.\d+|0\.0\.0\.0|localhost|\[::1\]|::1)$/i;
-
-/** 从 `Host` 头里取"客户端用来访问的那台机器"（去掉端口；IPv6 保留方括号） */
-function clientHostName(host) {
-  const h = String(host || '').trim();
-  if (!h) return '';
-  if (h.startsWith('[')) {
-    const i = h.indexOf(']');
-    return i > 0 ? h.slice(0, i + 1) : '';
-  }
-  return h.split(':')[0];
-}
-
 /**
- * 302 的 Location 改写：**本地部署的源**用客户端访问用的域名，自定义源按源给的原始地址。
+ * 拆版本 Id —— 认出来就是 `{ref}`，认不出回 `null`（上层据此报 400，不猜）。
  *
- * 为什么要改：源内嵌的 HTTP 服务会按"谁访问它"回填 host —— 聚合层是用 `http://127.0.0.1:<端口>`
- * 打它的，于是它回的播放地址也是 `127.0.0.1:<端口>/proxy/…`。那个地址对**客户端**毫无意义
- * （客户端上的 127.0.0.1 是客户端自己），302 过去必然连不上。所以换成：
- *   `http://<客户端访问用的域名>:<源端口>/…` —— 端口原样保留（docker-compose 已把源端口发布到宿主，
- *   所以"客户端用哪个域名进的 Emby，就用哪个域名 + 那个端口"就够得着，如 192.168.1.100:9988）。
- *
- * 只在**地址确实是回环**时才改：源给的是真直链（CDN 域名那种）就不动它。
- * 自定义（外部）源一律原样 —— 那种源在别的机器上，它的地址面板管不着，也不该管。
- * 相对地址（源只回 `/proxy/…`）按同一个域 + 源端口补全，否则客户端会把它拼到**面板**身上。
- *
- * 返回 `{ url, rewrote, note }`，`note` 是给日志的说明（没改写但原因值得记时才有值）。
- */
-function redirectUrl(rawUrl, sourceRow, clientHost) {
-  const url = String(rawUrl || '').trim();
-  if (!sourceRow || !sourceRow.deployed) return { url, rewrote: false, note: '' };
-  const host = clientHostName(clientHost);
-  if (!host) return { url, rewrote: false, note: '没拿到客户端 Host（302 只能原样回源地址）' };
-  const port = sourceRow.port ? String(sourceRow.port) : '';
-
-  if (url.startsWith('/')) {
-    if (!port) return { url, rewrote: false, note: '源只回了相对地址，但它的端口未知（没法补全）' };
-    return { url: `http://${host}:${port}${url}`, rewrote: true, note: '' };
-  }
-
-  const m = /^(https?):\/\/([^/?#]+)([\s\S]*)$/i.exec(url);
-  if (!m) return { url, rewrote: false, note: '播放地址认不出（不是 http 绝对地址）' };
-  const at = m[2].lastIndexOf('@');
-  const userinfo = at >= 0 ? m[2].slice(0, at + 1) : '';
-  const hostport = at >= 0 ? m[2].slice(at + 1) : m[2];
-  let hostOnly = hostport;
-  let portInUrl = '';
-  if (hostport.startsWith('[')) {
-    const i = hostport.indexOf(']');
-    hostOnly = hostport.slice(0, i + 1);
-    portInUrl = hostport.slice(i + 1);
-  } else {
-    const i = hostport.indexOf(':');
-    if (i >= 0) {
-      hostOnly = hostport.slice(0, i);
-      portInUrl = hostport.slice(i);
-    }
-  }
-  if (!LOOPBACK_HOST.test(hostOnly)) return { url, rewrote: false, note: '' }; // 真直链，别动
-  const tailPort = portInUrl || (port ? ':' + port : '');
-  return { url: `${m[1]}://${userinfo}${host}${tailPort}${m[3]}`, rewrote: true, note: '' };
-}
-
-/**
- * 线路过滤（面板「Emby → 播放设置」→ `play.filter`）：一个正则，**只匹配线路名**（`line.flag`）——
- * 匹配上的线路才进客户端的版本列表。站点维度的取舍不在这里（那是聚合层的 `agg.enabled` / `agg.order`）。
- *
- * 留空 = 不过滤（`re:null`）。**非法正则在保存时就已被拒绝**（见 index.js 的 validate），这里是运行时
- * 兜底：真碰上就按「不过滤」走，并在日志里点名 —— 规则坏了不该把版本列表整个清空。
- *
- * 返回值：`{ raw, re, invalid }`，`raw` 也用于日志与诊断字段。
- */
-function lineFilter(domain) {
-  /* **设置已搬到模板**：线路过滤跟着模板走，而模板由**域**决定（见 docs/adr/0033）。
-   * 线路是聚合层产出的东西，规则跟它放一起才不"配置在 A、生效在 B"。这里只转发
-   * （实现见 `agg/api.js` → `agg/service.js` 的 `lineFilter`）。 */
-  return agg.lineFilter(agg.paramsFor(domain));
-}
-
-/**
- * 拆版本 Id —— **三种形状都认**（老的两种是历史包袱：客户端可能缓存着旧 Id）：
- *   - **新**（当前发出的）：`catpaw:<base64url>`，解出来是 JSON `{s,t,f,v,i?}`；
- *   - 旧·带源：`catpaw:<源id>:<站点key>:<线路>[|<vod>]`（base64url 或明文）；
- *   - 旧·无源（多源之前）：`catpaw:<站点>:<线路>[|<vod>]` —— 多源下无法回查，上层报错让客户端重取。
- *
- * 认哪一种是**看解出来的内容**，不是猜：base64url 字符集 `[A-Za-z0-9_-]` 不含 `:`，所以
- * 「原样就带 `:`」= 明文旧形状；否则先 base64url 解码 —— 解出来以 `{` 开头就是新形状（JSON），
- * 否则按旧形状的字段切法（`vod` 取最后一个 `|` 之后，`head` 按 `:` 切：
- * 2 段 = 旧·无源，≥3 段 = 旧·带源，线路名里可能还有冒号）。
- * 认不出回 `null` —— 上层据此报 400，不猜。
- *
- * **`i`（该线路下的第几个播放项）缺省 0**：改动前发出的 Id 里没有这个字段，缺省 0 就是"第 1 项"，
- * 与那时的行为一致 —— 老 Id 因此天然可用（见 docs/adr/0022）。
+ * 形状只有一种：`catpaw:<base64url(JSON {r: ref})>`（见 `catpawSourceId`）。
+ * ⚠️ **旧形状不再认**（多源之前那种 `<源>:<站点>:<线路>|<vod>`）：按 ADR-0034 不留双读分支 ——
+ * 客户端手里缓存的旧 Id 会被如实回一句"重新进一次播放页"（客户端进播放页必先问 PlaybackInfo，
+ * 所以它自会拿到新的）；这正是那条"不为未发布的东西留兼容"的口径。
  */
 function parseCatpawSourceId(src) {
   const s = String(src || '');
   if (!s.startsWith('catpaw:')) return null;
-  const rest = s.slice('catpaw:'.length);
-  const plain = rest.includes(':') ? rest : b64urlDecode(rest);
-  if (!plain) return null;
-
-  /* 新形状：JSON 载荷 —— 字段边界靠结构，不靠分隔符（`|`/`:`/`#` 出现在任何字段里都没事） */
-  if (plain.startsWith('{')) {
-    try {
-      const o = JSON.parse(plain);
-      const source = String(o.s || '');
-      const site = String(o.t || '');
-      if (!site) return null;
-      return { source, site, flag: String(o.f || ''), vod: String(o.v || ''), i: Number(o.i) || 0 };
-    } catch {
-      return null;
-    }
+  const plain = b64urlDecode(s.slice('catpaw:'.length));
+  if (!plain || !plain.startsWith('{')) return null;
+  try {
+    const o = JSON.parse(plain);
+    const ref = String(o.r || '');
+    return ref ? { ref } : null;
+  } catch {
+    return null;
   }
-
-  const bar = plain.lastIndexOf('|');
-  const head = bar >= 0 ? plain.slice(0, bar) : plain;
-  const vod = bar >= 0 ? plain.slice(bar + 1) : '';
-  const parts = head.split(':');
-  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
-  /* 老的两种形状里也没有项序号 —— 同样按"第 1 项"处理（`i: 0`） */
-  if (parts.length === 2) return { source: '', site: parts[0], flag: parts[1], vod, i: 0 }; // 旧形状（没有源）
-  return { source: parts[0], site: parts[1], flag: parts.slice(2).join(':'), vod, i: 0 };
 }
 
 /**
@@ -2712,18 +2552,21 @@ async function getPlaybackInfo(itemId, requestedId, host = '', token = '') {
 }
 
 /**
- * 拉流：解析出「该往哪儿拉」。两个渠道共用（路由见 routes.js，落响应共用 serveStream）：
- *   ① `/api/emby/Items/{ItemId}/Stream?src=…&vod=…`  —— 本面板写在 `MediaSource.Path` 里那条；
+ * 拉流：把版本 Id 里那个 `ref` 交给源插件换成地址。
+ *
+ * 两个渠道共用（路由见 routes.js，落响应共用 serveStream）：
+ *   ① `/api/emby/Items/{ItemId}/Stream/{token}/{文件名}` —— 本面板写在 `MediaSource.Path` 里那条；
  *   ② `/api/emby/videos/{ItemId}/stream.{Container}?MediaSourceId=…` —— **客户端真正走的**那条：
- *      它只回传版本 Id（vod 已编码在 Id 里，见 catpawSourceId），不读 Path。
+ *      它只回传版本 Id，不读 Path。
  *
- * 现取、不缓存：detail（快路径 site+vodId，拿**新鲜**的集 ID，它是时效 token）→ agg.play。
- * 返回 `{ status, stream: { url, headers, parse } }` —— 302 在路由层做（见 routes.js 的 serveStream）。
+ * **面板不解释 `ref`**（契约第八节）：里面是什么、去哪儿取、地址怎么变有效，都是源插件的事。
+ * 这里只做三件事：拆出 `ref` → 连**客户端访问用的主机名**一起交给插件 → 拿回地址 302。
+ * 现取、不缓存（地址会过期；缓存在插件自己那边，它自己管有效期）。
  *
- * `clientHost` = 客户端访问本面板用的 `Host` 头：本地部署的源回的播放地址是回环地址，
- * 302 前要用它换成"客户端够得着的那台机器"（见 `redirectUrl()`）。
+ * `clientHost` = 客户端访问本面板用的 `Host` 头：本地部署的实例回的是回环地址，
+ * 插件要拿它拼成"客户端够得着的那台机器"（见 plugins/source/catpaw/lib/address.js）。
  */
-async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
+async function resolveStream(itemId, src, requestedId, clientHost) {
   /* 有 UserId 就校验，没有也不拦（客户端拉流不保证带上它） */
   if (requestedId) {
     const denied = assertUser(requestedId);
@@ -2737,122 +2580,39 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
 
   const parsed = parseCatpawSourceId(src);
   if (!parsed) {
+    /* 认不出多半是**旧版客户端缓存下来的**版本 Id（这一版换了 Id 的载荷，按 ADR-0034 不留双读）。
+     * 客户端进播放页必先问 PlaybackInfo，所以如实让它重取一次就好。 */
     return {
       status: 400,
-      body: { error: '缺少或认不出 src（应为 catpaw:<base64url 的 源:站点:线路|vod>）', src: String(src || '') },
-      log: `src 认不出 → 400：${src}`,
-    };
-  }
-  /* 多源之前发出的版本 Id 里没有源 —— 没法回查，**如实报错让它从新的 PlaybackInfo 重取**
-   * （客户端进播放页必先问 PlaybackInfo，所以它自会拿到带源的新 Id）。 */
-  if (!parsed.source) {
-    return {
-      status: 400,
-      body: { error: '这个版本 Id 是旧的（不带源信息），请重新进一次播放页获取版本列表' },
-      log: `旧版 Id（无源）→ 400：${src}`,
-    };
-  }
-  /* vod 有两个来源：① Path 那条渠道显式带 `vod=`；② 直连渠道（客户端只回传 MediaSourceId）——
-   * 这时 vod 已经随 Id 一起回来了。显式参数优先，两个都没有才是真缺。
-   * 旧版**明文** Id 照样解析（见 parseCatpawSourceId），但线路名里带 `#` 的那种救不回来 ——
-   * `#` 之后的内容客户端根本没发出来，只能等它从新的 PlaybackInfo 重新取一次 Id。 */
-  const vodId = String(vodParam || parsed.vod || '');
-  if (!vodId) {
-    return { status: 400, body: { error: '缺少 vod（站源条目 id）' }, log: '缺少 vod → 400' };
-  }
-
-  const where = `${parsed.source}/${parsed.site}`;
-
-  /* ---- 快路径：版本列表里已经记下了这一集的播放 id，直接取地址 ----
-   * 命中且这次能拿到地址就用它（省掉下面那次详情）；否则落回常规路径 ——
-   * 备忘录只影响快慢，不影响对错（见 playHintOf 那段）。 */
-  /* `i` = 该线路下的第几个播放项（电影多版本用；缺省 0 = 第 1 项，老 Id 天然落在这里） */
-  const itemIndex = Number(parsed.i) || 0;
-  const hinted = playHintOf(itemId, parsed.source, parsed.site, parsed.flag, vodId, itemIndex);
-  if (hinted) {
-    const pr0 = await agg.play({ domain: p.domain, source: parsed.source, site: parsed.site, flag: parsed.flag, episodeId: hinted });
-    if (pr0.ok && (((pr0.play || {}).urls) || []).length) {
-      return finishStream({ p, parsed, pr: pr0, clientHost, matchedBy: '列表备忘' });
-    }
-    console.log(
-      `  ↻ emby 拉流快路径没成（${(pr0.error && pr0.error.code) || '源没给地址'}），改走"取详情"那条路`
-    );
-  }
-
-  /* 与 `getItem` 那条链路用**同一套取法坐标**（`wantLocator`）：电影 = 该线路的全部播放项、
-   * 集 = 这一集。否则 PlaybackInfo 给的版本和这里取到的会不是同一项。 */
-  const hit = await agg.detail(Object.assign({ domain: p.domain, source: parsed.source, site: parsed.site, vodId }, wantLocator(p)));
-  if (!hit.ok) {
-    /* 照旧一律 502（"上游取不到数"）：换进程内直调后 code/message 才真的有意义，那就写进 body 与日志，
-     * HTTP 状态码不动 —— 客户端侧的表现与改动前一致。 */
-    return {
-      status: 502,
-      body: { error: `聚合取数失败（${hit.error.code}）：${hit.error.message}` },
-      log: `聚合取数失败（${hit.error.code}：${hit.error.message}）`,
-    };
-  }
-  const siteEntry = (hit.sites || []).find((e) => e && e.source === parsed.source && e.key === parsed.site);
-  const det = siteEntry && siteEntry.detail;
-  if (!det) {
-    return {
-      status: 404,
-      body: { error: '源里没有这条绑定', source: parsed.source, site: parsed.site, vodId },
-      log: `源里没有 ${where}|${vodId}`,
-    };
-  }
-  /* ⚠️ 取集 ID 必须用**客户端指定的那条线路**的 `target`，不能用 `det.target` ——
-   * `det.target` 只是"本站第一条定位到的线路"（见 agg 的 fetchDetail）。用错的后果：
-   *   ① 客户端挑的那条线路这次没定位到（如 huban 的集名没有集号）→ 本该如实 404，
-   *      却可能拿**别的线路**的集 ID 去播这条线路；
-   *   ② 反过来，客户端的线路在列表里、`det.target` 也在，但两者不是同一条线路时，
-   *      集 ID 与线路对不上（同一条 vod 里多半一样，属于"碰巧对"，不该靠）。
-   * 版本列表与这里现在**同一口径**：`getItem` 只把有 `target` 的线路列成版本。 */
-  const line = (det.lines || []).find((l) => l.flag === parsed.flag);
-  if (!line) {
-    return {
-      status: 404,
       body: {
-        error: `站源里没有这条线路「${parsed.flag}」（源可能改了线路名或少了这一条，重新进一次播放页取版本列表）`,
-        source: parsed.source,
-        site: parsed.site,
-        flag: parsed.flag,
+        error: '这个版本 Id 认不出（可能是改版前缓存下来的）—— 请重新进一次播放页获取版本列表',
+        src: String(src || ''),
       },
-      log: `站源里没有线路「${parsed.flag}」→ 404（源里现有：${(det.lines || []).map((l) => l.flag).join(' / ') || '无'}）`,
-    };
-  }
-  /* 这个版本要播的目标：**电影 = 这条线路下的第 `itemIndex` 个播放项**（项序号来自 Id，缺省 0 = 第 1 项，
-   * 老 Id 天然落在这里）；**剧集 = 定位到的这一集**。与 `getItem` 拼版本列表时**同一口径**，
-   * 否则会出现"版本列出来了、点了 404"。 */
-  const isMovie = p.type === 'movie';
-  const item = isMovie ? (line.items || [])[itemIndex] || (line.items || [])[0] : line.target;
-  if (!item) {
-    const label = locatorLabel(isMovie ? 'Movie' : 'Episode', p);
-    const what = isMovie ? '播放项' : `这一集（${label}）`;
-    return {
-      status: 404,
-      body: { error: det.targetNote || `这条线路「${line.flag}」里没有可播的${what}` },
-      log: `线路「${line.flag}」没有${what} → 404`,
+      log: `src 认不出 → 400：${String(src || '').slice(0, 60)}`,
     };
   }
 
-  const pr = await agg.play({ domain: p.domain, source: parsed.source, site: parsed.site, flag: parsed.flag, episodeId: item.id });
+  /* 域来自条目 Id 的前缀 —— 它决定用哪套模板（播放只借它那一档超时）。 */
+  const pr = await agg.play({ domain: p.domain, ref: parsed.ref, clientHost });
   if (!pr.ok) {
     const e = pr.error || {};
     return {
       status: e.status || 502,
       body: { error: e.message || '取播放地址失败', code: e.code },
-      log: `${where}/${parsed.flag} play 失败（${e.code}）`,
+      log: `${locatorLabel(p.type === 'movie' ? 'Movie' : 'Episode', p)} 解析地址失败（${e.code}：${e.message || ''}）`,
     };
   }
-
-  return finishStream({ p, parsed, pr, clientHost, matchedBy: item.matchedBy });
+  return finishStream({ p, pr });
 }
 
 /**
- * 拉流的**共同尾段**：拿到 `{urls, header, parse}` 之后怎么跳 ——
- * 回环地址改写、请求头提醒、日志口径都只此一处（快路径与常规路径共用，免得两边慢慢分叉）。
+ * 拉流的**共同尾段**：拿到地址之后怎么跳。请求头提醒与日志口径只此一处。
+ *
+ * ⚠️ 地址**不再由面板改写**：回环地址换成"客户端够得着的那台机器"这一步随 `ref` 转交
+ * 搬进了源插件（见 plugins/source/catpaw/lib/address.js）—— 面板已经不知道实例端口，
+ * 插件给回来的就是最终地址。这里只做"能不能 302"的如实判断。
  */
-function finishStream({ p, parsed, pr, clientHost, matchedBy }) {
+function finishStream({ p, pr }) {
   const play = pr.play || {};
   const url = (play.urls || [])[0] || '';
   const headers = play.header || {};
@@ -2866,28 +2626,35 @@ function finishStream({ p, parsed, pr, clientHost, matchedBy }) {
       log: `非直连地址（${url.slice(0, 12)}…）`,
     };
   }
-
-  /* 一律 302（`play.mode` 与面板代理那条路已删，见上面 `redirectUrl()` 那段）。 */
-  /* 这条站点的源是不是**本地部署**的（是的话，源回的地址得改写成客户端够得着的域名）；
-   * 顺带拿走它的端口。`pr.sources` 是聚合层这次实际打的源清单（含 deployed/port）。 */
-  const srcRow = (pr.sources || []).find((s) => s && s.id === parsed.source) || null;
-  const red = redirectUrl(url, srcRow, clientHost);
-  const reqHeaders = Object.keys(headers || {});
   /* 该线路要求请求头 → 302 后**客户端带不了**（头是源自己内嵌在 proxy URL 里的例外，那种 header 是空的）。
    * 如实记一行，别让它变成"点了播放没反应"的无头案。 */
+  const reqHeaders = Object.keys(headers || {});
   const headerNote = reqHeaders.length ? ` ⚠️ 该线路要求请求头 ${reqHeaders.join('/')}，302 后客户端带不了` : '';
   return {
     status: 200,
     /* 措辞按 **Emby 的类型**走：`p.type` 是 tmdb 的 `tv`/`movie`，直接喂 locatorLabel 会得到
      * 「非可播类型：tv」这种误导日志（早期一直这么打）。 */
     log:
-      `${locatorLabel(p.type === 'movie' ? 'Movie' : 'Episode', p)} ${parsed.source}/${parsed.site}/${parsed.flag}` +
-      ` target=${matchedBy} parse=${play.parse} → 302` +
-      (red.rewrote ? ` 地址改写 ${srcRow.url} → 客户端域名(${clientHostName(clientHost)}:${srcRow.port})` : '') +
-      (red.note ? `（${red.note}）` : '') +
-      headerNote,
-    stream: { url: red.url, headers, parse: play.parse },
+      `${locatorLabel(p.type === 'movie' ? 'Movie' : 'Episode', p)}` +
+      ` parse=${play.parse} → 302` + headerNote,
+    stream: { url, headers, parse: play.parse },
   };
+}
+
+/**
+ * 线路过滤（面板「Emby → 播放设置」→ `play.filter`）：一个正则，**只匹配线路名**（`line.flag`）——
+ * 匹配上的线路才进客户端的版本列表。站点维度的取舍不在这里（那是聚合层的 `agg.enabled` / `agg.order`）。
+ *
+ * 留空 = 不过滤（`re:null`）。**非法正则在保存时就已被拒绝**（见 index.js 的 validate），这里是运行时
+ * 兜底：真碰上就按「不过滤」走，并在日志里点名 —— 规则坏了不该把版本列表整个清空。
+ *
+ * 返回值：`{ raw, re, invalid }`，`raw` 也用于日志与诊断字段。
+ */
+function lineFilter(domain) {
+  /* **设置已搬到模板**：线路过滤跟着模板走，而模板由**域**决定（见 docs/adr/0033）。
+   * 线路是聚合层产出的东西，规则跟它放一起才不"配置在 A、生效在 B"。这里只转发
+   * （实现见 `agg/api.js` → `agg/service.js` 的 `lineFilter`）。 */
+  return agg.lineFilter(agg.paramsFor(domain));
 }
 
 /** 条目公共字段拼装（BaseItemDto 最小公共集）；类型特有字段由调用方续写 */

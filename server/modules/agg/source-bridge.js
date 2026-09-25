@@ -76,7 +76,15 @@ function asUpstream(res) {
     text: String((res && res.text) || ''),
     json: (res && res.json) || null,
     initCalled: !!(res && res.initCalled),
-    /* 显示名（插件的实例名）—— 单站测速的回执要写"测的是哪个源"，面板自己不再知道这个名字 */
+    /* 下面这几样是"插件替面板做好的那半件事"，必须原样带过来（漏一样就会静默走错分支）：
+     *   · `detail` / `detailNote` = 「线路 → 选集」结构（面板不再自己解析 `$$$`）
+     *   · `urls` / `header` / `parse` = 「解析地址」的结果（面板只负责 302）
+     *   · `name` = 实例的显示名（单站测速的回执要写"测的是哪个源"） */
+    detail: (res && res.detail) || null,
+    detailNote: String((res && res.detailNote) || ''),
+    urls: Array.isArray(res && res.urls) ? res.urls : [],
+    header: (res && res.header) || {},
+    parse: Number((res && res.parse) || 0),
     name: String((res && res.name) || ''),
   };
 }
@@ -130,6 +138,18 @@ async function loadSites() {
   return { sources: rows, sites };
 }
 
+/** 找一个启用中的源插件；认不出就如实报（不猜、不回退到别的插件） */
+function requirePlugin(pluginId) {
+  const id = String(pluginId || '');
+  const plugin = sourcePlugins().find((x) => x.id === id);
+  if (!plugin) {
+    const e = new Error(`源插件 ${id} 没安装或没启用`);
+    e.code = 'NO_PLUGIN';
+    throw e;
+  }
+  return plugin;
+}
+
 /** 一个动作的通用调用：按 `插件 id / 实例 id` 转过去 */
 async function callAction(ref, action, args) {
   const { pluginId, instanceId } = splitRef(ref);
@@ -138,12 +158,7 @@ async function callAction(ref, action, args) {
     e.code = 'BAD_SOURCE_REF';
     throw e;
   }
-  const plugin = sourcePlugins().find((x) => x.id === pluginId);
-  if (!plugin) {
-    const e = new Error(`源插件 ${pluginId} 没安装或没启用`);
-    e.code = 'NO_PLUGIN';
-    throw e;
-  }
+  requirePlugin(pluginId);
   return callPlugin(pluginId, action, Object.assign({ source: instanceId }, args));
 }
 
@@ -152,14 +167,28 @@ async function search(ref, args) {
   return asUpstream(await callAction(ref, 'search', args));
 }
 
-/** 取一个站的详情（线路与选集） */
+/** 取一个站的详情（**插件自己解析**成「线路 → 选集」，每项带一个面板不解释的 `ref`） */
 async function detail(ref, args) {
   return asUpstream(await callAction(ref, 'detail', args));
 }
 
-/** 解析一次播放地址 */
+/**
+ * 解析播放地址：面板把**插件自己编的 `ref`** 原样交回去（面板不解释它的内容，只按第一段路由）。
+ *
+ * 与上面那三个的区别：那三个的 `ref` 是「插件 id / 实例 id」（面板知道实例 id），
+ * 这一个的 `ref` 是**插件自己的东西**（面板只把它当一串不透明文本）。
+ * 客户端主机名（`clientHost`）要一起给过去 —— 本地部署的实例回的是回环地址，
+ * 插件要拿它拼成"客户端够得着"的地址（见 plugins/source/catpaw/lib/address.js）。
+ */
 async function play(ref, args) {
-  return asUpstream(await callAction(ref, 'play', args));
+  const { pluginId } = splitRef(ref);
+  if (!pluginId) {
+    const e = new Error(`认不出这个播放 ref：${String(ref || '').slice(0, 80) || '(空)'}`);
+    e.code = 'BAD_REF';
+    throw e;
+  }
+  const plugin = requirePlugin(pluginId);
+  return asUpstream(await callPlugin(pluginId, 'play', Object.assign({ ref: String(ref) }, args)));
 }
 
 /** 站点测速（体检口径的一发） */

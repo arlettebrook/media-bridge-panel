@@ -29,6 +29,11 @@ const runner = require('./lib/runner');
 const fetcher = require('./lib/fetcher');
 const autoUpdate = require('./lib/auto-update');
 const { request } = require('./lib/upstream');
+const { buildDetail, decodeRef } = require('./lib/play-items');
+const { toClientReachable } = require('./lib/address');
+
+/** 本插件自己的 id —— 从自带的 plugin.json 读（`ref` 的第一段就是它，见 lib/play-items.js） */
+const PLUGIN_ID = require('./plugin.json').id;
 
 /** 取站点清单的超时（与面板原来那份一致） */
 const SITES_TIMEOUT_MS = 20000;
@@ -200,6 +205,24 @@ async function ensureInit(one, site, timeoutMs) {
   }
 }
 
+/**
+ * 站源的 `/play` 响应 → `{urls, header, parse}`。
+ * `url` 既可能是字符串，也可能是「扁平数组 `[名, 链接, 名, 链接…]`」——那是源自己的写法，
+ * 归一化放在这里（面板只该看到一串地址）。
+ */
+function normalizePlay(j) {
+  const raw = j && j.url;
+  let urls = [];
+  if (Array.isArray(raw)) {
+    const odd = raw.filter((_, i) => i % 2 === 1).map((x) => String(x || '')).filter(Boolean);
+    urls = odd.length ? odd : raw.map((x) => String(x || '')).filter(Boolean);
+  } else {
+    const s = String(raw || '').trim();
+    urls = s ? [s] : [];
+  }
+  return { urls, header: (j && j.header) || {}, parse: Number(j && j.parse) || 0 };
+}
+
 /* ============================================================
  * 动作
  * ============================================================ */
@@ -274,30 +297,133 @@ const actions = {
     }
   },
 
-  /** 取播放项 —— 一个站的详情（线路 + 每条的选集），面板据此定位到某一集 */
+  /**
+   * 取播放项 —— 一个站的详情：**自己解析**成「线路 → 选集」，并给每个播放项编一个 `ref`。
+   *
+   * 面板只拿 `detail` 那份结构化结果（它不再解析 `$$$` / `#` / `$`），`json` 是原样响应（诊断用）。
+   * 季集号由面板给（它才知道"要哪一集"）；`pick = 'items'` 是电影取法（每条线路的若干压制版本）。
+   */
   async detail(args, ctx) {
     const one = needInstance(args.source);
     const site = await needSite(one, args.key);
     const timeoutMs = Math.max(1000, Number(args.timeoutMs) || 10000);
     try {
       const r = await postSite(one, site.api, '/detail', { id: args.id }, timeoutMs);
-      return Object.assign(r, { source: one.id, site: site.key });
+      const built = buildDetail(r.json, {
+        pluginId: PLUGIN_ID,
+        instanceId: one.id,
+        siteKey: site.key,
+        vodId: args.id,
+        season: args.season,
+        episode: args.episode,
+        pick: args.pick === 'items' ? 'items' : '',
+      });
+      return Object.assign(r, {
+        source: one.id,
+        site: site.key,
+        detail: built.detail,
+        detailNote: built.note,
+      });
     } catch (e) {
       if (ctx) ctx.log(`取播放项失败：${one.id} / ${site.key} — ${(e && e.message) || e}`);
       return { error: failFrom(e), source: one.id, site: site.key };
     }
   },
 
-  /** 解析地址 —— 一次播放（地址会过期，所以每次播放都现取、这里不缓存） */
+  /**
+   * 解析地址 —— 拿一个 `ref` 换**客户端真能连上的地址**。
+   *
+   * 两步（与面板原来那份"播放快路径备忘 + 落回详情"同一套口径）：
+   *   ① 用 `ref` 里那个集 id 直接要地址（省掉一次详情）；
+   *   ② 没成 → 集 id 大概过期了（源给的是时效 token）→ 重新取一次详情、按坐标重新定位，再要一次。
+   * 拿到之后做**最后一公里**：本地部署的实例回的是回环地址，换成客户端访问面板用的那个域名
+   * （见 `lib/address.js`）。地址每次现取、这里不缓存。
+   */
   async play(args, ctx) {
-    const one = needInstance(args.source);
-    const site = await needSite(one, args.key);
     const timeoutMs = Math.max(1000, Number(args.timeoutMs) || 5000);
+    const clientHost = String(args.clientHost || '');
+    const o = decodeRef(PLUGIN_ID, args.ref);
+    if (!o) {
+      return { error: { code: 'BAD_REF', message: `认不出这个 ref：${String(args.ref || '').slice(0, 80)}` } };
+    }
+    let one;
+    let site;
     try {
-      const r = await postSite(one, site.api, '/play', { flag: args.flag, id: args.id }, timeoutMs);
-      return Object.assign(r, { source: one.id, site: site.key });
+      one = needInstance(o.s);
+      site = await needSite(one, o.t);
     } catch (e) {
-      if (ctx) ctx.log(`解析地址失败：${one.id} / ${site.key} — ${(e && e.message) || e}`);
+      return { error: failFrom(e) };
+    }
+    const done = (r) => {
+      const urls = r.urls || [];
+      const red = toClientReachable(urls[0] || '', {
+        clientHost,
+        local: one.mode === 'local',
+        port: stateOf(one).port,
+      });
+      if (red.note && ctx) ctx.log(`解析地址：${red.note}`);
+      return {
+        /* 这两个字段是**给面板转接处看的**（它按它们判断"这次调用成没成"），
+         * 与下面 `urls/header/parse` 一起回去（见 server/modules/agg/source-bridge.js）。 */
+        ok: true,
+        status: 200,
+        source: one.id,
+        site: site.key,
+        flag: o.f,
+        urls: red.url ? [red.url].concat(urls.slice(1)) : urls,
+        header: r.header || {},
+        parse: r.parse || 0,
+        rewrote: red.rewrote,
+      };
+    };
+
+    try {
+      /* ① 快路径：ref 里带着集 id */
+      if (o.e) {
+        const r = await postSite(one, site.api, '/play', { flag: o.f, id: o.e }, timeoutMs);
+        if (r.ok) {
+          const got = normalizePlay(r.json);
+          if (got.urls.length) return done(got);
+        }
+        if (ctx) ctx.log(`ref 里那个集 id 没换成地址（${one.id} / ${site.key} / ${o.f}），落回详情重取`);
+      }
+
+      /* ② 落回详情：重新定位一次，拿**新鲜**的集 id */
+      const d = await postSite(one, site.api, '/detail', { id: o.v }, Math.max(timeoutMs, 10000));
+      const built = buildDetail(d.json, {
+        pluginId: PLUGIN_ID,
+        instanceId: one.id,
+        siteKey: site.key,
+        vodId: o.v,
+        season: o.se,
+        episode: o.ep,
+        pick: o.i === undefined || o.i === null ? '' : 'items',
+      });
+      const det = built.detail;
+      const line = det && (det.lines || []).find((l) => l.flag === o.f);
+      const item = line && (o.i === undefined || o.i === null ? line.target : (line.items || [])[o.i] || (line.items || [])[0]);
+      if (!item) {
+        const e = new Error(
+          det ? `站源里没有这条线路「${o.f}」或它没有可播的项` : built.note || '源里没有这条绑定'
+        );
+        e.code = 'NO_LINE';
+        throw e;
+      }
+      const r2 = await postSite(one, site.api, '/play', { flag: o.f, id: item.id }, timeoutMs);
+      if (!r2.ok) {
+        const e = new Error('源返回 HTTP ' + r2.status);
+        e.code = 'UPSTREAM_HTTP';
+        throw e;
+      }
+      const got2 = normalizePlay(r2.json);
+      if (!got2.urls.length) {
+        const e = new Error('源没给出播放地址（网盘类线路要解析，可能首次不完整）');
+        e.code = 'NO_PLAY_URL';
+        throw e;
+      }
+      return done(got2);
+    } catch (e) {
+      if (ctx) ctx.log(`解析地址失败：${o.s} / ${o.t} / ${o.f} — ${(e && e.message) || e}`);
       return { error: failFrom(e), source: one.id, site: site.key };
     }
   },

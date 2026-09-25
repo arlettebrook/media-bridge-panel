@@ -318,30 +318,28 @@ async function detail(opts = {}) {
 }
 
 /**
- * 取播放地址：`{source, site, flag, episodeId}`。
- * 成功回 `{ok:true, play:{urls, header, parse, nonHttp}}`；失败按原因给码
- * （`SITE_NOT_FOUND` / `FLAG_NOT_FOUND` / `NO_PLAY_URL` / …，见 service.playEpisode）。
+ * 取播放地址：`{domain, ref, clientHost?}`。
+ *
+ * `ref` 是**源插件编的**那一串（版本 Id 里带的），面板不解释它；`clientHost` 是客户端访问面板用的
+ * 主机名（本地实例回的是回环地址，插件要拿它拼成客户端够得着的地址）。
+ * 成功回 `{ok:true, play:{urls, header, parse, nonHttp}}`；失败按原因给码（见 service.playEpisode）。
  * 地址会过期：**每次播放都现取**，别缓存。
  */
 async function play(opts = {}) {
-  const source = String(opts.source || '').trim();
-  const site = String(opts.site || '').trim();
-  if (!site) return fail('BAD_INPUT', 400, '请提供 site（站点 key）');
-  if (!source) return fail('BAD_INPUT', 400, '请提供 source（源 id）');
+  const ref = String(opts.ref || '').trim();
+  if (!ref) return fail('BAD_INPUT', 400, '请提供 ref（版本 Id 里那段，由源插件编）');
 
+  /* 域 → 模板：只借它那一档超时（播放走搜索那一档）。**站点与线路不再经过这里** ——
+   * `ref` 里是什么、去哪儿取，都是插件的事（见 docs/plugin-migration-plan.md 批次 7）。 */
   const dom = ensureDomain(opts.domain);
   if (dom.error) return dom.error;
-  const { sources, sites } = await loadSites();
-  const out = await playEpisode(sources, sites, {
-    source,
-    site,
-    flag: opts.flag,
-    episodeId: opts.episodeId,
+  return playEpisode({
+    ref,
+    /* 客户端访问面板用的主机名：本地部署的实例回的是回环地址，插件要拿它拼成客户端够得着的地址 */
+    clientHost: String(opts.clientHost || ''),
     timeoutMs: opts.timeoutMs,
     params: dom.params,
   });
-  out.sources = sources;
-  return out;
 }
 
 /**

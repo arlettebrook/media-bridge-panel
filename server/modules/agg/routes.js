@@ -9,7 +9,7 @@
  *                         `unmatched`（**失败也回，带原因**）+ `match` 计数。打分口径见 `match.js`。
  *   POST /api/agg/detail  取某部影视的详情：**内部含搜索**（或 `source+site+vodId` 快路径），
  *                         把站源协议（`$$$` / `#` / `$`）拆成「线路 → 选集」，需要时可定位某一集
- *   POST /api/agg/play    按 `{source, site, flag, episodeId}` 取播放地址（归一化 url / header / parse）
+ *   POST /api/agg/play    按 `{domain, ref}` 取播放地址（`ref` 由源插件编，面板不解释它）
  *
  * 源清单与站点清单都**来自源插件**（`站点清单` 动作，见 `agg/source-bridge.js`）：
  * 面板这边不再有"聚合源配置"，也不再自己去打每个源的 `/config`。
@@ -211,11 +211,11 @@ module.exports = function routes(r) {
   /**
    * POST /api/agg/play —— 取播放地址
    *
-   * body：**domain（元数据域，必填 —— 决定用哪套模板）** / source（源 id，必填）/ site（站点 key，必填）/
-   *       flag（线路名，必填）/ episodeId（集 ID，必填）
+   * body：**domain（元数据域，必填 —— 决定用哪套模板）** / **ref（版本 Id 里那段，必填）** /
+   *       clientHost（客户端访问用的主机名，可选 —— emby 层会传）
    * 成功 200 `{ok:true, play:{urls, header, parse, nonHttp}}`；
-   * 失败按原因给码（SITE_NOT_FOUND 404 / FLAG_NOT_FOUND 404 / NO_PLAY_URL 502 / …）。
-   * 地址会过期：**每次播放都现取**，别缓存。
+   * 失败按原因给码（BAD_REQUEST 400 / NO_PLAY_URL 502 / 上游的码照搬 / …）。
+   * 地址会过期：**每次播放都现取**，别缓存（缓存在插件自己那边）。
    */
   r.add('POST', '/api/agg/play', async (req, res) => {
     const out = await api.play((await readBody(req)) || {});

@@ -398,63 +398,6 @@ function pickSites(sites, { keys, site, source } = {}) {
 }
 
 /**
- * 拆 `vod_play_from` / `vod_play_url`：
- *   vod_play_from 用 `$$$` 分线路名；vod_play_url 用 `$$$` 分线路、`#` 分集、`$` 分「集名 / 集ID」。
- * 返回 [{ flag, episodes:[{name,id,index}], episodeCount }]；没有 id 的段不算一集（脏数据过滤）。
- */
-function parseLines(vodPlayFrom, vodPlayUrl) {
-  const flags = String(vodPlayFrom || '').split('$$$');
-  const groups = String(vodPlayUrl || '').split('$$$');
-  const out = [];
-  flags.forEach((rawFlag, i) => {
-    const flag = rawFlag.trim();
-    if (!flag) return;
-    const episodes = String(groups[i] || '')
-      .split('#')
-      .map((seg, idx) => {
-        const pos = seg.indexOf('$');
-        const name = (pos >= 0 ? seg.slice(0, pos) : seg).trim();
-        const id = (pos >= 0 ? seg.slice(pos + 1) : '').trim();
-        return { name: name || `第${idx + 1}集`, id, index: idx + 1 };
-      })
-      .filter((e) => e.id);
-    out.push({ flag, episodes, episodeCount: episodes.length });
-  });
-  return out;
-}
-
-/**
- * 从集名解析季/集号 —— **只认明确写法**，解析不出就是解析不出（不猜）：
- *   「第2季第3集」「S01E03」→ {season, episode}
- *   「第3集」「03集」「3」    → {season:null, episode}
- */
-function parseEpisodeTitle(raw) {
-  const s = String(raw || '');
-  let m = /第\s*(\d+)\s*季\s*第?\s*(\d+)\s*[集话期章]?/.exec(s) || /S(\d{1,2})\s*E(\d{1,3})/i.exec(s);
-  if (m) return { season: Number(m[1]), episode: Number(m[2]) };
-  m = /第?\s*(\d+)\s*[集话期章]/.exec(s);
-  if (m) return { season: null, episode: Number(m[1]) };
-  m = /^\s*(\d+)\s*$/.exec(s);
-  if (m) return { season: null, episode: Number(m[1]) };
-  /* 前缀式纯集号：`211 4K.mp4` / `180x.mp4` —— 常见于「年番」这类扁平编号条目。
-   * 先剥掉 `[1.2GB]` 方括号段与【】段（体积/站点标注不是集号），再取第一个独立数字；
-   * 后面必须跟空白/结尾/`x` —— 挡掉 `4K`（4 后面是 K）与 `2160p`（2160 后面是 p）这类规格数字。 */
-  const clean = s.replace(/\[[^\]]*\]/g, ' ').replace(/【[^】]*】/g, ' ');
-  m = /(?:^|\s)(\d{1,4})(?=\s|$|x)/i.exec(clean);
-  if (m) return { season: null, episode: Number(m[1]) };
-  return null;
-}
-
-/**
- * 在线路里定位「第 season 季第 episode 集」 —— 命中必须能说出**凭什么命中**（matchedBy）：
- *   title    集名里明确写了「第X季第Y集」/「SxEy」且完全匹配（**季优先**）
- *   episode  季没出结果 → 集名里只写了集号（第3集 / 03 / `211 4K.mp4`），**任何季都认**
- *            （原口径只认第 1 季 —— 「年番」类扁平编号在 TMDB 算第 5 季时整条链路定位不到，
- *             见 S5E211 实测）
- *   number   数字兜底：剔掉带 S 的规范段与体积标注后，第一个数字 === episode
- * 都对不上 → null（调用方如实说明，不猜）。
- */
-/**
  * 从**集名**里读源自己标注的规格 —— **只认明确写法，读不出就是空**（不猜、不推断）。
  * 例：`[1.8GB]Lanterns.2026.S01E01.2160p.MAX.WEB-DL.H.265.DV.HDR.DDP5.1.Atmos.mkv【L 绿灯军团】`
  *   → { container:'mkv', sizeBytes:1932735283, width:3840, height:2160, videoCodec:'hevc',
@@ -551,82 +494,6 @@ function parseEpisodeMeta(raw) {
   return out;
 }
 
-/**
- * 「数字兜底」用的清洗：剔掉**带 S 的规范段**与**体积标注**后，
- * 取剩下部分里的**第一个数字**。
- *   · 带 S 的数字不算集号：\`S05\`、\`S01E210\`、\`第5季\`（「不匹配带 s 的数字」）；
- *   · 体积不算：\`1.2GB\` / \`394.0MB\`（「不匹配后面带 GB 的数字」）。
- * 例：\`玩偶|4K · [1.2GB]208 4K.mp4【D 斗破】\` → \`玩偶|4K · 208 4K.mp4\` → 208
- *     \`玩偶|4K · [1.2GB]S01E210.mkv【豆粕苍穹】\` → \`玩偶|4K · .mkv\` → null（刻意不把 210 当集号）
- * 规格数字与扩展名数字同样排除：\`4K\`、\`1080p\`、\`1080i\`、\`2160p\`，
- * 以及 \`.mp4\` 里的 4、\`x264\` 里的 264 —— 数字两侧紧邻字母的都不算集号，唯一例外是后缀 \`x\`。
- *     例：\`玩偶|4K · [1.2GB]S01E210.mkv\` 清洗后剩 \`玩偶|4K · .mkv\` → 4 后面是 K → 跳过 → null；
- *         \`4K.mp4\` → 4 后是 K、mp4 的 4 前是 p → 全跳过 → null（实测已知的错配）。
- * 小数规格也排除：\`AAC5.1\` / \`DD5.1\` 里的 5、1 都不算集号（实测已知的第二类错配）。
- */
-function looseEpisodeNumber(raw) {
-  let s = String(raw || '');
-  s = s.replace(/\[[^\]]*\]/g, ' ').replace(/【[^】]*】/g, ' ');
-  s = s.replace(/S\s*\d{1,2}\s*E\s*\d{1,3}/gi, ' ');
-  s = s.replace(/S\s*\d{1,2}(?!\d)/gi, ' ');
-  s = s.replace(/第\s*\d+\s*[季部]/g, ' ');
-  s = s.replace(/\d+(?:\.\d+)?\s*(?:GB|MB|KB|TB|B)(?![\w])/gi, ' ');
-  /* 规格数字与扩展名里的数字都排除：
-   * 数字**两侧紧邻字母**的都不算集号 —— 后紧跟的是 \`4K\`/\`1080p\`/\`1080i\`/\`2160p\`，
-   * 前紧邻的是扩展名 \`.mp4\` 的那个 4、编码 \`x264\` 的 264。
-   * 唯一放行后缀 \`x\`（源自己的 \`180x.mp4\` 写法）。 */
-  const re = /\d{1,4}/g;
-  let m;
-  while ((m = re.exec(s))) {
-    const prev = m.index > 0 ? s[m.index - 1] : '';
-    const next = s[m.index + m[0].length] || '';
-    const badPrev = /[A-Za-z]/.test(prev);
-    const badNext = /[A-Za-z]/.test(next) && next !== 'x' && next !== 'X';
-    /* 小数规格也不算：\`AAC5.1\` / \`DD5.1\` 这类声道标注里的数字，
-     * 会让 E1 误命中（实测：非夸克线路 \`斗破苍穹.S05E044.2160p...AAC5.1.mp4\` 被 E1 命中）。
-     * 判据：数字与小数点夹着数字（\`5.1\` 两侧的数字都算）；\`01.mp4\` 不受影响（点号后是 m，不是数字）。 */
-    const inDecimal =
-      (next === '.' && /\d/.test(s[m.index + m[0].length + 1] || '')) ||
-      (prev === '.' && /\d/.test(s[m.index - 2] || ''));
-    if (!badPrev && !badNext && !inDecimal) return Number(m[0]);
-  }
-  return null;
-}
-
-function locateEpisode(lines, season, episode) {
-  const s = Number(season);
-  const e = Number(episode);
-  const hit = (line, ep, matchedBy) => ({ flag: line.flag, name: ep.name, id: ep.id, index: ep.index, matchedBy });
-
-  /* ① 季优先（取代原来「季集必须同时命中」+「纯集号只认第 1 季」的口径）：
-   * 集名里标了显式季号的 → 只在季号 === s 的集里匹配集号。 */
-  for (const line of lines) {
-    for (const ep of line.episodes) {
-      const t = parseEpisodeTitle(ep.name);
-      if (t && t.season === s && t.episode === e) return hit(line, ep, 'title');
-    }
-  }
-  /* ② 季没出结果 → 直接匹配集：集名里只写了集号（第3集 / 03 / `211 4K.mp4`），
-   * **任何季都认** —— 「斗破苍穹年番」在源里是扁平编号 01~211，在 TMDB 里却是第 5 季，
-   * 原来非第 1 季一律定位不到。代价如实记着：扁平编号到底对应哪一季是猜的（按年番=最新季理解）。 */
-  for (const line of lines) {
-    for (const ep of line.episodes) {
-      const t = parseEpisodeTitle(ep.name);
-      if (t && t.season === null && t.episode === e) return hit(line, ep, 'episode');
-    }
-  }
-  /* ③ 数字兜底：② 也没中 → 剔掉带 S 的规范段与体积标注后，
-   * 集名里第一个数字 === e 就算命中（`[1.2GB]2.mp4` → 2）。
-   * **取代原来的「按选集序号（该行第 N 个）兜底」** —— 那个必然错：某行列表从 208 开始时，
-   * 请求 E1 会拿到 `208 4K.mp4`、请求 E3 会拿到 `210 4K.mp4`（实测已知的错配）。 */
-  for (const line of lines) {
-    for (const ep of line.episodes) {
-      if (looseEpisodeNumber(ep.name) === e) return hit(line, ep, 'number');
-    }
-  }
-  return null;
-}
-
 /** 变体的标注后缀：取名字里**括号段的内容**拼一句（`蜘蛛侠（臻彩）` → `臻彩`，多个用空格连）。 */
 function variantLabel(fullName) {
   const parts = [];
@@ -639,97 +506,50 @@ function variantLabel(fullName) {
 }
 
 /**
- * 取一个站的 /detail 并拆成规范化结构（source = 它所属的源）。
+ * 取一个站的详情（source = 它所属的源）。
  *
- * `pick` 决定"什么算可播目标"（电影/剧集两套取法，见 docs/adr/0022）：
+ * ⚠️ **线路与选集的解析已经搬进源插件**（`$$$` / `#` / `$` 是猫爪源自己的约定，见
+ * docs/plugin-migration-plan.md 批次 7）：这一层只把结构化结果接住，再做**面板自己那半件事** ——
+ * 把集名里源的规格标注（容器 / 分辨率 / 编码 / 体积）解析出来挂在 target/items 上，
+ * 消费方（emby 层）要用它填 MediaSource / MediaStreams。那是"填 Emby DTO"的知识，归面板。
+ *
+ * `pick` 决定"什么算可播目标"（电影/剧集两套取法，见 docs/adr/0022），由插件那边执行：
  *   · 缺省 `''`  —— **剧集**取法：按传进来的季集号定位，每条线路的 `line.target` 是**这一集**；
- *   · `'items'` —— **电影**取法：**每条线路的每个播放项**各成一个目标（`line.items[]`），不按集号匹配。
+ *   · `'items'` —— **电影**取法：**每条线路的每个播放项**各成一个目标（`line.items[]`）。
+ * 季集号在这里**只负责转给插件**；能不能定位到是插件的事（它认的是集名里的集号，规则见 lib/lines.js）。
  */
 async function fetchDetailOnce(source, site, vodId, timeoutMs, season, episode, pick) {
   /* 站点字段统一叫 `key`（与 searchSite / 对外形状一致）—— 曾用名 `site`，与 search 混用会使消费方读不到 key */
   const r0 = { source: source.id, key: site.key, name: site.name, api: site.api, ok: false, ms: 0, data: null, detail: null, error: null };
   const t0 = Date.now();
   try {
-    const res = await bridge.detail(source.id, { key: site.key, id: vodId, timeoutMs });
+    const res = await bridge.detail(source.id, {
+      key: site.key,
+      id: vodId,
+      season: season === undefined || season === null ? undefined : Number(season),
+      episode: episode === undefined || episode === null ? undefined : Number(episode),
+      pick,
+      timeoutMs,
+    });
     r0.ms = Date.now() - t0;
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const j = res.json;
     if (!j || typeof j !== 'object') throw new Error('返回不是 JSON');
     r0.data = j;
-    const it = (j.list || [])[0];
-    /* msearch:xxx 这类 id：detail 返回 {}，是**如实**的空，不是失败 */
-    if (!it) {
+    /* `msearch:` 这类 id：detail 返回空，是**如实**的空，不是失败（插件用 note 说明原因） */
+    if (!res.detail) {
       r0.ok = true;
       r0.detail = null;
-      r0.error = '站源 detail 返回空（`msearch:` 这类跳搜索的 id 本来就没有详情）';
+      r0.error = res.detailNote || '站源 detail 返回空';
       return r0;
     }
-    const lines = parseLines(it.vod_play_from, it.vod_play_url);
     r0.ok = true;
-    r0.detail = {
-      vodId: String(it.vod_id || vodId),
-      name: String(it.vod_name || ''),
-      year: String(it.vod_year || ''),
-      area: String(it.vod_area || ''),
-      pic: String(it.vod_pic || ''),
-      content: String(it.vod_content || ''),
-      remarks: String(it.vod_remarks || ''),
-      lines,
-      lineCount: lines.length,
-    };
-    /* 传了**集号**就定位（**季号可选**）：每条线路各自定位（不同线路的集名/顺序可能不同），
-     * 并把集名里源标的规格（容器/分辨率/编码/体积）解析出来挂在各自 target 上 ——
-     * 消费方（如 emby 层）要用它填 MediaSource / MediaStreams。
-     * ⚠️ 原实现要求 season 与 episode **都给**才算，只填集号就一律"没定位到"（实测：同一部片、
-     * 同一个条目，填了季 6 条定位到、不填季 0 条）—— 而源里的集名常常只有集号
-     * （`[842.5MB]211 4K.mp4`），前端填写时也往往只填集。定位规则本身**不依赖季号**
-     * （见 `locateEpisode` 的 ②③），所以这里放开。 */
-    if (pick === 'items') {
-      /* ---- 电影取法：**每条线路的每个播放项**都是一个可播目标 ----
-       * 为什么不能借季集号定位（曾经的写法）：电影文件名里没有集号（只有 `[5.0GB]` / `2026` / `1080p` /
-       * `X265` 这类规格），而 `locateEpisode` 的三条路全是"按集名里的集号匹配" —— 实测 20 部电影里
-       * 19 部一条都定位不到（源里有 4~20 条线路，`target` 却全空）⇒ 客户端版本列表恒为 0 条。
-       * 电影在协议里本来就是「一条线路 + 若干播放项」（`vod_play_url` 里 `#` 分隔的那些），
-       * 取每一项都是**确定的**（不是猜），所以这里全列出来，由客户端自己挑压制版本。
-       * `line.target` 仍保留 = 第 1 项：诊断字段与既有消费方都不用改。 */
-      let empty = 0;
-      for (const line of lines) {
-        const items = (line.episodes || []).map((ep) =>
-          Object.assign(
-            { flag: line.flag, name: ep.name, id: ep.id, index: ep.index, matchedBy: 'item' },
-            parseEpisodeMeta(ep.name)
-          )
-        );
-        if (!items.length) {
-          empty += 1;
-          continue;
-        }
-        line.items = items;
-        line.target = items[0];
-      }
-      r0.detail.pick = 'items';
-      r0.detail.target = (lines.find((l) => l.target) || {}).target || null;
-      if (empty) r0.detail.targetNote = `${empty} 条线路里没有播放项（源里那几条是空壳）`;
-      return r0;
-    }
-    if (episode !== undefined && episode !== null) {
-      const want = { episode: Number(episode) };
-      if (season !== undefined && season !== null) want.season = Number(season);
-      const targets = lines.map((line) => {
-        const t = locateEpisode([line], want.season, want.episode);
-        return t ? Object.assign(t, want, parseEpisodeMeta(t.name)) : null;
-      });
-      lines.forEach((line, i) => {
-        if (targets[i]) line.target = targets[i];
-      });
-      const first = targets.findIndex(Boolean);
-      r0.detail.target = first >= 0 ? targets[first] : null;
-      if (first < 0) {
-        r0.detail.targetNote =
-          `线路里定位不到 ${want.season !== undefined ? 'S' + want.season : ''}E${want.episode}` +
-          '（集名里找不到这个集号，或第 1 季的序号不对）';
-      } else if (targets.some((t) => !t)) {
-        r0.detail.targetNote = `${targets.filter((t) => !t).length} 条线路里没定位到这一集（各自的 target 为空）`;
+    r0.detail = res.detail;
+    /* 把源标的规格挂上去（面板这半件事，见函数头）。`items` 与 `target` 是**同一个对象的引用**
+     * （电影取法里 target = items[0]），所以按线路各补一次就行 —— 别重复补两遍。 */
+    for (const line of r0.detail.lines || []) {
+      for (const x of [].concat(line.items || [], line.target ? [line.target] : [])) {
+        Object.assign(x, parseEpisodeMeta(x.name));
       }
     }
     return r0;
@@ -1091,64 +911,59 @@ async function aggregateDetail(sources, sites, opts = {}) {
   return out;
 }
 
-/** play.url 既可能是字符串，也可能是「扁平数组 [名, 链接, 名, 链接…]」→ 统一成 urls[] */
-function normalizeUrls(url) {
-  if (!url) return [];
-  if (Array.isArray(url)) {
-    const odd = url.filter((_, i) => i % 2 === 1).map((x) => String(x || '')).filter(Boolean);
-    if (odd.length) return odd;
-    return url.map((x) => String(x || '')).filter(Boolean);
-  }
-  const s = String(url).trim();
-  return s ? [s] : [];
-}
-
 const NON_HTTP_URL = /^(push|magnet|ed2k|thunder|ftp|rtmp):/i;
 
 /**
- * 播放：`{source, site, flag, episodeId}` → 插件动作「解析地址」→ 归一化。
- * 站点身份由 `(source, site)` 给出（调用方不用带地址与接口前缀），地址会过期，
- * **每次播放都现取、不缓存**（缓存在插件自己那边，它自己管有效期 —— 见契约第八节）。
+ * 播放：把**插件自己编的 `ref`** 交给插件动作「解析地址」，拿回一个**客户端够得着**的地址。
+ *
+ * 面板不再解释 `ref`（里面是什么、怎么变有效，都是插件的事，见 docs/plugin-migration-plan.md 批次 7），
+ * 所以这里也没有"站点 / 线路 / 集 id"这些参数了 —— 只剩 `ref` 与**客户端访问用的主机名**
+ * （本地部署的实例回的是回环地址，插件要拿它拼成客户端够得着的地址）。
+ *
+ * 地址会过期：**每次播放都现取、不缓存**（缓存在插件自己那边，它自己管有效期 —— 契约第八节）。
  */
-async function playEpisode(sources, sites, opts = {}) {
+async function playEpisode(opts = {}) {
   const cfg = opts.params || {};
-  const byId = sourceMap(sources);
   /* 播放走**搜索那一档**超时（取一个播放地址本来就该快）；要更宽的是详情，不是它。 */
   const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || searchTimeoutMs(cfg));
   const t0 = Date.now();
-  const site = siteByKey(sites, opts.source, opts.site);
-  const done = (payload) => Object.assign({ source: opts.source, site: opts.site, flag: opts.flag, elapsedMs: Date.now() - t0 }, payload);
+  const ref = String(opts.ref || '').trim();
+  const done = (payload) => Object.assign({ ref, elapsedMs: Date.now() - t0 }, payload);
 
-  if (!site) {
-    return done({ ok: false, error: { code: 'SITE_NOT_FOUND', status: 404, message: `站点清单里没有 ${opts.source} / ${opts.site}（源可能换了站，重新走一次 detail 绑定即可）` } });
+  if (!ref) {
+    return done({ ok: false, error: { code: 'BAD_REQUEST', status: 400, message: '缺少 ref（版本 Id 里那段）' } });
   }
-  if (!opts.flag) return done({ ok: false, error: { code: 'FLAG_NOT_FOUND', status: 404, message: '缺少线路名 flag' } });
-  if (!opts.episodeId) return done({ ok: false, error: { code: 'BAD_REQUEST', status: 400, message: '缺少集 ID episodeId' } });
 
   let res;
   try {
-    res = await bridge.play(needSource(byId, site.source).id, {
-      key: site.key,
-      flag: opts.flag,
-      id: opts.episodeId,
-      timeoutMs,
-    });
+    res = await bridge.play(ref, { clientHost: opts.clientHost || '', timeoutMs });
   } catch (e) {
-    return done({ ok: false, error: { code: 'NETWORK', status: 502, message: e && e.name === 'AbortError' ? `超时(${timeoutMs}ms)` : '连不上源：' + ((e && e.message) || '') } });
+    /* 抛出来的都是"这次调用本身没成"（插件没在跑、管道断了、ref 认不出、站点认不出…）——
+     * 面板如实照搬原因；只有超时按老口径报（那是唯一需要带上超时值的）。 */
+    const code = (e && e.code) || 'NETWORK';
+    const timeout = e && e.name === 'AbortError';
+    const callerFault = code === 'BAD_REF' || code === 'NO_SITE' || code === 'NO_SOURCE';
+    return done({
+      ok: false,
+      error: {
+        code,
+        status: timeout || !callerFault ? 502 : 400,
+        message: timeout ? `超时(${timeoutMs}ms)` : (e && e.message) || '取播放地址失败',
+      },
+    });
   }
   if (!res.ok) {
     return done({ ok: false, error: { code: 'UPSTREAM_HTTP', status: res.status, message: '源返回 HTTP ' + res.status } });
   }
 
-  const j = res.json || {};
-  const urls = normalizeUrls(j.url);
+  const j = { urls: res.urls, header: res.header, parse: res.parse };
+  /* 插件回的 `urls` 已经归一化过（源那边"字符串或扁平数组"的两种写法由它收口，见它的 normalizePlay） */
+  const urls = (Array.isArray(j.urls) ? j.urls : []).map((x) => String(x || '')).filter(Boolean);
   if (!urls.length) {
     return done({ ok: false, data: j, error: { code: 'NO_PLAY_URL', status: 502, message: '源没给出播放地址（网盘类线路要解析，可能首次不完整）' } });
   }
   return done({
     ok: true,
-    siteName: site.name,
-    api: site.api,
     data: j,
     play: {
       urls,
@@ -1167,15 +982,11 @@ module.exports = {
   sourceMap,
   siteByKey,
   selectSites,
-  parseLines,
-  parseEpisodeTitle,
   parseEpisodeMeta,
-  locateEpisode,
   matchDefaults,
   searchTimeoutMs,
   detailTimeoutMs,
   lineFilter,
-  normalizeUrls,
   fetchDetail,
   aggregateDetail,
   playEpisode,
