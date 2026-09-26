@@ -29,13 +29,13 @@ server/
                           （清单 / 包校验 / 启停 / 管道调用 / 日志 / 内存 / webui 托管与转发 / 安装确认）
     agg/                  保留：编排（搜索 / 详情 / 播放）、打分（match.js）、模板存取、站点统计与测速
     emby/                 保留：端点、DTO、账号库、图片索引、请求日志
-                          - home/ → 搬进 plugins/home/
+                          - home/ 只剩一层**薄适配层**（媒体库 Id 形状 + 条目归一化），宿主已并入 plugin/
     panel/                保留：自更新、备份、鉴权、日志页
     source/               → 并入 plugin/（"下载包 / 起进程 / 端口 / 自动更新"已是通用宿主能力）
 plugins/                   + 新增（仓库内）：**随包发行的内置插件源码**
   metadata/tmdb/            元数据插件：取元数据 / 取一季分集 / 搜索 / 注册 / 自带 webui
   source/catpaw/            源插件：站点清单 / 候选 / 取播放项 / 解析地址 / 站点测速 / 自带 webui
-  home/example/             首页插件：内置示例（今天在 server/modules/emby/home/）
+  home/example/             首页插件：内置示例（11 行 TMDB 榜单等；自带 webui 设置页与行参数）
 public/
   core/  modules/
     plugin/                + 新增：插件管理页
@@ -124,7 +124,7 @@ data/
 - **回退**：把 `emby/tmdb.js` 还原、删掉 `providers.js` 即回到原状。
 - **依赖**：无。**这是整个改造的第一块地基。**
 
-### 批次 2 — 模板落地（还不涉及插件）· 服务端已完成，前端与验证待做
+### 批次 2 — 模板落地（还不涉及插件）· 已完成（端点逐字对比并入"发版前完整回归"）
 
 - **做什么**：模板 = 一份配置数据文件（站点集合 + 打分过滤参数 + 超时与并发），有 id；`域 → 模板` 一对一。
   聚合层从"读 `agg.json` 那套全局配置"改为"按域读模板"。
@@ -437,21 +437,72 @@ data/
 - **风险**：中。缓存键少一项就会"改设置不生效"，多一项会无谓失效率 —— 所以 `pick` 与两档超时都进 key。
 - **依赖**：批次 6。
 
-### 批次 9 — 首页插件搬进统一插件树
+### 批次 9 — 首页插件搬进统一插件树（已完成）
 
-- **做什么**：首页插件成为第三类插件（`plugins/home/`），保留它现有的沙箱化执行形态与宿主能力。
-- **动到**：`server/modules/emby/home/`、插件管理页、导航。
-- **行为**：首页与库列表应当照旧。
-- **验证**：`Views` / `Items?ParentId=` / 图片 全部照旧；上传一个插件、改参数、预览都可用。
+- **做什么**：首页插件成为**第三类插件**（`plugins/home/`），并把老的首页宿主**整套删掉**
+  （vm 沙箱 + 单文件 JS 上传 + 8 个 `/api/emby/home/**` 自用端点 + 面板侧「首页插件」页）。
+  原先计划的"保留沙箱化执行形态"作废 —— 统一宿主本来就是独立子进程，没有第二套执行形态的道理。
+- **动到**：
+  - 新增 `plugins/home/example/`（`plugin.json` + `index.js` + `lib/` + `ui/`）：11 行示例、TMDB 客户端、
+    自带的设置页（token / 语言 / 基地址 + 每行参数）。
+  - 删 `server/modules/emby/home/{spawn,sandbox,store,manifest,routes,example.plugin.js,plugin-dev.skill.md}`、
+    `public/modules/emby/home.js`。
+  - 改 `emby/home/index.js`（缩成**薄适配层**：媒体库 Id 形状 + 条目归一化 + 同步读的行快照）、
+    `emby/index.js`（`autostart` → `warmHome`）、`emby/routes.js`（删那 8 个端点的挂载）、
+    `server.js`（预热排在 `pluginModule.autostart()` **之后**）、`public/app.js` 与
+    `public/core/registry.js`（去掉 `emby-home` 页与导航）。
+- **定下的口径**：
+  - **token 归首页插件自己**（插件设置页自己填）—— 统一宿主的插件**没有回调面板的通道**
+    （`ctx` 只有 `type/id/dataDir/log`），"面板中转取 TMDB"要新增反向通道，不如让插件自带 token。
+  - 行清单 / 取数 / 参数 / **行结果缓存**全归插件（契约第十节）；面板侧只留
+    "最后一次成功取到的条目"这份**同步可读**的记忆（`Views` 的库封面要同步拿图，见适配层 `peekRowItems`）。
+  - **分页原样透传**：`StartIndex`/`Limit` 直达插件，面板与插件层都不切片。
+  - `enabledRows` / `rowByFeed` / `peekRowItems` 被 emby 层**同步**调用，故行清单在面板内存里存一份
+    快照（5 秒保鲜，过期后台刷），改行参数后最迟几秒反映到客户端。
+- **验证（全新数据目录起真实例 + 打桩 TMDB）**：
+  - 4 个内置插件开机全部装入并启用；`home/example` 报出 `rows / run / http` 三个动作，预热到 **11 行**。
+  - `Views` 回 **11 个库**，`CollectionType` 正确（正在热映/出品公司 `movies`、播出平台/地区行 `tvshows`、片单/随机推荐 `mixed`）。
+  - **没配 token 时** `Items?ParentId=<库>` 回 500 并带 `code: NO_TOKEN`、`home: example/now_playing`
+    —— 如实失败，不编空数据（与老口径一致）。
+  - 配好设置后同一请求回 200，`total=100`、5 条，每条带 `ProviderIds.Tmdb` 与图片 tag；
+    取过的那个库在 `Views` 里立刻有了封面图（只有取过的行有 —— 封面不为它单独打上游）。
+  - 「推荐」查询（`SortBy=IsFavoriteOrLiked`）**落到了 `random_picks` 行**（`feed` 路由通）；
+    `Items/Latest?ParentId=<库>` 也回裸数组 20 条（协议如此）。
+  - 插件设置页浏览器实测：11 行参数块与「电影库/剧库/混合库」徽标齐、`测试连接` 出结果、
+    `保存行参数` 出绿字提示，控制台无报错。
+- **没验到的（如实记）**：真 TMDB token 下的**真实榜单内容**（本机用的是打桩 TMDB，
+  只验了链路与形状）。
 - **依赖**：批次 3。
 
-### 批次 10 — 收尾与文档
+### 批次 10 — 收尾与文档 · 已完成
 
-- 站点测速端点接上（每个站点一个，见契约）；诊断字段进日志；
-  失败跳过与超时按"插件 / 站点"记账；概览页显示插件进程内存。
-- 同步文档：`ARCHITECTURE.md`（分层与目录）、`develop.md`（模块清单、API 契约、数据目录）、
-  `emby-compat.md`（若端点行为有变）、`plugin-contract.md`（把"待实现"改成已实现）。
-- `CHANGELOG.md` 写清 [ADR-0034](adr/0034-fresh-install-no-migration.md) 那张"会重来的东西"表。
+- **插件 UI 挂侧栏（已做）**：落地 [ADR-0029](adr/0029-plugin-channel-and-actions.md) 的「已定 18」——
+  侧栏多出**元数据 / 搜索源 / 首页**三栏，栏下列出该类型「启用中且带 webui」的插件，
+  点进去由面板**内嵌**打开插件自己的设置页（不再是「管理」页那颗跳新标签的按钮；那颗按钮留着当快捷方式）。
+  做法：侧栏按钮改由 `core/shell.js` 的 `renderNavButtons()` 照 `MODULES` 现画
+  （**没有子项的栏目不画**，侧栏不留空栏目）；插件 UI 页的 id 形如 `pui-home-example`
+  （hash 里不能带 `/`），**所有插件共用**一个渲染器 `core/plugin-ui.js`（一个铺满的 iframe）；
+  开机先拉 `/api/plugins` 再 `applyHash()`，所以刷新能停在插件页上；插件启停/装卸后
+  「管理」页调 `shell.refreshNav()` 把侧栏重画一遍。
+- **站点测速端点接上（已做）**：每个站点一条，诊断字段进日志，失败跳过与超时按"插件 / 站点"记账
+  （`agg/site-stats.js` + `agg/site-test.js`，开机计时接在 `server.js`）。计划里那行是过期文字。
+- **概览页显示插件进程内存（已做）**：「概览」页新增「插件进程」卡，列**运行中**插件的 RSS 与合计
+  （数据源 `/api/plugins` 的 `memoryBytes`）；读不到显示「—」，不编数。
+- **同步文档（已做）**：`ARCHITECTURE.md` 改成插件化后的形态（分层与插件的关系、目录树、模块清单、
+  配置与数据落点、模板与域、三条数据流）；`develop.md` 删掉已删端点与 `agg.json` 那套
+  （新增「插件宿主」一节、`/api/agg` 改为模板与域的端点、数据目录与实现要点一并改）；
+  `plugin-contract.md` 无"待实现"残留。`emby-compat.md` 本轮未动（端点行为未变）。
+- **`CHANGELOG.md`（已做）**：新增 `## [未发布]` 一节，记本次插件化改造，
+  并**原样写入** [ADR-0034](adr/0034-fresh-install-no-migration.md) 那张"会重来的东西"表。
+  ⚠️ **版本号未动**（仍 `1.3.4`）—— 发版号由发布时再定。
+- **验证（已做）**：`npm run check` 通过（89 文件）；全新数据目录起实例
+  （`DATA_DIR=/tmp/cp-b10 WEB_PORT=8899`）实测——4 个内置插件开机全部启用并跑起来；
+  浏览器实测「概览」页两张卡（运行环境 / 插件进程，4 行内存 + 合计 190MB）、
+  「插件 → 管理」页正常渲染且**控制台不再有 `Cannot access 'timer' before initialization`**
+  （TDZ 已修）。
+  ⚠️ **没测到的**：管理页"每 2 秒自刷"的确切节奏 —— 浏览器 WebView 中途开始连续导航超时，
+  没能拿到稳定的请求计数；从代码看修复后 `setInterval(…, 2000)` 确实能执行到
+  （修复前那行直接抛错、轮询根本没建立）。
 
 ## 四之二、待定与挂账
 
@@ -477,8 +528,15 @@ data/
    ⚠️ 另一笔账：盘上会留一个再也没人读的 `data/cache/tmdb.db`（旧元数据缓存），
    要清就随手删，不清也没影响；`CHANGELOG` 里按 [ADR-0034](adr/0034-fresh-install-no-migration.md)
    那张表写一句即可（批次 10）。
-3. **`develop.md` 的接口清单**：`/api/sources* /api/run* /api/base* /website*` 与 `agg.json`
-   那几项已经删了，文档还写着 —— 按计划归**批次 10**（模块清单 / API 契约 / 数据目录一起改一遍）。
+3. ~~**`develop.md` 的接口清单**~~ —— **已做**（批次 10）：`/api/sources* /api/run* /api/base* /website*`、
+   `/api/settings` 与 `agg.json` 那几项都从文档里删了，改成模板与域的端点；API 契约、数据目录、
+   实现要点一起改了一遍。
+4. ~~**`public/modules/plugin/manage.js` 有个既有 bug**~~ —— **已修**（批次 10，经用户点头）：
+   `renderPluginManage()` 里把 `let timer = null` 挪到 `startPolling()` 调用**之前**，TDZ 消除；
+   浏览器实测控制台不再报 `Cannot access 'timer' before initialization`。
+5. **`docs/emby-home-plugin.md`** 描述的是**已删掉**的那套（沙箱 / 单文件上传 / 8 个端点 / 「首页插件」页），
+   批次 9 已把它改写成「首页插件指南」（只留行声明 / HomeItem / 分页 / 与 Emby 端点的接线，
+   其余指向 [plugin-contract.md](plugin-contract.md) 与 `plugins/home/example/`）。
 
 ## 五、依赖关系（一眼看）
 

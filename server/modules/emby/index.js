@@ -80,22 +80,17 @@ module.exports = {
   },
 
   /**
-   * 面板启动时调（见 `server.js`，与 `sourceModule.autostartAll()` 同一个位置）。
+   * 面板启动时调（见 `server.js`，**排在插件模块起来之后**）。
    *
-   * 把**随包发行的内置首页示例**同步进插件列表 —— 按 md5 比，一致就跳过、不一致就覆盖更新
-   * （面板升级带来的新示例靠这条生效，且会保留已启用状态与已保存参数）。见 `home.ensureBuiltin()`。
-   * ⚠️ 失败**不挡面板启动**：它只是个示例插件，坏了不该连累整个面板。
+   * 首页的行清单、取数、设置现在全归 `home` 类型插件（见 `home/index.js` 那段说明）；
+   * 这里只做一件事：把各首页插件的行清单**预热**进面板的内存快照 ——
+   * 免得开机后第一发 `Views` 拿到空。失败**不挡面板启动**（过期会自己重试）。
    */
-  autostart: async () => {
+  warmHome: async () => {
     try {
-      const out = await home.ensureBuiltin();
-      const p = out.plugin;
-      console.log(
-        `  ${out.unchanged ? '✔' : '↻'} emby 内置首页示例：${out.unchanged ? '已在位（md5 一致，跳过）' : '已同步进插件列表'}` +
-          `（${p.id} v${p.version}，${(p.rows || []).length} 行）`
-      );
+      await home.warmHome();
     } catch (e) {
-      console.log('  ✘ emby 内置首页示例同步失败（面板继续）：' + ((e && e.message) || e));
+      console.log('  ✘ 首页插件预热失败（面板继续）：' + ((e && e.message) || e));
     }
   },
 

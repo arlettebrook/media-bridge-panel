@@ -1,13 +1,13 @@
 # 插件契约
 
-> **状态：已定稿，待实现。** 本文描述的是**目标形态**，当前代码尚未实现 ——
-> 现在能配的仍然只有 `agg.json` 里那一套站点设置。实现进度以 `CHANGELOG.md` 为准。
+> **状态：已定稿，正在按批次落地。** 本文描述的是**目标形态**，实现进度以
+> [plugin-migration-plan.md](plugin-migration-plan.md) 与 `CHANGELOG.md` 为准。
 > 决策依据见 [adr/](adr/) 的 0028~0034；讨论过程的存档见 [plugin-arch-draft.md](plugin-arch-draft.md)。
 
 本文是插件契约的**唯一来源**：插件能做什么、面板会怎么调它、哪些必须遵守。代码里不放本文没写的字段或行为。
 
 配套：[ARCHITECTURE.md](../ARCHITECTURE.md)（分层与依赖方向）、[develop.md](develop.md)（开发环境与实现要点）、
-[emby-home-plugin.md](emby-home-plugin.md)（首页插件，本项目另一套独立的插件机制）。
+[emby-home-plugin.md](emby-home-plugin.md)（首页插件的行与条目规范）。
 
 ---
 
@@ -170,7 +170,6 @@
 | 取元数据 | 条目坐标（一次一个） | 规范字段 + 成败 | 必需 |
 | 取一季分集 | 条目坐标 + 季号 | 分集列表 | 必需 |
 | 搜索 | 搜索词 | 候选列表 | 必需 |
-| 首页内容 | 域 + 行 | 行 | 见第七节 |
 | webui | — | 静态文件 | 可选 |
 
 ### "取元数据"要提供的字段（按用途分组）
@@ -213,8 +212,24 @@ Emby 的 DTO 形状（面板负责转换，见 [ADR-0007](adr/0007-emby-dto-shap
   两类插件互不感知。
 - **分派**：条目前缀决定用哪个元数据插件。**认不出的前缀 ⇒ 如实空并点名缺哪个插件**
   （不回退到别的域、不猜、不静默）。
-- **首页**：行的来源不强制 —— 首页插件**可以**去问元数据插件的"首页内容"动作，
-  **也可以自定义去取**，只要按规范返回行即可。首页插件是编排者。
+- **首页**：首页插件是 `home` 类型插件，与元数据 / 源插件跑在同一套宿主里；
+  **一行 = 客户端上的一个媒体库**。已实现两个动作：
+  - `rows`（无参）→ `{ ok: true, rows: [ { id, title, collectionType?, feed? } ] }`：
+    申报行清单。`collectionType` 是这一行做出来的库类型（`movies` / `tvshows` / `mixed`）；
+    `feed` 声明这一行接客户端的哪一类推荐查询，没有行声明时那条查询**如实回空**。
+  - `run`（`{ rowId, params?, startIndex?, limit? }`）→ `{ items, total, cached? }`：
+    `items` 是 HomeItem 数组，`total` 是这个库的总条数（插件不知道就按本页条数如实报）。
+- 行声明的 `id` / `title` / `collectionType` / `feed` 之外，还可带 `cacheDuration`（结果缓存秒数）与
+  `params`（用户可配参数，类型 `enumeration` / `count` / `input`）。行的**结果缓存归插件自己**
+  （见第十节）。
+- **分页原样透传**：`startIndex` / `limit` 是客户端请求里的原值，取哪一页由插件决定，
+  面板与插件层都**不切片**。
+- **媒体库 Id 由面板生成**：`catpawhome_` + base64url(`<插件id>|<行id>`)；稳定性由面板保证，
+  插件看不到也不需要管这个 Id。
+- **插件没有回调面板的通道**：宿主给插件的上下文只有 `type` / `id` / `dataDir` / `log`，
+  插件之间也不能互相调用。因此首页插件取数要用的凭据（例如 TMDB token）**由插件自己存、自己带**，
+  面板不代做也不下发。
+- HomeItem 字段表与严格归一化的规矩见 [emby-home-plugin.md](emby-home-plugin.md)。
 
 ---
 

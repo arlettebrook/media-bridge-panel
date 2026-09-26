@@ -8,7 +8,7 @@
 |---|---|
 | 装上并使用 | [README.md](../README.md) |
 | 修改代码 | [ARCHITECTURE.md](../ARCHITECTURE.md) → [develop.md](develop.md) |
-| 编写插件（元数据 / 源 / 首页） | [plugin-contract.md](plugin-contract.md)（**目标形态，待实现**） · [emby-home-plugin.md](emby-home-plugin.md) |
+| 编写插件（元数据 / 源 / 首页） | [plugin-contract.md](plugin-contract.md)（**正在落地的目标形态**） · [emby-home-plugin.md](emby-home-plugin.md) |
 | 了解某个决定为什么这么做 | [adr/](adr/) |
 
 ## 全部文档
@@ -19,8 +19,8 @@
 | [ARCHITECTURE.md](../ARCHITECTURE.md) | 分层与依赖方向、目录结构、模块清单、模块设置 | 参考 |
 | [develop.md](develop.md) | 开发环境、新增模块、API 契约、面板鉴权、数据目录、实现要点 | 参考 |
 | [emby-compat.md](emby-compat.md) | Emby 兼容层：端点清单、DTO 形状、失败语义、客户端差异 | 参考 |
-| [emby-home-plugin.md](emby-home-plugin.md) | 首页插件规范、示例与调试方法 | 操作指南 |
-| [plugin-contract.md](plugin-contract.md) | **插件契约（目标形态，待实现）**：目录与包、动作与字段、能力申报、webui 与门禁、模板与域 | 参考 |
+| [emby-home-plugin.md](emby-home-plugin.md) | 首页插件的**行与条目规范**：动作契约、行声明、HomeItem、与 Emby 端点的接线 | 参考 |
+| [plugin-contract.md](plugin-contract.md) | **插件契约（正在落地的目标形态）**：目录与包、动作与字段、能力申报、webui 与门禁、模板与域 | 参考 |
 | [plugin-arch-draft.md](plugin-arch-draft.md) | 插件化架构的**讨论存档**：逐条决定与未定项（内容已并入 plugin-contract 与 adr/0028~0034） | 原理 |
 | [plugin-migration-plan.md](plugin-migration-plan.md) | 插件化改造的**施工批次计划**：批次顺序、每批动到的文件与验证方式、依赖与风险 | 操作指南 |
 | [adr/](adr/) | 设计决策记录（背景 / 决定 / 理由 / 备选 / 后果） | 原理 |

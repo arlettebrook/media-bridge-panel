@@ -116,12 +116,14 @@ server.listen(WEB_PORT, WEB_HOST, async () => {
    * ⚠️ 原先还有"某个源起来就测一轮它的站点"那条 —— 源实例现在活在源插件里，
    * 面板收不到"它起来了"，已随源插件化去掉（开机那一轮会覆盖自启的实例）。 */
   if (aggModule && typeof aggModule.startSiteTest === 'function') aggModule.startSiteTest();
-  /* emby 层：把随包的内置首页示例同步进插件列表（md5 一致就跳过，见 emby/index.js autostart） */
-  if (embyModule && typeof embyModule.autostart === 'function') await embyModule.autostart();
   /* 插件：把随包发行的内置插件同步进数据目录，再拉起所有**启用中**的插件
    * （见 modules/plugin/index.js 的 autostart）。失败不挡面板启动。
    * ⚠️ **源实例由源插件自己起**（它自己的"开机自启"那份逻辑），不在这里管。 */
   if (pluginModule && typeof pluginModule.autostart === 'function') await pluginModule.autostart();
+  /* emby 层：把各首页插件的行清单预热进面板内存快照（免得开机后第一发 `Views` 拿到空）。
+   * **必须排在插件起来之后** —— 它要调 home 插件的 `rows` 动作（见 emby/index.js warmHome）。
+   * 失败不挡面板启动。 */
+  if (embyModule && typeof embyModule.warmHome === 'function') await embyModule.warmHome();
   /* 元数据域表：插件的清单与开关决定"哪些条目 Id 前缀认得出来"（见 core/providers.js 与 emby/meta.js）。
    * 必须排在插件起来之后；再顺手把每个域的声明拉一份（图片基地址这类值早一点就是对的）。 */
   if (embyModule && typeof embyModule.syncMetaProviders === 'function') {

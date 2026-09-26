@@ -1,21 +1,24 @@
 'use strict';
 /**
- * 首页插件示例（TMDB）
+ * 示例行（TMDB）—— 本插件的行清单：导出 `ROWS`（行声明）与 `handlers`（行处理器）。
  *
- * 一个文件 = 一个插件；一行 = 客户端上的一个媒体库，handler 就是这个库里的内容。
+ * 一行 = 客户端上的一个媒体库，handler 就是这个库里的内容。
  * 这里 11 行分别演示：官方榜单（影/剧）、趋势（含影剧混合）、分类（影剧 genre id 不同）、
  * 播出平台（只有剧）、出品公司（只有电影）、片单（自由输入）、近一月地区（语言|国家）、
  * 随机推荐（同时给客户端首页轮播图供图）。
  *
  * 写自己的插件时记住三件事：
- *   · 这是**纯文本、不是模块**：不要 require / module.exports / export，
- *     顶层直接写 HomePlugin = {...} 与 function（面板按名字找 handler）；
+ *   · 本文件是 **CommonJS 模块**：顶部 require 依赖（`./tmdb` / `./storage`），
+ *     末尾 `module.exports` 导出 `ROWS` 与 `handlers`；
  *   · 条目 id 用 TMDB 坐标 `tmdb_{id}_{movie|tv}` —— 客户端点进去时，面板靠它去找详情与播放资源；
  *   · `poster` / `backdrop` 要给完整 http(s) URL，不写就没图。
  *
  * 翻页：客户端把 StartIndex / Limit 原样透传进 `ctx`，由插件自己换算（见 `windowOf`）；
  * 想知道客户端语言，得自己声明一个 enumeration 参数让用户选（地区行就是这么做的）。
  */
+
+const tmdb = require('./tmdb');
+const storage = require('./storage');
 
 /* ─────────────────────────── 参数小工具 ─────────────────────────── */
 
@@ -72,143 +75,136 @@ const REGION_OPTIONS = [
  *
  * 不写也没有对错，只是那个库会被当成"混合库"来展示。
  */
-HomePlugin = {
-  id: 'example.tmdb',
-  name: '示例 · TMDB 榜单',
-  version: '1.0.0',
-  author: 'catpaw-panel',
-  description: 'TMDB 榜单 / 分类 / 平台 / 公司 / 片单 / 近一月地区：演示枚举与自由输入参数、客户端翻页、genre 名单存储缓存、失败照实抛。',
-  rows: [
-    {
-      id: 'now_playing',
-      title: '正在热映',
-      functionName: 'nowPlaying',
-      cacheDuration: 1800,
-      params: [
-        enumOf('type', '类型', 'movie', [
-          ['电影（正在上映）', 'movie'],
-          ['剧集（近期播出）', 'tv'],
-        ]),
-      ],
-    },
-    {
-      id: 'trending',
-      title: '趋势',
-      functionName: 'trending',
-      cacheDuration: 1800,
-      params: [
-        enumOf('type', '类型', 'movie', [
-          ['电影', 'movie'],
-          ['剧集', 'tv'],
-          ['全部（影 + 剧）', 'all'],
-        ]),
-        enumOf('window', '时间窗口', 'week', [
-          ['今日', 'day'],
-          ['本周', 'week'],
-        ]),
-      ],
-    },
-    {
-      id: 'popular',
-      title: '备受欢迎',
-      functionName: 'popular',
-      cacheDuration: 3600,
-      params: [typeParam()],
-    },
-    {
-      id: 'top_rated',
-      title: '高分内容',
-      functionName: 'topRated',
-      cacheDuration: 3600,
-      params: [typeParam()],
-    },
-    {
-      /* 演示**参数联动**：影/剧的 TMDB genre id **不是同一套**（动作：影 28 / 剧 10759）。 */
-      id: 'categories',
-      title: '分类',
-      functionName: 'categories',
-      cacheDuration: 3600,
-      params: [
-        typeParam(),
-        enumOf('with_genres', '分类', '10751', CATEGORY_OPTIONS),
-        { name: 'pageSize', title: '本页条数', type: 'count', value: 20 },
-      ],
-    },
-    {
-      id: 'networks',
-      title: '播出平台',
-      functionName: 'networks',
-      cacheDuration: 3600,
-      /* `with_networks` 在 TMDB 那边**只筛剧**（下面 handler 走的也是 `discover/tv`）。
-       * 这行没有 `type` 参数可推，所以要显式声明成剧库。 */
-      collectionType: 'tvshows',
-      params: [enumOf('with_networks', '播出平台', '213', NETWORK_OPTIONS)],
-    },
-    {
-      id: 'companies',
-      title: '出品公司',
-      functionName: 'companies',
-      cacheDuration: 3600,
-      /* 同上，反过来：只有电影（`discover/movie`） */
-      collectionType: 'movies',
-      params: [enumOf('with_companies', '出品公司', '2', COMPANY_OPTIONS)],
-    },
-    {
-      /* 演示 **`input` 参数**：整条 TMDB 片单地址或纯 id 都收。 */
-      id: 'list',
-      title: '片单',
-      functionName: 'tmdbList',
-      cacheDuration: 3600,
-      /* 片单**天生影剧混装**（条目自带 `media_type`，见 `tmdbList`）—— 这个不能推，如实写 `mixed`。 */
-      collectionType: 'mixed',
-      params: [
-        {
-          name: 'url',
-          title: '片单地址（或 id）',
-          type: 'input',
-          value: '8512095',
-          description: 'TMDB 片单的完整地址，或直接填末尾那串数字 id。走官方 list 接口（不抓网页）。',
-          placeholders: [
-            { title: '2025 奥斯卡最佳影片提名', value: '8512095' },
-          ],
-        },
-      ],
-    },
-    {
-      id: 'regional_series',
-      title: '近一月地区剧集',
-      functionName: 'regionalSeries',
-      cacheDuration: 3600,
-      collectionType: 'tvshows',
-      params: [enumOf('region', '地区', 'zh|', REGION_OPTIONS)],
-    },
-    {
-      id: 'regional_variety',
-      title: '近一月地区综艺',
-      functionName: 'regionalVariety',
-      cacheDuration: 3600,
-      /* 综艺在 TMDB 里没有独立类型，只能当剧（`discover/tv` + genre 10764）—— 所以库是剧库。 */
-      collectionType: 'tvshows',
-      params: [enumOf('region', '地区', 'zh|', REGION_OPTIONS)],
-    },
-    {
-      /* 「随机推荐」—— 这一行**同时给客户端首页的轮播图供图**。
-       *
-       * 它声明了 `feed: 'random'`：客户端那条"不要库 Id、只要推荐"的查询会被路由到这一行；
-       * **不声明 `feed` 的行，那条查询继续回空** → 轮播图没素材。
-       *
-       * 它同时也是一行普通的库行（客户端里会多出一个「随机推荐」的库）。 */
-      id: 'random_picks',
-      title: '随机推荐',
-      functionName: 'randomPicks',
-      feed: 'random',
-      /* 半小时：轮播图"每次进来略有不同"就够。一次刷新 = 2 次 TMDB 请求（影、剧各一页），
-       * 缓存把这个数压到每半小时 2 次。 */
-      cacheDuration: 1800,
-      collectionType: 'mixed',
-    },
-  ],
-};
+const ROWS = [
+  {
+    id: 'now_playing',
+    title: '正在热映',
+    functionName: 'nowPlaying',
+    cacheDuration: 1800,
+    params: [
+      enumOf('type', '类型', 'movie', [
+        ['电影（正在上映）', 'movie'],
+        ['剧集（近期播出）', 'tv'],
+      ]),
+    ],
+  },
+  {
+    id: 'trending',
+    title: '趋势',
+    functionName: 'trending',
+    cacheDuration: 1800,
+    params: [
+      enumOf('type', '类型', 'movie', [
+        ['电影', 'movie'],
+        ['剧集', 'tv'],
+        ['全部（影 + 剧）', 'all'],
+      ]),
+      enumOf('window', '时间窗口', 'week', [
+        ['今日', 'day'],
+        ['本周', 'week'],
+      ]),
+    ],
+  },
+  {
+    id: 'popular',
+    title: '备受欢迎',
+    functionName: 'popular',
+    cacheDuration: 3600,
+    params: [typeParam()],
+  },
+  {
+    id: 'top_rated',
+    title: '高分内容',
+    functionName: 'topRated',
+    cacheDuration: 3600,
+    params: [typeParam()],
+  },
+  {
+    /* 演示**参数联动**：影/剧的 TMDB genre id **不是同一套**（动作：影 28 / 剧 10759）。 */
+    id: 'categories',
+    title: '分类',
+    functionName: 'categories',
+    cacheDuration: 3600,
+    params: [
+      typeParam(),
+      enumOf('with_genres', '分类', '10751', CATEGORY_OPTIONS),
+      { name: 'pageSize', title: '本页条数', type: 'count', value: 20 },
+    ],
+  },
+  {
+    id: 'networks',
+    title: '播出平台',
+    functionName: 'networks',
+    cacheDuration: 3600,
+    /* `with_networks` 在 TMDB 那边**只筛剧**（下面 handler 走的也是 `discover/tv`）。
+     * 这行没有 `type` 参数可推，所以要显式声明成剧库。 */
+    collectionType: 'tvshows',
+    params: [enumOf('with_networks', '播出平台', '213', NETWORK_OPTIONS)],
+  },
+  {
+    id: 'companies',
+    title: '出品公司',
+    functionName: 'companies',
+    cacheDuration: 3600,
+    /* 同上，反过来：只有电影（`discover/movie`） */
+    collectionType: 'movies',
+    params: [enumOf('with_companies', '出品公司', '2', COMPANY_OPTIONS)],
+  },
+  {
+    /* 演示 **`input` 参数**：整条 TMDB 片单地址或纯 id 都收。 */
+    id: 'list',
+    title: '片单',
+    functionName: 'tmdbList',
+    cacheDuration: 3600,
+    /* 片单**天生影剧混装**（条目自带 `media_type`，见 `tmdbList`）—— 这个不能推，如实写 `mixed`。 */
+    collectionType: 'mixed',
+    params: [
+      {
+        name: 'url',
+        title: '片单地址（或 id）',
+        type: 'input',
+        value: '8512095',
+        description: 'TMDB 片单的完整地址，或直接填末尾那串数字 id。走官方 list 接口（不抓网页）。',
+        placeholders: [
+          { title: '2025 奥斯卡最佳影片提名', value: '8512095' },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'regional_series',
+    title: '近一月地区剧集',
+    functionName: 'regionalSeries',
+    cacheDuration: 3600,
+    collectionType: 'tvshows',
+    params: [enumOf('region', '地区', 'zh|', REGION_OPTIONS)],
+  },
+  {
+    id: 'regional_variety',
+    title: '近一月地区综艺',
+    functionName: 'regionalVariety',
+    cacheDuration: 3600,
+    /* 综艺在 TMDB 里没有独立类型，只能当剧（`discover/tv` + genre 10764）—— 所以库是剧库。 */
+    collectionType: 'tvshows',
+    params: [enumOf('region', '地区', 'zh|', REGION_OPTIONS)],
+  },
+  {
+    /* 「随机推荐」—— 这一行**同时给客户端首页的轮播图供图**。
+     *
+     * 它声明了 `feed: 'random'`：客户端那条"不要库 Id、只要推荐"的查询会被路由到这一行；
+     * **不声明 `feed` 的行，那条查询继续回空** → 轮播图没素材。
+     *
+     * 它同时也是一行普通的库行（客户端里会多出一个「随机推荐」的库）。 */
+    id: 'random_picks',
+    title: '随机推荐',
+    functionName: 'randomPicks',
+    feed: 'random',
+    /* 半小时：轮播图"每次进来略有不同"就够。一次刷新 = 2 次 TMDB 请求（影、剧各一页），
+     * 缓存把这个数压到每半小时 2 次。 */
+    cacheDuration: 1800,
+    collectionType: 'mixed',
+  },
+];
 
 /* ─────────────────────────── 工具 ─────────────────────────── */
 
@@ -251,8 +247,8 @@ function toItem(m, type, names) {
     year: Number(String(date).slice(0, 4)) || 0,
     overview: m.overview || '',
     rating: m.vote_average || 0,
-    poster: m.poster_path ? Catpaw.tmdb.imageUrlOf('w500', m.poster_path) : '',
-    backdrop: m.backdrop_path ? Catpaw.tmdb.imageUrlOf('w780', m.backdrop_path) : '',
+    poster: m.poster_path ? tmdb.imageUrlOf('w500', m.poster_path) : '',
+    backdrop: m.backdrop_path ? tmdb.imageUrlOf('w780', m.backdrop_path) : '',
     genres: idsToNames(m.genre_ids, names),
     providerIds: { Tmdb: String(m.id) },
   };
@@ -297,7 +293,7 @@ function resultsOf(body, api) {
 }
 
 function say(msg) {
-  Catpaw.log(msg);
+  console.log(msg);
 }
 
 /** `N` 天前的 `YYYY-MM-DD`（"近一月"那两行用） */
@@ -314,32 +310,32 @@ function daysAgo(n) {
  */
 async function tmdbPage(ctx, one) {
   const page = pageOf(ctx);
-  const body = await Catpaw.tmdb.get(one.api, { params: Object.assign({}, one.params || {}, { page: page }) });
+  const body = await tmdb.get(one.api, { params: Object.assign({}, one.params || {}, { page: page }) });
   const list = resultsOf(body, one.api);
   say(one.label + ' ' + one.api + ' 第 ' + page + ' 页 → ' + list.length + ' 条 / 共 ' + body.total_results);
   const names = await genreNamesFor(one.names || one.type);
   return windowOf(toItems(list, one.type, names), ctx, body.total_results, one.fallbackSize);
 }
 
-/* ────────────── genre 名单（`Catpaw.storage` 缓存，所有行共用）────────────── */
+/* ────────────── genre 名单（`storage` 缓存，所有行共用）────────────── */
 
 /**
  * `genre_id → 本地化名字`，存一天。
  *
  * `discover/*` / `trending/*` 只回 `genre_ids`（数字），要显示"动作, 科幻"就得有这张名单，
- * 而它**几乎不变** —— 缓存起来，别每次都打上游。`Catpaw.storage` 是**同步**的（别 await）。
+ * 而它**几乎不变** —— 缓存起来，别每次都打上游。`storage` 是**同步**的（别 await）。
  * ⚠️ 名单带语言：换了 TMDB 语言，最多一天后才更新。
  */
 async function genreNameMap(type) {
   const KEY = 'genreNames.' + type;
-  const hit = Catpaw.storage.get(KEY);
+  const hit = storage.get(KEY);
   if (hit && hit.at && Date.now() - hit.at < 86400000 && hit.map) return hit.map;
 
-  const body = await Catpaw.tmdb.get('genre/' + type + '/list');
+  const body = await tmdb.get('genre/' + type + '/list');
   const map = {};
   for (const g of (body && body.genres) || []) map[String(g.id)] = g.name;
 
-  if (Object.keys(map).length) Catpaw.storage.set(KEY, { at: Date.now(), map: map });
+  if (Object.keys(map).length) storage.set(KEY, { at: Date.now(), map: map });
   say('genre 名单(' + type + ') 已刷新 → ' + Object.keys(map).length + ' 项');
   return map;
 }
@@ -446,7 +442,7 @@ async function companies(ctx) {
 /**
  * 「片单」——收整条 TMDB 片单地址或纯数字 id。
  *
- * 走官方 `Catpaw.tmdb.get('list/{id}')` —— 不必去抓网页解析 HTML，字段也更全。
+ * 走官方 `tmdb.get('list/{id}')` —— 不必去抓网页解析 HTML，字段也更全。
  * 片单接口**不分页**，所以这一行**回数组** —— 客户端会认为这段列表翻不动，符合实际。
  * （顺带演示"不回 total"的写法。）
  */
@@ -456,7 +452,7 @@ async function tmdbList(ctx) {
   if (!hit) throw new Error('片单地址里找不到 id："' + raw + '"');
   const id = hit[1];
 
-  const body = await Catpaw.tmdb.get('list/' + id);
+  const body = await tmdb.get('list/' + id);
   /* 片单里 `media_type` 可能是 person —— **先按 media_type 滤一道**（只靠「有没有标题」不行：
    * 人物也有 name，会混成 `tmdb_x_tv` 这种胡说八道的条目） */
   const list = ((body && body.items) || []).filter(function (m) {
@@ -549,7 +545,7 @@ async function randomPageOf(type) {
   const caps = [RANDOM_PAGE_MAX_BY_TYPE[type] || RANDOM_PAGE_SAFE_MAX, RANDOM_PAGE_SAFE_MAX];
   for (const max of caps) {
     const page = randomInt(max);
-    const body = await Catpaw.tmdb.get('discover/' + type, {
+    const body = await tmdb.get('discover/' + type, {
       params: Object.assign({ sort_by: 'popularity.desc', page: page }, RANDOM_GATE),
     });
     const list = (body && Array.isArray(body.results) && body.results) || [];
@@ -589,3 +585,22 @@ async function randomPicks(ctx) {
   say('random_picks 影 ' + movies.length + ' / 剧 ' + tvs.length + ' → 洗牌后给 ' + limit + ' 条');
   return mixed.slice(0, limit);
 }
+
+/* ─────────────────────────── 导出 ─────────────────────────── */
+
+/** 键 = 行声明的 `functionName`；`ctx = { params, startIndex, limit, log }`。 */
+const handlers = {
+  nowPlaying,
+  trending,
+  popular,
+  topRated,
+  categories,
+  networks,
+  companies,
+  tmdbList,
+  regionalSeries,
+  regionalVariety,
+  randomPicks,
+};
+
+module.exports = { ROWS, handlers };

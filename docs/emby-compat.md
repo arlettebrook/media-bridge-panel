@@ -695,11 +695,11 @@ docker logs -t media-bridge-panel              # 带时间戳
 | PUT | `/api/emby/accounts/{id}` | 改 `{username?,password?}`（只传 password 就是改密）→ 200；400 没内容可改/格式不对；404；409 |
 | DELETE | `/api/emby/accounts/{id}` | 删除（**允许删最后一个**，删光后退化成"还没有账号 → 登录 401"）→ 200 `{ok,remaining}`；404 |
 | GET / DELETE | `/api/panel/cache` | **缓存用量 / 清空**：面板这边那两个库一把抓（`data/cache/detail.db` 的 `detail_cache`、`data/emby/cache.db` 的 `image_index`），走 `core/cachedb.js` 的 `statsAll()`/`clearAll()`。**取代了 `/api/emby/cache`**（缓存分家后"清空"必须只有一个入口）。⚠️ 元数据插件的缓存不在这里，它自己在插件的数据目录里 |
-| ANY | `/api/emby/home/**` | **首页插件**：`GET/POST /plugins`、`GET/PUT/DELETE /plugins/{id}`、`POST /plugins/{id}/rows/{rowId}/run`、`GET /example`、`GET /skill`（开发文档下载）。上传单文件 JS 插件产出「首页行」，**已接客户端端点**（`Views` / `Items?ParentId=` / `Items/Latest` / 库封面 / 「推荐」查询 → `feed` 行，见「五」）；契约见 [emby-home-plugin.md](emby-home-plugin.md) |
 | GET / DELETE | `/api/logs` | **面板日志**（属**面板层**，不是 emby）：`GET ?since=&limit=` 增量取内存缓冲、`DELETE` 清空。给「面板设置 → 日志」页用，契约见「二」 |
 
+- **首页插件没有面板自用端点**：它的设置与行参数在**插件自带的 webui** 里（入口是「插件 → 管理」页那一行的「设置」按钮），面板侧不再提供 `/api/emby/home/**` 这类端点。行与条目的规范见 [emby-home-plugin.md](emby-home-plugin.md)。
 - 账号接口的**响应与日志绝不出现 `password` / `password_hash` / `salt`**：对外形状统一走 `db.publicAccount()`（只此一处做字段映射），日志只打 `id` 与 `username`。
-- 这些**面板自用端点不校验 AccessToken**：它们（`/api/emby/accounts*`、`/api/emby/home/**`）在**面板门禁**的保护范围内，访问需要面板登录会话，因此不再叠加客户端 token 校验（见 [ADR-0017](adr/0017-panel-auth-single-password.md)）。
+- 这些**面板自用端点不校验 AccessToken**：它们（如 `/api/emby/accounts*`）在**面板门禁**的保护范围内，访问需要面板登录会话，因此不再叠加客户端 token 校验（见 [ADR-0017](adr/0017-panel-auth-single-password.md)）。
 - 查重先给友好的 409，同时靠 `username_lc UNIQUE` 兜并发。
 
 - body 可带 `token / apiBase / imageBase / language`（用界面里**尚未保存**的当前值）与 `tmdbId / type`；合并规则：基地址**带了这个键就算数**（空串 = 用官方），token/language 的空串视为「没改」回落已保存值。
@@ -725,21 +725,24 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 |---|---|---|---|---|
 | 1 | 详情/影剧反查 | `service.tmdbItemDto` → `tmdb.lookup()` | api.themoviedb.org | 是 |
 | 2 | 季/集反查 | `service.getEpisodes` → `tmdb.lookupSeason()` | api.themoviedb.org | 是 |
-| 3 | 插件 `Catpaw.tmdb.get` | `home/sandbox.js` →RPC→ `home/spawn.js` → `tmdb.get()`（注入 emby 的元数据缓存） | api.themoviedb.org | 是 |
-| 4 | 插件设置页的「测试连接」 | 插件的 `test` 动作（打 `/configuration` + 实查一个 id，**都绕缓存**） | api.themoviedb.org | 是 |
+| 3 | 首页插件取 TMDB 数据 | `plugins/home/example/lib/tmdb.js`（插件自己的子进程，带**插件自己存的** token） | api.themoviedb.org | 否 |
+| 4 | 插件设置页的「测试连接」 | 插件的 `test` 动作（打 `/configuration` + 实查一个 id，**都绕缓存**） | api.themoviedb.org | 视插件 |
 | 5 | **图片端点取图** | `routes.js` 的 `imagesByType` 直接 `fetch(tag 里的 URL)` | **image.tmdb.org** | 否 |
-| 6 | **插件 `Catpaw.http`** | `home/sandbox.js` →RPC→ `home/spawn.js` 裸 `fetch` | 任意 URL | 否 |
+| 6 | 首页插件取图床 / 其他上游 | 插件自带的 HTTP 客户端，可打任意地址 | 任意 URL | 否 |
 
-统一的底层是 `server/core/upstream.js` 的 `request(baseUrl, path, {timeout, headers})` —— **表中第 1~4 条（即全部 API 调用）都走它**（第 1~3 条经 `emby/tmdb.js` 的缓存包装）。
+统一的底层是 `server/core/upstream.js` 的 `request(baseUrl, path, {timeout, headers})`；元数据插件与首页插件各带一份同形状的实现（`plugins/metadata/tmdb/lib/upstream.js`、`plugins/home/example/lib/upstream.js`），表里各条按发起方落到对应那一份。
 
 - **已删除的一条**（原表中的聚合层「别名回退」反查）：那时**只在"站源没有同名"这一条失败路径上**才会打（每次最多 5 个候选名），正常请求一次都不打；它走的那个按名字搜索的接口带着缓存。已删 —— 挑片判据换成聚合层本地打分（`agg/match.js`），聚合层不再出网；按名字搜索现在只服务 emby 的搜索端点，经元数据插件的「搜索」动作。
 
-**第 1~4 条 = 「API 调用」**（消耗配额）：**100% 由元数据插件里的 TMDB 客户端独占**
-（`plugins/metadata/tmdb/lib/tmdb.js` 是协议层 + 缓存，`lib/meta.js` 是归一化；
+**第 1、2 条 = 面板侧发起的「API 调用」**（消耗配额）：面板把请求转给元数据插件，
+真正出网的是 `plugins/metadata/tmdb/lib/tmdb.js`（协议层 + 缓存，`lib/meta.js` 是归一化；
 `server/modules/emby/tmdb.js` 只做转发与 DTO 拼装）。
-插件也绕不过去 —— 因为沙箱里**根本没有 token**（`home/spawn.js` 随 job 只下发
-`env: { tmdbImageBase }`，就是拼图用的图床基地址）。插件自己拼 `api.themoviedb.org` 也是 401。
-⇒ 要给 API 调用做**统一记账/限速/缓存**，`tmdb.js` 是唯一插入点，做一次全覆盖。
+
+**第 3 条 = 首页插件发起的「API 调用」**（消耗配额）：首页插件是**独立子进程**，
+**自己存 token、自己带** —— 统一宿主不给插件回调面板的通道，插件之间也不能互相调用，
+所以它借不到面板或元数据插件的凭证。它自己的 TMDB 客户端在 `plugins/home/example/lib/tmdb.js`
+（不带元数据那份响应缓存：首页取的都是榜单 / 发现 / 趋势这类每天都在变的路径）。
+⇒ 给 API 调用做**统一记账/限速/缓存**时，这两处 TMDB 客户端要各自覆盖。
 
 **第 5 条 = 「取字节」**（不消耗配额，但要走网络）：**唯一一处**，在 `routes.js` 的图片端点。
 它天然不经过 `tmdb.js` —— 端点必须把图的**内容**取回来再转发（不能只 302 让客户端自己去
@@ -747,9 +750,9 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 ⇒ 这条账要单独挂在 `routes.js`，且**跟配额无关**：客户端每张图只来要一次，之后靠
 `Cache-Control: max-age=86400` 自己缓存。
 
-**第 6 条 = 通用 HTTP 能力**：`Catpaw.http` 设计上就允许请求任意地址（插件的自由度），不能也不该收窄成只准打 TMDB。它打到哪儿算哪儿，不在 TMDB 记账范围内。
+**第 6 条 = 首页插件的自由网络**：插件在自己的子进程里能请求任意地址（这是插件的自由度，面板不代做也不收窄成只准打 TMDB）。它打到哪儿算哪儿，不在 TMDB 记账范围内。
 
-> ⚠️ **不要把第 5 条（取字节）算进「TMDB 请求数」**。讨论「按 Id 反查」的代价时算的是**第 1~4 条**那张账
+> ⚠️ **不要把第 5 条（取字节）算进「TMDB 请求数」**。讨论「按 Id 反查」的代价时算的是**第 1、2 条**那张账
 > （实测 340 次图片请求 ≈ 55 次 API 调用）；第 5 条的字节流量**本来就有**，且与配额无关。
 
 ### 本地缓存（面板两个库：`data/cache/detail.db` + `data/emby/cache.db`；元数据另有插件自己的一份）
@@ -796,7 +799,7 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 ⇒ 因此两个缓存库反过来**用 WAL + `synchronous=NORMAL`**（缓存要的是写吞吐，掉电丢几条无所谓），与 `emby.db` 的取舍**正好相反**，这是刻意的。
 
 **只缓存元数据，不缓存榜单**：判据是**请求的性质**而非"谁问的"（插件里 `lib/tmdb.js` 的 `isMetaPath`，正则要求 id 是**纯数字**，否则 `/movie/top_rated` 会被误伤）。所以榜单/搜索/`/configuration` 一律不进元数据缓存 —— 榜单归首页模块自己的 `cacheDuration` 管；`/configuration` 是连通性测试，缓存了会让自检结果失真。
-顺带一个好处：插件经 `Catpaw.tmdb.get` 问**元数据**也享受缓存，而榜单照旧不缓存。
+顺带一个好处：面板经元数据插件取**元数据**也享受这份缓存；榜单照旧不缓存（首页插件自己那份客户端不带这份缓存）。
 （名字搜索缓存是**另一张表**（`names`）：它缓存的是"检索结果"，与 `isMetaPath` 那条判据无关，见上面那行。）
 
 **只缓存成功响应**：401/404/5xx/超时一律不写。否则一次网络抖动会把"404"钉在缓存里，部署者改了 token 还是错的。

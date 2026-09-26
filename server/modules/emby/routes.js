@@ -28,8 +28,9 @@
  * 面板自用（不是 Emby 客户端协议，但同样必须注册在通配之前）：
  *   GET/POST    /api/emby/accounts       账号列表 / 新增
  *   PUT/DELETE  /api/emby/accounts/{id}  改（用户名/密码）/ 删
- *   ANY  /api/emby/home/**              首页插件：上传/列表/启用/参数/预览（见 home/routes.js）
  *   （TMDB 的设置与自检在**元数据插件自己的设置页**里：插件 → tmdb → 设置）
+ *   （首页插件的行清单 / 参数 / token 在**首页插件自己的设置页**里：插件 → example → 设置。
+ *    原先那 8 个 `/api/emby/home/**` 端点已随批次 9 删除 —— 老宿主与老管理面没了。）
  *
  * 通配（必须注册在最后）：
  *   ANY  /api/emby/*rest   其余请求一律**记一行**日志 + 回 501，待明确需求后再实现
@@ -639,10 +640,10 @@ module.exports = function routes(r) {
   /* 缓存用量 / 清空**不在这一层**了：缓存跨两个库（`data/cache/detail.db` +
    * `data/emby/cache.db`），"清空"必须只有一个入口 —— 见面板层 `GET|DELETE /api/panel/cache`。 */
 
-  /* ---------------- 首页插件（面板自用，非 Emby 客户端协议） ----------------
-   * 上传的插件产出「首页行」，本阶段只在面板内预览；映射到 Emby 端点待明确需求后再做。
-   * 与账号管理同类：豁免 AccessToken，但**必须在下面通配之前注册**。 */
-  require('./home/routes')(r);
+  /* ⚠️ 首页插件那 8 个面板自用端点（`/api/emby/home/**`）**已删** ——
+   * 首页插件改造成统一插件（`plugins/home/`）之后，装 / 卸 / 启停 / 设置全在
+   * 「插件 → 管理」页上（插件自己的设置页是它自带的 webui），见
+   * docs/plugin-migration-plan.md 批次 9。 */
 
   /* ---------------- 播放进度上报（客户端 → 落库） ----------------
    * 实测（SenPlayer 6.2.1，见 docs/playback-progress.md §11）：

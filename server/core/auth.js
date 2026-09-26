@@ -172,7 +172,10 @@ function cookieHeader(token, req) {
  * 它们混在同一个前缀下，必须挑出来拦住：
  *
  *   `/api/emby/accounts*`   账号管理（增删改面板给客户端用的账号）
- *   `/api/emby/home/*`      **首页插件**（上传/删除/改参数/逐行预览 —— 能传任意 JS 进来）
+ *
+ * ⚠️ 原先还列着 `/api/emby/home/*`（老首页插件的上传/删除/改参数/逐行预览）——
+ * 那条机制已随批次 9 整套删掉（首页插件的设置改在插件自带的 webui 里，
+ * 走 `/api/plugins/…`，本来就受门禁），所以这条也去掉了。
  *
  * 为什么不反过来列"哪些放行"：客户端协议面很宽（Users/Items/Shows/videos/Images/…，
  * 还有那个专门记 501 的 `ANY /api/emby/*rest` 通配），漏一个就是**客户端直接 401**；
@@ -182,7 +185,7 @@ function cookieHeader(token, req) {
  * 与 `/api/emby/cache`（缓存跨两个库了，用量/清空搬到 `/api/panel/cache`）——
  * 而 `/api/panel/*` 本来就在下面那条"一律要登录"里，不必再列。
  */
-const EMBY_PANEL_RE = [/^\/api\/emby\/accounts\b/, /^\/api\/emby\/home\//];
+const EMBY_PANEL_RE = [/^\/api\/emby\/accounts\b/];
 
 function needsAuth(pathname) {
   if (pathname.startsWith('/api/auth/')) return false; // 登录本身（还有 status/logout）
