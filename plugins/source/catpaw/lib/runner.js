@@ -111,9 +111,29 @@ function isFree(port, host = '0.0.0.0') {
   });
 }
 
-async function findFreePort(preferred = DEFAULT_PORT, host = '0.0.0.0') {
+/**
+ * 已被**别的实例**分掉的端口（状态里记着的那些）。
+ *
+ * ⚠️ 为什么要单独排一遍：`isFree` 只看得到"此刻已经 bind 上"的端口。两个实例背靠背启动时，
+ * 先起那个还在 `starting`（进程已 spawn、端口还没 bind），后起那个探 9988 会探到"空"，
+ * 于是两个实例拿到同一个端口 —— 后起那个的 `host-boot` 会把前者的监听误认成自己
+ * （"已经在监听，不再调 start()"），顶着别人的站点装成自己。所以按**状态里的分配**再排一次，
+ * 把"刚分出去、还没 bind"那段窗口也堵上。
+ */
+function portsHeldByOthers(exceptId) {
+  const out = new Set();
+  for (const [id, st] of states) {
+    if (id === exceptId) continue;
+    if (!st.proc && !['starting', 'running', 'stopping'].includes(st.status)) continue;
+    if (st.port) out.add(Number(st.port));
+  }
+  return out;
+}
+
+async function findFreePort(preferred = DEFAULT_PORT, host = '0.0.0.0', exclude) {
   const start = Number(preferred) > 0 ? Number(preferred) : DEFAULT_PORT;
   for (let p = start; p < start + 200; p++) {
+    if (exclude && exclude.has(p)) continue;
     // eslint-disable-next-line no-await-in-loop
     if (await isFree(p, host)) return p;
   }
@@ -229,7 +249,7 @@ async function start(source, opts = {}) {
 
   const host = opts.host || source.host || '0.0.0.0';
   const wantPort = opts.port || source.port || 0;
-  const port = await findFreePort(wantPort || DEFAULT_PORT, host);
+  const port = await findFreePort(wantPort || DEFAULT_PORT, host, portsHeldByOthers(id));
 
   /* 环境变量（宿主约定，见 host-boot.js 头部）：
    *   NODE_PATH      源码包的数据目录（db / 日志 / 弹幕配置）
