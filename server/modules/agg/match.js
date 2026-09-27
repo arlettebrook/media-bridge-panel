@@ -15,6 +15,14 @@
  * ⚠️ 缺项不进分母是刻意的：源里常常没有季集/年份信息，若按"缺=0"算，一个名字完全对上的条目
  * 也会被拉到 0.7 以下，那就只能把阈值调到很低 —— 等于没有阈值。见 docs/emby-compat.md。
  *
+ * ## 番号片（作品发行编号）走一条捷径
+ *   两侧名字里只要有一处**番号**对得上（`SSIS-001` / `SSIS_001` / `SSIS 001` 视为同一个），
+ *   名字分直接 1.0 —— 不看标题措辞。理由：番号查询的名字相似度会被长标题稀释
+ *   （目标只有 `ssis001` 七个字符，候选名常是三四十字的日文/中文原标题），
+ *   实测 24 条正确候选里 23 条被判「相似度过低」出局。
+ *   番号对不上、或只有一侧抽得出 → 照旧走相似度那条路，**不加任何惩罚**：
+ *   所以无番号的中文片名（斗破苍穹那类）一分不动，也不存在「认错番号误杀」的路径。
+ *
  * ## 两道闸门（顺序很重要）
  *   ① **名字硬拒**（`nameScore` 的 reject）：清洗后**没有公共主干**、或相似度 < 0.5 → 直接出局。
  *      这是拦「斗破苍穹4：逃亡」「斗破苍穹之少年归来」那种"看着像、不是同一部"的真闸门。
@@ -133,6 +141,52 @@ function normNameForClean(raw) {
  */
 const QUALIFIER_RE = /^(?:年番|新番|第[一二三四五六七八九十百\d]+季|season\d+|\d+季|\d{4}|\d+)+$/;
 
+/* ---------------------------------------------------------------- 番号 */
+
+/**
+ * **番号**（作品发行编号）形状：字母段 + 分隔符 + 数字段。
+ * ⚠️ **分隔符必须存在**（`-` / `_` / 空格）：这是为了把 `SSIS-001` 这类发行编号与正文里
+ * 顺带提到的 `hevc265`、`x264` 那种编解码器名分开 —— 后者只要**允许无分隔符**就会被当成番号，
+ * 两部不相干的片只要都标了同一个编码器就会互相判成"同一部"。
+ * 数字段取**最长连续数字**（`(?!\d)`），`ABC-1234` 不会被读成 `ABC-123`。
+ */
+const CODE_RE = /([A-Za-z]{2,12})[\s_-](\d{2,7})(?!\d)/g;
+/**
+ * 名字**本身就是**一个光秃秃的番号（`SSIS001`、`abc-123`，前后没有别的字）。
+ * 只有这一种写法才允许"字母与数字之间没有分隔符" —— 搜索框里手打 `SSIS001` 属于这种，
+ * 长标题则不可能整串等于一个番号，所以不会把标题里的编码器名放进来。
+ */
+const BARE_CODE_RE = /^\s*([A-Za-z]{2,12})[\s_-]?(\d{2,7})\s*$/;
+
+/** 比对键：小写的"字母+数字"，分隔符不参与（`SSIS-001`、`ssis_001`、`SSIS001` 同一个键） */
+const codeKey = (letters, digits) => `${letters}${digits}`.toLowerCase();
+
+/** 一个名字里出现的所有番号 → `Map<键, 展示用的原名>`（`SSIS-001`） */
+function codesIn(name) {
+  const s = String(name || '');
+  const out = new Map();
+  const add = (letters, digits) => {
+    const key = codeKey(letters, digits);
+    if (!out.has(key)) out.set(key, `${letters.toUpperCase()}-${digits}`);
+  };
+  CODE_RE.lastIndex = 0;
+  let m;
+  while ((m = CODE_RE.exec(s))) add(m[1], m[2]);
+  const bare = BARE_CODE_RE.exec(s);
+  if (bare) add(bare[1], bare[2]);
+  return out;
+}
+
+/** 两侧名字里有没有**同一个**番号；有 → 回它（展示用），没有 → 空串 */
+function sameCodeIn(a, b) {
+  const left = codesIn(a);
+  if (!left.size) return '';
+  const right = codesIn(b);
+  if (!right.size) return '';
+  for (const [key, shown] of left) if (right.has(key)) return shown;
+  return '';
+}
+
 /* ---------------------------------------------------------------- 提取信号 */
 
 /** 从名字与简介里抽：主干、年份、季号、更新到第几集 */
@@ -204,7 +258,7 @@ function lcsLen(a, b) {
 
 /**
  * 名字分（0~1）。`reject: true` = **出局**（不是"分低"，是"根本不是一部片"）。
- * 分档：完全相同 1.0 › 主干同名 + 受控限定词 0.95 › 相似度（0.5~1）
+ * 分档：完全相同 1.0 › 番号一致 1.0 › 主干同名 + 受控限定词 0.95 › 相似度（0.5~1）
  */
 function nameScore(wantName, candidateName) {
   const w = normName(wantName);
@@ -214,6 +268,15 @@ function nameScore(wantName, candidateName) {
   if (c === w) return { score: 1, why: '同名' };
   if (c.startsWith(w) && QUALIFIER_RE.test(c.slice(w.length))) return { score: 0.95, why: '主干同名+限定词' };
   if (w.startsWith(c) && QUALIFIER_RE.test(w.slice(c.length))) return { score: 0.95, why: '候选名是主干+限定词' };
+
+  /* **番号一致就是同一部** —— 发行编号是唯一标识，不看标题措辞。
+   * 为什么非开这条通道不可：番号查询的名字分会被长标题稀释。`SSIS-001` 归一后只有七个字符，
+   * 候选名却常是三四十字的日文/中文原标题，`2·lcs/(len和)` 永远算不过 0.5 那道硬闸门
+   * （实测：24 条候选同属一部片，23 条被判"相似度过低"出局）。
+   * ⚠️ 只在**两侧都抽得出番号、且有一处相同**时给分；对不上或只有一侧抽得出就继续往下走 ——
+   * 所以「斗破苍穹」这类无番号片名一分不动，也不存在"认错番号误杀"的路径。 */
+  const code = sameCodeIn(wantName, candidateName);
+  if (code) return { score: 1, why: `番号一致 ${code}` };
 
   const lcs = lcsLen(w, c);
   if (lcs < 2 || lcs < 0.5 * Math.min(w.length, c.length)) {
@@ -425,4 +488,4 @@ function sameNameSameSiteCount(scored) {
   return extra;
 }
 
-module.exports = { cleanTitle, extractSignals, nameScore, episodeScore, yearScore, scoreItem, select, normWant, normName, W, QUALIFIER_RE };
+module.exports = { cleanTitle, extractSignals, nameScore, episodeScore, yearScore, scoreItem, select, normWant, normName, codesIn, sameCodeIn, W, QUALIFIER_RE };
