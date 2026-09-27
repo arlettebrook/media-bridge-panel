@@ -10,27 +10,47 @@ import { $, el } from './dom.js';
 import { api } from './api.js';
 import { ensureAuth } from './auth.js';
 import { S } from './state.js';
-import { applyHash, applyNavState, closeNavIfNarrow, collapseNav, onHashChange, renderPage, switchModule, switchPage, toggleNav } from './shell.js';
+import { applyHash, applyNavState, closeNavIfNarrow, collapseNav, onHashChange, renderNavButtons, renderPage, switchPage, toggleNav, toggleNavGroup } from './shell.js';
 
 export async function init() {
   applyNavState(); // 先定侧栏形态，别等数据回来才闪一下
   /* 面板门禁：没登录就把登录框铺上，后面一步都不做（拉了也是 401） */
   if (!(await ensureAuth())) return;
+  await loadPlugins(); // 侧栏那三栏挂哪些插件靠它 —— 必须赶在 applyHash 之前（见下面那段说明）
+  renderNavButtons(); // 侧栏按钮照 MODULES 现画（没有子项的栏目不画）
   applyHash(); // 地址栏里有页就按它来（刷新后停在同一页），下面的 renderPage 会用上
   window.addEventListener('hashchange', onHashChange); // 前进/后退切页
   $('#navToggle').addEventListener('click', toggleNav);
   $('#navScrim').addEventListener('click', collapseNav);
+  /* 侧栏是树：子节点（`data-page`）落到那一页，父节点（`data-module`）收起 / 展开这一栏。 */
   $('#nav').addEventListener('click', (e) => {
-    const b = e.target.closest('button[data-module]');
-    if (!b) return;
-    switchModule(b.dataset.module);
-    closeNavIfNarrow(); // 窄屏是抽屉，选完就该收起来
-  });
-  $('#subnav').addEventListener('click', (e) => {
-    const b = e.target.closest('button[data-page]');
-    if (b) switchPage(b.dataset.page);
+    const page = e.target.closest('button[data-page]');
+    if (page) {
+      switchPage(page.dataset.page);
+      closeNavIfNarrow(); // 窄屏是抽屉，选完就该收起来
+      return;
+    }
+    const head = e.target.closest('button[data-module]');
+    if (head) toggleNavGroup(head);
   });
   await loadAll();
+}
+
+/**
+ * 插件清单：侧栏「元数据 / 片源 / 首页」三栏下各有哪几个子项，靠这一份现算
+ * （见 core/registry.js 的 `pluginUiPages`）。
+ *
+ * ⚠️ 必须赶在 `applyHash()` **之前**拿到：地址栏停在某个插件 UI 页上（如
+ * `#/plugin-home/pui-home-example`）时，`moduleOf()` 得能从那一栏里认出它，
+ * 否则刷新一下就掉回第一栏了。拉不到就当"没有插件"—— 面板照常起，
+ * 「插件 → 管理」那一页还会自己再拉一次。
+ */
+async function loadPlugins() {
+  try {
+    S.plugins = await api('/api/plugins');
+  } catch {
+    S.plugins = { plugins: [], builtins: [] };
+  }
 }
 
 /**

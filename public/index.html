@@ -29,18 +29,12 @@
 
     <div id="workspace" class="workspace hidden">
       <div class="body">
-        <nav class="nav" id="nav">
-          <button data-module="agg" class="active">聚合设置</button>
-          <button data-module="emby">Emby</button>
-          <!-- ⚠️ 导航按钮在本文件里，而"这一栏有哪些页"在 core/registry.js 的 MODULES 里 ——
-               加一栏要**两处都改**（下面的 subnav 是照 MODULES 现画的）。
-               「源托管」那一栏已随源插件化去掉：源与实例都归源插件（见 docs/plugin-migration-plan.md 批次 4），
-               入口在「插件 → 管理」里。 -->
-          <button data-module="plugin">插件</button>
-          <button data-module="panel">面板设置</button>
-        </nav>
+        <!-- ⚠️ 侧栏**不写在这里**：由 core/shell.js 的 renderNavButtons() 照
+             core/registry.js 的 MODULES 现画成树（一栏一个父节点，栏里的页是子节点）——
+             加一栏只改 MODULES 一处；没有子项的栏目不画（三类插件栏里一个插件都没启用时，
+             侧栏不留空栏目）。 -->
+        <nav class="nav" id="nav"></nav>
         <div class="content">
-          <div class="subnav" id="subnav"></div>
           <section id="view" class="view"></section>
         </div>
       </div>

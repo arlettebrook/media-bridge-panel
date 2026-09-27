@@ -108,7 +108,7 @@ input[type='file']::file-selector-button {
   cursor: pointer;
 }
 
-.chk { display: flex; align-items: center; gap: 6px; color: var(--fg-dim); font-size: 12.5px; white-space: nowrap; }
+.chk { display: flex; align-items: center; gap: 6px; color: var(--fg-dim); font-size: 13px; white-space: nowrap; }
 .chk input[type='checkbox'], .chk input[type='radio'] { accent-color: var(--accent-2); width: 14px; height: 14px; }
 
 /* ---------------- 表单布局原语 ----------------
@@ -116,11 +116,11 @@ input[type='file']::file-selector-button {
  * 全前端 89 处内联样式就是这么来的（`min-width` 有 14 个不同值、`font-size:12px` 手写 19 次）。
  *
  * 规矩：**页面里不写 style**，用下面这几个类拼。
- * 间距用**下边距**给（每个块自己带 10px），最后一块由 `.card > :last-child` 收掉尾巴 ——
+ * 间距用**下边距**给（每个块自己带 12px），最后一块由 `.card > :last-child` 收掉尾巴 ——
  * 比"相邻兄弟选择器"简单，也不会因为插了一个新元素就丢掉间距。 */
-.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin-bottom: 10px; }
-.field > label { font-size: 12px; color: var(--fg-dim); }
-.note { font-size: 12px; color: var(--fg-dim); line-height: 1.6; margin-bottom: 10px; }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin-bottom: 12px; }
+.field > label { font-size: 12.5px; color: var(--fg-dim); }
+.note { font-size: 12.5px; color: var(--fg-dim); line-height: 1.65; margin-bottom: 12px; }
 /* `.toolbar` 与 `.row` 是**同一个东西**（历史上有两个名字）—— 一起定义，写法逐步统一到 `.row`
  * ⚠️ 用 `align-items: center` 而不是 `flex-end`：行里混着 34px 控件、
  * 26px 的 `.btn.mini`、19px 的说明文字，底对齐会让它们的**中心线各不相同**（实测差 4~7px，
@@ -128,7 +128,7 @@ input[type='file']::file-selector-button {
  * （原来底对齐是为了 `.field`（label 在上、input 在下）能和裸控件对齐 —— 实测全项目 `.field`
  *  只出现在模态框里（纵向排），行里没有，所以不必为它让步。） */
 .row,
-.toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.toolbar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
 .row > .field,
 .toolbar > .field { flex: 1 1 200px; } /* 弹性宽度 + 自动换行；页面里不再写 min-width */
 /* 控件直接放进行里也行（省一层 wrapper）：同样弹性、同样不撑破。
@@ -167,7 +167,7 @@ input[type='file']::file-selector-button {
 .chk > input[type='number'].w-sm { width: 84px; }
 .chk > input[type='number'].w-md { width: 120px; }
 .chk > input[type='number'].w-lg { width: 180px; }
-.actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-bottom: 10px; }
+.actions { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-bottom: 12px; }
 /* 行**放进字段块里**时不留自己的下边距（间距由 .field 的 gap 给）—— 否则
  * 「标签 + 输入行」这种写法会在行下面多出 10px 的空当（`.card > :last-child` 只收得掉最后一块）。 */
 .field > .row,
@@ -177,14 +177,14 @@ input[type='file']::file-selector-button {
 .view > :last-child { margin-bottom: 0; }
 
 /* 卡片之间**本来是完全贴着的**（实测 margin 0，只有两条边线相邻）—— 统一给一个间距 */
-.card + .card { margin-top: 14px; }
+.card + .card { margin-top: 16px; }
 /* ⚠️ 但**网格里的间距归 grid 的 gap 管** —— 那里再加 margin 会把格子挤歪（保险起见先挡掉） */
 .grid .card + .card { margin-top: 0; }
 /* 卡片里的行内输入框（账号改密那种）：不撑满、也不超过 180px */
 /* 列表行（源 / 账号 / 站点那种）：一行里放「状态点 + 名称 + 说明 + 操作」
  * 各列宽度**固定**，否则每行名字长短不一、后面的说明与按钮就各行其是（看着就是"没对齐"）：
  *   点 · 名称 200px · 说明（占满剩余）· 操作靠右 */
-.file-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 0; }
+.file-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 8px 0; }
 .file-row > .name {
   flex: 0 0 200px;
   min-width: 0;
@@ -271,18 +271,41 @@ input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor:
 .body { display: flex; flex: 1; min-height: 0; }
 .content { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 
-/* 大类内部的子标签 */
-.subnav {
-  display: flex; gap: 4px; padding: 10px 18px 0;
-  border-bottom: 1px solid var(--line);
-  overflow-x: auto; flex: none;
+/* ---------------- 模板页：左挑模板 / 右编辑 ---------------- */
+.tpl-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 16px; align-items: start; }
+.tpl-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
+.tpl-list .tpl-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: none; border: 1px solid transparent; color: var(--fg-dim);
+  padding: 7px 10px; border-radius: 8px; cursor: pointer; font: inherit; transition: .15s;
 }
-.subnav button {
-  background: none; border: none; border-bottom: 2px solid transparent;
-  color: var(--fg-dim); padding: 8px 12px; cursor: pointer; font: inherit; white-space: nowrap;
+.tpl-list .tpl-item:hover { background: var(--bg-3); color: var(--fg); }
+.tpl-list .tpl-item.active { background: rgba(140, 218, 96, .10); border-color: var(--accent-dim); color: var(--accent); font-weight: 600; }
+.tpl-list .tpl-item .tpl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-list .tpl-item .tpl-meta { font-size: 11px; color: var(--fg-dim-2); font-weight: 400; }
+
+/* 站点表按**来源**分组，但**一次只开一个**：来源做成一行横向页签，页签里带着"这一组勾了几个" */
+.src-tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 4px; }
+.src-tab {
+  flex: none; display: flex; align-items: baseline; gap: 6px;
+  background: none; border: 1px solid transparent; color: var(--fg-dim);
+  padding: 6px 10px; border-radius: 8px; cursor: pointer; font: inherit; font-size: 12.5px; transition: .15s;
 }
-.subnav button:hover { color: var(--fg); }
-.subnav button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.src-tab:hover { background: var(--bg-3); color: var(--fg); }
+.src-tab.active { background: rgba(140, 218, 96, .10); border-color: var(--accent-dim); color: var(--accent); font-weight: 600; }
+.src-tab .src-tab-meta { font-size: 11px; color: var(--fg-dim-2); font-weight: 400; }
+.src-head { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.src-head b { font-size: 13px; font-weight: 600; }
+
+/* 草稿动过没有：左卡「新建 / 删除 / 保存」下面那一颗小标签，草稿干净时整颗不显示 */
+.dirty-chip {
+  display: inline-block; font-size: 11.5px; color: var(--warn);
+  border: 1px solid rgba(255, 184, 77, .35); border-radius: 6px; padding: 1px 7px; white-space: nowrap;
+}
+/* 参数分三小块（超时与并发 / 打分与取条数 / 线路过滤）：八颗控件挤一行，窄屏折出来一大片 */
+.param-block { margin-bottom: 14px; }
+.param-title { font-size: 12px; color: var(--fg-dim-2); margin-bottom: 7px; }
+.param-block > .row { margin-bottom: 0; }
 
 /* ---------------- 模块导航 ---------------- */
 .nav-toggle {
@@ -317,6 +340,14 @@ input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor:
 }
 .nav button:hover { background: var(--bg-3); color: var(--fg); }
 .nav button.active { background: rgba(140, 218, 96, .10); border-color: var(--accent-dim); color: var(--accent); font-weight: 600; }
+/* 树：父节点是**文件夹**（点一下收起 / 展开这一栏），子节点缩进一级 */
+.nav-group { margin-bottom: 6px; }
+.nav button.nav-head { color: var(--fg-dim-2); font-size: 11.5px; letter-spacing: .4px; padding: 8px 12px 3px; gap: 4px; }
+.nav button.nav-head:hover { color: var(--fg); }
+.nav .nav-caret { flex: none; width: 10px; text-align: center; font-size: 9px; line-height: 1; }
+.nav-group.collapsed .nav-kids { display: none; }
+.nav-kids { display: flex; flex-direction: column; gap: 2px; }
+.nav button.nav-child { padding: 7px 12px 7px 20px; font-size: 12.5px; }
 .nav-badge { margin-left: auto; font-size: 10.5px; color: var(--fg-dim-2); font-weight: 400; }
 .nav button.active .nav-badge { color: var(--accent); }
 .soon {
@@ -327,20 +358,37 @@ input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor:
 .nav-sep { height: 1px; background: var(--line); margin: 10px 12px; }
 
 
-.view { flex: 1; overflow: auto; padding: 18px 22px 40px; min-height: 0; }
+/* ---------------- 间距尺度（全站一处定） ----------------
+ * 卡片 16/18、行距 12、表格行 9/12、说明字 12.5px —— **一处改全站生效**，
+ * 页面里不再各自补间距。以前那一档（14/16、10、7/10、12px）在内容多的页面上明显发挤。 */
+.view { flex: 1; overflow: auto; padding: 22px 26px 48px; min-height: 0; }
 .view.nopad { padding: 0; }
 
+/* 插件自带 UI 的那一页：面板只给一个铺满的框，里面全是插件自己的 HTML（见 core/plugin-ui.js） */
+.plugin-ui-frame { display: block; width: 100%; height: 100%; border: 0; background: var(--bg-2); }
+
 /* ---------------- 卡片 / 表格 ---------------- */
-.grid { display: grid; gap: 12px; }
+.grid { display: grid; gap: 14px; }
 .grid.cols-3 { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
-.card { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
-.card h3 { margin: 0 0 10px; font-size: 13px; color: var(--fg-dim); font-weight: 600; letter-spacing: .3px; }
-.kv { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; font-size: 13px; }
+.card { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+.card h3 { margin: 0 0 12px; font-size: 13.5px; color: var(--fg-dim); font-weight: 600; letter-spacing: .3px; }
+.kv { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; font-size: 13px; }
 .kv .k { color: var(--fg-dim-2); }
 .kv .v { font-family: var(--mono); font-size: 12.5px; text-align: right; word-break: break-all; }
 
+/* ---------------- 插件管理页：一个插件一块 ----------------
+ * 原来是「名称 · 一长串状态明细 · 五颗按钮」全塞在一条 `.kv` 里：状态串折成两三行、按钮跟着飘，
+ * 每行都不知从哪开始到哪结束。改成"名称 + 状态徽章 + 操作"一行、状态明细另起一行，块间给分隔线。 */
+.plugin-row { padding: 12px 0; }
+.plugin-row + .plugin-row { border-top: 1px solid var(--line); }
+.plugin-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 7px; }
+.plugin-name { font-size: 13.5px; font-weight: 600; }
+.plugin-acts { margin-bottom: 0; }
+.plugin-row > .note:last-child { margin-bottom: 0; }
+.badge.warn { color: var(--warn); border-color: rgba(255, 184, 77, .35); }
+
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }
 /* 「站点与参数」那张表：**表头不折行**（「聚合」被压成"聚\n合"过）。
  * 「能力」列里：**一枚徽章绝不拆行**（靠 `.badge` 的 nowrap），但**徽章之间可以换行** ——
  * 这样列不用为了"一行放下 3 枚徽章"而把整张表撑到横滚，也不会出现"视\n频"那种断字。 */
@@ -350,10 +398,10 @@ th { color: var(--fg-dim-2); font-weight: 500; font-size: 12px; }
 tbody tr:hover { background: var(--bg-3); }
 td.mono, th.mono, .mono { font-family: var(--mono); font-size: 12px; }
 
-.sec-title { margin: 22px 0 10px; font-size: 14px; color: var(--accent); font-weight: 600; }
+.sec-title { margin: 24px 0 12px; font-size: 14px; color: var(--accent); font-weight: 600; }
 .sec-title:first-child { margin-top: 0; }
 
-.hint { background: rgba(111, 182, 255, .07); border: 1px solid rgba(111, 182, 255, .25); color: #cfe3ff; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; margin-bottom: 14px; }
+.hint { background: rgba(111, 182, 255, .07); border: 1px solid rgba(111, 182, 255, .25); color: #cfe3ff; border-radius: 10px; padding: 12px 14px; font-size: 12.5px; margin-bottom: 16px; }
 /* 空的提示框（结果区还没填内容时）不该占一块空白 —— 直接不显示 */
 .hint:empty { display: none; }
 .hint.warn { background: rgba(255, 184, 77, .08); border-color: rgba(255, 184, 77, .3); color: #ffe3b8; }
@@ -469,10 +517,19 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
   .app:not(.nav-collapsed) .nav-scrim {
     display: block; position: fixed; inset: 0; z-index: 25; background: rgba(0, 0, 0, .5);
   }
-  .subnav { padding: 6px 10px 0; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-  .subnav::-webkit-scrollbar { display: none; }
-  .subnav button { padding: 10px 12px; }
-  .view { padding: 14px 14px calc(34px + env(safe-area-inset-bottom)); }
+  /* 模板页：窄屏改成一列（左挑 / 右编辑上下排），侧栏树本身在抽屉里照常点 */
+  .tpl-layout { grid-template-columns: minmax(0, 1fr); }
+  /* 一列里两层栅格（`.tpl-layout` 与右卡里那层 `.grid`）的子项都得**能收得比内容更窄**：
+   * 栅格子项默认 `min-width:auto`（= 内容的最小宽），而来源页签行是一整排横排的页签、
+   * 站点表本身也有一份最小内容宽 —— 两者都比容器宽时，轨道会被顶到内容宽，整页跟着横滚
+   * （390px 实测：卡片由 366 撑到 460，页面横滚 82px，站点表的「延迟」列跑到屏外）。
+   * 收窄之后页签行在自己那条里横滚（`.src-tabs` 本就是 `overflow-x:auto`），
+   * 站点表照容器宽排卡片（那一档见文件末尾的 480px）。 */
+  .tpl-layout > *,
+  .tpl-layout .grid > * { min-width: 0; }
+  .tpl-layout .grid { grid-template-columns: minmax(0, 1fr); }
+
+  .view { padding: 16px 16px calc(36px + env(safe-area-inset-bottom)); }
   .view.nopad { padding: 0; }
 
   /* 触控友好：输入框 16px 可避免 iOS 聚焦时自动放大（选择器与上面那条保持同一个范围） */
@@ -488,13 +545,15 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
   .chk input { width: 17px; height: 17px; }
 
   .grid.cols-3 { grid-template-columns: 1fr; }
-  .card { padding: 13px 14px; }
+  .grid { gap: 12px; }
+  .card { padding: 14px 15px; }
+  .card + .card { margin-top: 12px; }
   .kv { font-size: 12.5px; }
   .kv .v { max-width: 58%; }
-  .sec-title { margin: 18px 0 8px; }
+  .sec-title { margin: 20px 0 10px; }
 
   table { font-size: 12.5px; min-width: 560px; }
-  th, td { padding: 8px 9px; }
+  th, td { padding: 9px 10px; }
 
   .frame-wrap { margin: 10px 10px calc(10px + env(safe-area-inset-bottom)); }
   /* 190px 是「顶栏 + 横向导航行 + 子标签」时代留的数，导航变成侧栏后那一行没了 */
@@ -506,7 +565,9 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
     bottom: calc(12px + env(safe-area-inset-bottom));
     max-width: none; font-size: 13px;
   }
-  .toolbar { gap: 6px; }
+  .toolbar { gap: 8px; }
+  /* 来源组头（整组全选 / 反选）在窄屏允许折行，别把标题压成一条 */
+  .src-head { flex-wrap: wrap; }
   .empty-inner { padding: 0 20px; }
   .pad-x { padding-left: 14px; padding-right: 14px; }
   .mg-x { margin: 12px 14px; }
@@ -572,3 +633,53 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
 .auth-form { display: flex; gap: 8px; }
 .auth-form input { flex: 1 1 auto; min-width: 0; }
 .auth-tip { color: var(--err); margin: 0; min-height: 18px; }
+
+/* ---------------- 手机（≤480px）：再收一档 + 宽表改卡片 ----------------
+ * ⚠️ 这一档放在**文件最后**：它要压过上面 `.modal-*` 那几条基础规则（媒体查询不加权重，
+ * 靠的就是"后来居上"）。860px 那一档解决的是"抽屉侧栏 + 单列"，到 375px 级的屏上还是挤：
+ * 内边距与卡片再收一档、按钮整宽，最要紧的是**站点表不再横滚** —— 五行宽的表格在手机上
+ * 只能左右扒着看，这里改成一张张卡片（勾选 · 站名 · 延迟，下面两行挂"别的模板 / 能力"）。 */
+@media (max-width: 480px) {
+  .view { padding: 12px 12px calc(32px + env(safe-area-inset-bottom)); }
+  .card { padding: 12px 13px; }
+  .card + .card { margin-top: 10px; }
+  .grid { gap: 10px; }
+  .card h3 { margin-bottom: 10px; }
+  .row, .toolbar { gap: 8px; margin-bottom: 10px; }
+  .note { font-size: 12px; }
+  .hint { padding: 10px 12px; margin-bottom: 12px; }
+  .btn.mini { height: 30px; padding: 0 10px; }
+
+  /* 站点表：宽表 → 卡片 */
+  #siteTableHost .table-wrap { overflow-x: visible; }
+  .sites-table { display: block; min-width: 0; }
+  .sites-table thead { display: none; }
+  .sites-table tbody { display: block; }
+  .sites-table tr {
+    display: grid; grid-template-columns: 24px minmax(0, 1fr) auto;
+    gap: 4px 8px; align-items: center;
+    border: 1px solid var(--line); border-radius: 10px;
+    padding: 9px 10px; margin-bottom: 8px; background: rgba(255, 255, 255, .012);
+  }
+  .sites-table tr:hover { background: var(--bg-2); }
+  .sites-table td { display: block; padding: 0; border: 0; }
+  .sites-table td:nth-child(1) { grid-column: 1; grid-row: 1; }
+  .sites-table td:nth-child(2) { grid-column: 2; grid-row: 1; font-weight: 600; word-break: break-word; }
+  .sites-table td:nth-child(3) { grid-column: 3; grid-row: 1; text-align: right; }
+  .sites-table td:nth-child(4) { grid-column: 2 / -1; grid-row: 2; }
+  .sites-table td:nth-child(5) { grid-column: 2 / -1; grid-row: 3; }
+  /* 没有表头了，二、三行前面挂个小标签 */
+  .sites-table td[data-label]::before { content: attr(data-label) '：'; color: var(--fg-dim-2); font-size: 11.5px; }
+  .sites-table td:last-child .badge { margin: 2px 4px 2px 0; }
+
+  /* 模态框：贴底的抽屉、按钮整宽（窄屏上两颗小按钮挨在一起最容易点错） */
+  .modal-mask { padding: 0; align-items: flex-end; }
+  .modal { width: 100%; max-height: 92dvh; border-radius: 14px 14px 0 0; }
+  .modal-body { padding: 14px; }
+  .modal-actions { flex-direction: column-reverse; padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); }
+  .modal-actions .btn { width: 100%; }
+
+  .src-tabs { gap: 4px; }
+  .file-row > .name { flex: 1 1 100%; }
+  .kv .v { max-width: 100%; }
+}

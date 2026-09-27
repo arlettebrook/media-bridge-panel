@@ -12,8 +12,10 @@
 import { $, el, toast, modal } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
+import { refreshNav } from '../../core/shell.js';
 
-const TYPE_LABEL = { metadata: '元数据', source: '源', home: '首页' };
+/* 三个类型名与侧栏那三栏一致（元数据 / 片源 / 首页，见 core/registry.js） */
+const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页' };
 const fmtBytes = (n) => (n == null ? '—' : n >= 1048576 ? (n / 1048576).toFixed(0) + 'MB' : Math.round(n / 1024) + 'KB');
 const fmtDuration = (ms) => {
   if (!ms) return '—';
@@ -25,6 +27,8 @@ const fmtDuration = (ms) => {
 
 export async function renderPluginManage(v) {
   const host = el('div', { id: 'pluginListHost' });
+  /* 轮询句柄先声明再调用 startPolling()：它下面就用到了这个变量（声明在后会踩 TDZ） */
+  let timer = null;
   v.append(installCard(() => load(true)), host);
   await load(true);
   startPolling();
@@ -78,9 +82,15 @@ export async function renderPluginManage(v) {
         b.append(
           el(
             'div',
-            { class: 'kv' },
-            el('span', { class: 'k', text: `${TYPE_LABEL[x.type] || x.type} · ${x.name}` }),
-            el('span', { class: 'v', text: `v${x.version}　${x.description || ''}` })
+            { class: 'plugin-row' },
+            el(
+              'div',
+              { class: 'plugin-head' },
+              el('span', { class: 'plugin-name', text: x.name }),
+              el('span', { class: 'badge', text: TYPE_LABEL[x.type] || x.type }),
+              el('span', { class: 'badge', text: 'v' + x.version })
+            ),
+            el('div', { class: 'note', text: x.description || '' })
           )
         );
       }
@@ -91,10 +101,11 @@ export async function renderPluginManage(v) {
   function pluginRow(p) {
     const statusText =
       p.status === 'running' ? '运行中' : p.status === 'starting' ? '启动中…' : p.status === 'broken' ? '起不来' : p.enabled ? '已启用（没在跑）' : '已停用';
+    const statusCls = p.status === 'running' ? ' ok' : p.status === 'broken' ? ' err' : p.status === 'starting' ? ' warn' : '';
+    /* 状态明细单独一行：跟名称、五颗按钮挤在一条线上时，它会被折成两三截，一屏看下来对不上号 */
     const bits = [
       `${TYPE_LABEL[p.type] || p.type} · ${p.id}`,
       `v${p.version}`,
-      statusText,
       p.domain ? `域 ${p.domain}` : '',
       `内存 ${fmtBytes(p.memoryBytes)}`,
       p.status === 'running' ? `已跑 ${fmtDuration(p.uptimeMs)}` : '',
@@ -110,32 +121,35 @@ export async function renderPluginManage(v) {
         toast(e.message, true);
       }
       await load();
+      /* 启停 / 装卸会影响侧栏：三类插件栏的子项是照插件清单现算的（见 core/registry.js） */
+      refreshNav();
     };
 
-    const row = el(
+    return el(
       'div',
-      { class: 'kv' },
-      el('span', { class: 'k', text: p.name || p.id }),
-      el('span', { class: 'v note', text: bits.join('　·　') }),
+      { class: 'plugin-row' },
       el(
-        'span',
-        { class: 'row' },
-        p.enabled
-          ? btn('停用', '停掉它的进程（它自己起的东西由它自己清理）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/disable`, { method: 'POST' })))
-          : btn('启用', '起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/enable`, { method: 'POST' })), 'btn mini primary'),
-        btn('重启', '重起它的进程（手动重启会把自动重启的退避计数清零）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/restart`, { method: 'POST' }))),
-        p.hasWebui ? btn('设置', '打开插件自己的设置页', () => window.open(p.webuiPath, '_blank'), 'btn mini primary') : null,
-        btn('调试', '手发一条动作给它（面板不解释动作与参数，原样转过去）', () => callDialog(p)),
-        btn('卸载', '卸载它 —— 它的 data/ 目录也会一起删掉', () => uninstall(p))
-      )
+        'div',
+        { class: 'plugin-head' },
+        el('span', { class: 'plugin-name', text: p.name || p.id }),
+        el('span', { class: 'badge' + statusCls, text: statusText }),
+        el('span', { class: 'spacer' }),
+        el(
+          'div',
+          { class: 'row plugin-acts' },
+          p.enabled
+            ? btn('停用', '停掉它的进程（它自己起的东西由它自己清理）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/disable`, { method: 'POST' })))
+            : btn('启用', '起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/enable`, { method: 'POST' })), 'btn mini primary'),
+          btn('重启', '重起它的进程（手动重启会把自动重启的退避计数清零）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/restart`, { method: 'POST' }))),
+          p.hasWebui ? btn('设置', '打开插件自己的设置页', () => window.open(p.webuiPath, '_blank'), 'btn mini primary') : null,
+          btn('调试', '手发一条动作给它（面板不解释动作与参数，原样转过去）', () => callDialog(p)),
+          btn('卸载', '卸载它 —— 它的 data/ 目录也会一起删掉', () => uninstall(p))
+        )
+      ),
+      el('div', { class: 'note', text: bits.join(' · ') }),
+      p.lastError ? el('div', { class: 'note err-note', text: '最近一次错误：' + p.lastError }) : null,
+      (p.actions || []).length ? el('div', { class: 'note', text: '实现了这些动作：' + p.actions.join(' / ') }) : null
     );
-    if (p.lastError) {
-      row.append(el('div', { class: 'note err-note', text: '最近一次错误：' + p.lastError }));
-    }
-    if ((p.actions || []).length) {
-      row.append(el('div', { class: 'note', text: '实现了这些动作：' + p.actions.join(' / ') }));
-    }
-    return row;
   }
 
   /** 调试台：手发一条动作（插件作者最需要的那个小工具） */
@@ -181,7 +195,6 @@ export async function renderPluginManage(v) {
 
   /* ------------------------------------------------------------------ 轮询 */
 
-  let timer = null;
   function startPolling() {
     if (timer) return;
     timer = setInterval(async () => {
@@ -240,7 +253,10 @@ function installCard(onInstalled = () => {}) {
     'div',
     { class: 'card' },
     el('h3', { text: '装一个插件' }),
-    el('div', { class: 'row' }, file, md5In, el('label', { class: 'chk', title: '装完立刻启用（起它的进程）' }, enableCb, '装完就启用'), go),
+    /* 四样控件原来挤在一行：包、md5、勾选、按钮各自的宽度都不一样，窄屏一折行就散了。
+       这里拆成"选包一行、动作一行"，每行最多两件东西，眼睛有落点。 */
+    el('div', { class: 'row' }, file, md5In),
+    el('div', { class: 'row' }, el('label', { class: 'chk', title: '装完立刻启用（起它的进程）' }, enableCb, '装完就启用'), go),
     out,
     el('div', {
       class: 'note',

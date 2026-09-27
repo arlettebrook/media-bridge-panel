@@ -1,11 +1,11 @@
 'use strict';
 /**
- * 导航外壳：侧边栏（导航 + 折叠）+ 模块/子标签高亮 + 页面分发 + 地址栏同步。
+ * 导航外壳：侧边栏（树 + 折叠）+ 当前页高亮 + 页面分发 + 地址栏同步。
  * 只认 `registry` 里的结构，不认任何具体的页。
  */
 import { $, el } from './dom.js';
 import { S } from './state.js';
-import { moduleOf, moduleById, rendererOf } from './registry.js';
+import { MODULES, moduleOf, rendererOf } from './registry.js';
 
 /* ------------------------------------------------------------ 侧边栏折叠 */
 
@@ -66,14 +66,35 @@ export function closeNavIfNarrow() {
 
 export function switchPage(page) {
   S.page = page;
-  S.lastPage[moduleOf(page).id] = page;
   renderPage();
+  revealGroupOf(page);
 }
 
-export function switchModule(id) {
-  const m = moduleById(id);
-  switchPage(S.lastPage[id] || m.pages()[0][0]);
-  window.scrollTo(0, 0);
+/* ------------------------------------------------------------ 侧栏树的折叠 */
+
+/** 收起来的父节点（模块 id）。只在内存里 —— 刷新回到默认（全展开）。 */
+const foldedGroups = new Set();
+
+/** 收 / 开一个父节点：换箭头，并记住状态（重建侧栏时照它恢复） */
+function setGroupFolded(group, folded) {
+  group.classList.toggle('collapsed', folded);
+  const caret = group.querySelector('.nav-caret');
+  if (caret) caret.textContent = folded ? '▸' : '▾';
+  if (folded) foldedGroups.add(group.dataset.module);
+  else foldedGroups.delete(group.dataset.module);
+}
+
+/** 父节点是**文件夹**：点一下收起 / 展开这一栏的子项，不跳页（跳页由子节点负责） */
+export function toggleNavGroup(head) {
+  const group = head.closest('.nav-group');
+  if (group) setGroupFolded(group, !group.classList.contains('collapsed'));
+}
+
+/** 切到某一页时把它那一栏打开 —— 高亮落在收起来的栏里等于看不见 */
+function revealGroupOf(page) {
+  const child = document.querySelector('#nav .nav-child[data-page="' + page + '"]');
+  const group = child && child.closest('.nav-group');
+  if (group) setGroupFolded(group, false);
 }
 
 /* ------------------------------------------------------------ 地址栏同步 */
@@ -95,7 +116,6 @@ export function applyHash() {
   const page = pageInHash();
   if (!page) return;
   S.page = page;
-  S.lastPage[moduleOf(page).id] = page;
 }
 
 /** 写回地址栏：还没有 hash（首次进入）用 replace，之后按正常导航压栈，浏览器能后退 */
@@ -113,29 +133,65 @@ export function onHashChange() {
   switchPage(page);
 }
 
-/** 大类内部的子标签 */
-export function renderSubnav() {
-  const host = $('#subnav');
-  if (!host) return;
-  const pages = moduleOf(S.page).pages();
-  host.textContent = '';
-  host.style.display = pages.length > 1 ? '' : 'none';
-  if (pages.length <= 1) return;
-  for (const [id, label] of pages) {
-    host.append(el('button', { 'data-page': id, class: S.page === id ? 'active' : '', text: label }));
-  }
-}
-
 /**
- * 模块高亮。
+ * 当前页高亮。
  *
  * ⚠️ 原先这里还给两个角标写数字（顶栏那个源站点数 / 聚合勾选数）—— 都随源插件化去掉了：
  * 「源托管」那一栏没了，而"勾了几个站点"现在按**模板**算（不同域各一套），顶栏写一个数必然误导。
+ * 高亮只落在**子节点**上：父节点（栏名）是分组标题，本身不表示"当前在哪一页"。
  */
 export function renderNav() {
-  const mod = moduleOf(S.page);
-  document.querySelectorAll('#nav button[data-module]').forEach((b) => b.classList.toggle('active', b.dataset.module === mod.id));
-  renderSubnav();
+  document.querySelectorAll('#nav .nav-child').forEach((b) => b.classList.toggle('active', b.dataset.page === S.page));
+}
+
+/**
+ * 侧栏：照 MODULES 现画成**树** —— 一栏一个父节点，栏里的页（以及三类插件栏下的各插件 UI）
+ * 是它的子节点。原先子项画在内容区顶上那条子标签栏里，与侧栏的栏目分两处说同一件事；
+ * 树把"这一栏下面有哪些页"收在一处（见 docs/adr/0029 已定 18）。
+ *
+ * 父节点是**文件夹**：点一下收起 / 展开这一栏（`foldedGroups` 记着收起来的那几个），
+ * 不是"跳到这一栏的某一页" —— 一栏里哪一页当前亮着由子节点上的高亮说话。
+ *
+ * ⚠️ 原先这几颗按钮**写死在 index.html 里**，加一栏要改两处；现在只有 MODULES 一处。
+ * 没有子项的栏目**不画** —— 三类插件栏里一个插件都没启用时，侧栏不留空栏目。
+ * （`.workspace` 本来就要等接口回来才显示，所以这里晚一点画不会闪。）
+ */
+export function renderNavButtons() {
+  const host = $('#nav');
+  if (!host) return;
+  host.textContent = '';
+  for (const m of MODULES) {
+    const pages = m.pages();
+    if (!pages.length) continue;
+    const kids = el('div', { class: 'nav-kids' });
+    for (const [id, label] of pages) {
+      kids.append(el('button', { class: 'nav-child', 'data-page': id, text: label }));
+    }
+    const group = el(
+      'div',
+      { class: 'nav-group', 'data-module': m.id },
+      el(
+        'button',
+        { class: 'nav-head', title: `${m.label}：点一下收起 / 展开这一栏`, 'data-module': m.id },
+        el('span', { class: 'nav-caret', text: '▾' }),
+        m.label
+      ),
+      kids
+    );
+    setGroupFolded(group, foldedGroups.has(m.id));
+    host.append(group);
+  }
+}
+
+/** 插件启停 / 装卸之后调：侧栏可能多一栏少一栏，当前页也可能已经不存在了 */
+export function refreshNav() {
+  renderNavButtons();
+  const pages = moduleOf(S.page).pages();
+  if (!pages.some((x) => x[0] === S.page)) {
+    switchPage(pages.length ? pages[0][0] : MODULES[0].pages()[0][0]);
+    return;
+  }
+  renderNav();
 }
 
 /** 分发到当前页的渲染函数 */
