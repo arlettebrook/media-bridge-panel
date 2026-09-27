@@ -171,7 +171,13 @@ function cookieHeader(token, req) {
  * （客户端带着自己的 AccessToken），但有少数几条是**面板自己的管理端点** ——
  * 它们混在同一个前缀下，必须挑出来拦住：
  *
- *   `/api/emby/accounts*`   账号管理（增删改面板给客户端用的账号）
+ *   `/api/emby/accounts*`      账号管理（增删改面板给客户端用的账号）
+ *   `/api/emby/instances*`     Emby 实例管理（多实例：增删改、改端口、选首页插件）
+ *   `/api/emby/home-plugins`   可选首页插件清单（实例编辑弹窗的下拉用）
+ *
+ * ⚠️ 后两条与 `accounts` 是同一类东西：**面板自用端点**，长在 Emby 前缀下只是因为它们
+ * 操作的是 Emby 那摊东西（见 `emby/routes.js`）。它们由"实例化"新增 —— 实例端口那一侧
+ * 由 `emby/listener.js` 的 PANEL_ONLY_RE 用同一份名单挡掉（客户端没有面板 cookie）。
  *
  * ⚠️ 原先还列着 `/api/emby/home/*`（老首页插件的上传/删除/改参数/逐行预览）——
  * 那条机制已随批次 9 整套删掉（首页插件的设置改在插件自带的 webui 里，
@@ -185,7 +191,7 @@ function cookieHeader(token, req) {
  * 与 `/api/emby/cache`（缓存跨两个库了，用量/清空搬到 `/api/panel/cache`）——
  * 而 `/api/panel/*` 本来就在下面那条"一律要登录"里，不必再列。
  */
-const EMBY_PANEL_RE = [/^\/api\/emby\/accounts\b/];
+const EMBY_PANEL_RE = [/^\/api\/emby\/accounts\b/, /^\/api\/emby\/instances\b/, /^\/api\/emby\/home-plugins\b/];
 
 function needsAuth(pathname) {
   if (pathname.startsWith('/api/auth/')) return false; // 登录本身（还有 status/logout）

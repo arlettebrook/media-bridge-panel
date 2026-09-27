@@ -136,9 +136,10 @@ docker logs -t media-bridge-panel              # 带时间戳
 ## 三、工作流
 
 1. 启动面板（`npm start`）。
-2. 在 Emby 客户端里把服务器地址指向本面板：填主机即可（`http://<面板地址>:8099`）；
-   客户端会自己去打 `/emby/...`，面板把它归一成 `/api/emby/...`（也可以直接填
-   `http://<面板地址>:8099/api/emby`，两种都收）。
+2. 在 Emby 客户端里把服务器地址指向**某个 Emby 实例的端口**（面板「Emby → 实例」页每行给出的连接地址，
+   形如 `http://<面板地址>:8096`）：填主机即可，客户端会自己去打 `/emby/...`，实例监听把它归一成
+   `/api/emby/...`（也可以直接填 `http://<面板地址>:8096/api/emby`，两种都收）。
+   **面板端口（`8099`）不再提供客户端协议端点**，只有面板自用端点与 `System/Info/Public` 垫片。
 3. 在客户端里正常操作（登录、进媒体库、播放……）。
 4. **看日志**，把客户端要的端点与其参数记下来。
 5. 把「这次要补的端点」交给实现方 —— **一次一个**。
@@ -192,7 +193,7 @@ docker logs -t media-bridge-panel              # 带时间戳
 
 | 方法 | 路径 | 入参 | 响应 | 依据 |
 |---|---|---|---|---|
-| GET | `/api/emby/System/Info/Public` | 无 | 握手信息：`ServerName`（**面板「Emby → 连接设置」可改**，留空回落 `媒体桥`（`core/branding.js` 的 `name`））/ `Version(4.8.0.0)` / `ProductName` / `Id` / `LocalAddress` / `StartupWizardCompleted` | 部署者指定（客户端需先握手） |
+| GET | `/api/emby/System/Info/Public` | 无 | 握手信息：`ServerName`（**= 该实例的 `name`**，在面板「Emby → 实例」页的编辑弹窗里改；留空回落 `媒体桥`（`core/branding.js` 的 `name`））/ `Version(4.8.0.0)` / `ProductName` / `Id` / `LocalAddress` / `StartupWizardCompleted` | 部署者指定（客户端需先握手） |
 | POST | `/api/emby/Users/AuthenticateByName` | `{Username, Pw}`（兼容 `Password`） | 200 `{User, SessionInfo, AccessToken, ServerId}`；账号未设置或校验不过 → 401 | 部署者指定（日志 #6 抓到该端点） |
 | GET | `/api/emby/Users/{UserId}` | 路径参数 `UserId` | 200 `UserDto` 本体（不包层）；Id 不匹配 → 404；未设账号 → 401 | 部署者指定（客户端登录后紧接着就会要） |
 | GET | `/api/emby/Users/{UserId}/Views` | 路径参数 `UserId`；客户端另带 `?IncludeExternalContent=false`（忽略） | 200 `QueryResult<BaseItemDto>`：**每个「启用」的首页插件行 = 一个库**，每项 `Id=catpawhome_<base64url(插件id\|行id)>`、`Name=行标题`、`Type=CollectionFolder`、`IsFolder=true`，**其余字段按真机逐项补齐（含封面 + `CollectionType`，见「五」下面那条）**；没有启用的插件行 → 空 `{Items:[],TotalRecordCount:0}`（与留白时期形状一致）；Id 不匹配 → 404；未设账号 → 401 | 部署者指定（由「留白」改为插件行的媒体库；其后补齐字段与封面） |
@@ -220,7 +221,7 @@ docker logs -t media-bridge-panel              # 带时间戳
 
 **实现约定**
 
-- **账号来源（多账号）**：面板「Emby → 连接设置 → 账号管理」→ `data/emby/emby.db`（Node 内置 sqlite，见 `db.js`）。
+- **账号来源（多账号）**：面板「Emby → 账号」页（先选实例，账号按实例分）→ `data/emby/emby.db` 或 `data/emby/instances/<id>/emby.db`（Node 内置 sqlite，见 `db.js`）。
   - **可以有多个客户端登录账号**，各自派生一个独立的 `User.Id`；账号表为空时登录一律 401，并在响应与日志里提示先去添加
   - 用户名比较：`NFKC` 归一 + 忽略大小写（**登录、查重、UserId 派生三处必须同一套规则**，否则会出现「登录成功但取资料 404」）
   - 密码存 **scrypt 哈希**（`scrypt$N$r$p$klen$salt$hash`，参数自描述便于以后换算法）；**忘了只能删掉重建**，库里没有明文
@@ -344,7 +345,7 @@ docker logs -t media-bridge-panel              # 带时间戳
 - **图片（`Items/{Id}/Images/{type}`）**：客户端取图时**只回传 `Id` + `tag`，不回传 URL**，所以 tag 得自己带上"图在哪"：
   - **tag = `cpimg.<base64url(图片URL)>.<签名>`**（`service.imageTag` / `parseImageTag`）。签名 = HMAC-SHA256(密钥, `Id|URL`) 取前 22 位。
   - **为什么要签名**：这个端点**必须豁免 token**（实测图片请求的凭证携带不统一，8 条里 3 条啥都不带），那它就是个"面板代为取任意 URL"的接口 —— 不签名等于把面板变成局域网 / Tailscale 上的**开放代理（SSRF）**。签名绑 `Id|URL`：tag 挪到别的条目上用不了，也造不出新 URL（实测：篡改 tag / 换条目 / 伪造 URL 全部 404）。
-  - **密钥 `imageKey`**：首次用到时随机生成、落 `data/settings/emby.json`，**不随任何 DTO 外发**（`serverId` 是外发的，不能当密钥）。
+  - **密钥 `imageKey`**：首次用到时随机生成、**按实例**落在 `data/emby/instances.json`（多实例之后身份是实例属性，见 `instance.js` 的 `identityOf`），**不随任何 DTO 外发**（`serverId` 是外发的，不能当密钥）。
   - URL 从哪来：**详情/季集**由 `tmdb.imageUrlOf()` 拼图床地址；**列表/库内容**直接用插件给的 `poster`/`backdrop`（完整 URL，见插件指南「五」）。所以两种来源统一成同一种 tag 形状，端点不必分类讨论。
   - **面板代为取图**（不是 302）：图很小；而且插件给的图地址可能是客户端根本连不到的地方。单张上限 8MB（海报正常几十 KB～1MB）。
   - **协议背景（关键，不要再重新引入这条路）**：Emby 里 `BaseItemDto` **没有任何"图片直链"字段** —— 图片相关字段只有 `ImageTags`（类型→tag 映射）、`BackdropImageTags`（数组）、`PrimaryImageTag` / `PrimaryImageItemId`（主图的便捷字段）、`Parent*ImageTag`、`PrimaryImageAspectRatio`。客户端**一律自己拼** `{host}/Items/{Id}/Images/{Type}/{Index}?Tag=…`。所以"把直链交给客户端让它自己加载"在协议下**没有这条路**（面板自己的预览页能用直链，那是本项目的 UI，不是 Emby 客户端）。
@@ -495,7 +496,7 @@ docker logs -t media-bridge-panel              # 带时间戳
     - **两道闸门**：① **名字硬拒**（清洗后没有公共主干、或相似度 < 0.5 → 直接出局，拦 `斗破苍穹4：逃亡`、`斗破苍穹·止戈`）；
       ② **分数线** `matchMinScore`（默认 0.85；**填 0 = 不筛选**，那就只按分数排名取前 `matchMaxItems` 条）。
     - **为什么限条数**：每条命中后面都要打一次站源 `/detail` 取链 —— 不限就是十几秒（实测 3 条 ≈ 2s）。
-      阈值与条数在 `agg.json`，可在「聚合设置」页改；web 的「聚合搜索」页可以单次覆盖。
+      阈值与条数在「聚合设置 · 模板」里改（web 的「聚合搜索」页只决定"搜什么"，不填这两项）。
     - **不去重**：同名的几条各有自己的 `vod_id`，谁能播要取过 `/detail` 才知道 ——
       按分数猜一条留、把别的丢掉就是"同名反而匹配错"的来源。所以源给了几条就算几条，只在
       `match.sameNameSameSite` 里数一下（诊断用）。
@@ -919,11 +920,13 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 | `server/modules/emby/log.js` | 请求日志（**每请求一行，不筛**）：`logResult` / `logMissing`（501 一行 + `logSeq`）/ `countOf`（只给日志数条数）/ `queryBrief` / `clientTag`；敏感信息掩码在 `queryBrief` 与 `logMissing` 里（见「二」） |
 | `server/core/logbus.js` | 日志总线：`install()` 包一层 `console.log/warn/error`（**先透传 stdout，再入内存环形缓冲**）、按行拆分、单条截断 1000 字符、固定条数（默认 500，`panel.logMax` 可调）；`list()`/`clear()`/`resize()`/`stats()`。**纯内存、不落盘**（长期留档交给 docker 的 json-file）。在 `server.js` 里**加载模块之前**装（见「二」） |
 | `server/modules/panel/routes.js` + `public/modules/panel/logs.js` | 日志页的数据口与页面：`GET /api/logs?since=&limit=`（增量）、`DELETE /api/logs`（清空）；页面「面板设置 → 日志」带暂停/清空/复制/级别过滤，增量轮询 + `isConnected` 守卫（见「二」） |
-| `server/modules/emby/index.js` | 模块清单：`upstream: 'agg'`、设置项（`serverName` / `imageKey` / 账号空壳）与校验（服务器名长度）。**`play.filter` 已搬到聚合层**（`agg.json` 的 `lineFilter`，UI 在「聚合设置 → 聚合参数」），那份校验也跟着走了；`play.mode`（随"面板代理"一起删）、`tmdb.*` 与 `cache.*` 都不在这里了；这里也不再需要"放行老值"的兼容校验 —— 校验里没有那个键，盘上留着也不挡保存 |
+| `server/modules/emby/index.js` | 模块清单：`upstream: 'agg'`、账号空壳设置（`serverName` / `serverId` / `imageKey` **已从设置里移出** —— 它们是**实例属性**，落在 `data/emby/instances.json`，见 `instance.js` 的 `identityOf`）。**`play.filter` 已搬到聚合层**（`agg.json` 的 `lineFilter`，UI 在「聚合设置 → 聚合参数」），那份校验也跟着走了；`play.mode`（随"面板代理"一起删）、`tmdb.*` 与 `cache.*` 都不在这里了；这里也不再需要"放行老值"的兼容校验 —— 校验里没有那个键，盘上留着也不挡保存 |
+| `server/modules/emby/instance.js` + `listener.js` | **多实例**：`instances.json` 是唯一真源（id / name / port / enabled / homePlugin / serverId / imageKey / dbFile）；`AsyncLocalStorage` 把"当前实例"贯穿到 `service.js` 与 `db.js`（不动那几千行）。`listener.js` 给每个启用实例在**它自己的端口**上挂一个 http 服务，与 8099 同一套路径归一化，但只放行客户端协议端点（面板自用端点由 `PANEL_ONLY_RE` 挡掉）。**面板端口反过来**：`server.js` 只放行面板自用端点 + `System/Info/Public` 垫片，其余客户端协议端点一律 404（两处名单互为对称） |
 | `server/modules/panel/index.js` | 面板层设置与钩子：`logMax`（改了就 `resize`）、**`cache.*`**（面板这边那两份缓存；`onSettingsChange` 里调 `cachedb.sweepAll()` 落实新上限）。⚠️ `tmdb.*` 已不在面板层（归元数据插件） |
-| `public/modules/emby/setup.js`（「Emby → 连接设置」页） | **两张卡**：**服务器名** / **账号管理（多账号：列表 + 弹窗新增 + 改密 + 删除）**。（原来的「播放设置」卡整张撤掉：拉流一律 302 没有可选项、线路过滤搬到「聚合设置 → 聚合参数」。）**聚合地址不显示**（就是本面板自己，没得填）；TMDB 与缓存设置已搬到面板设置页 |
+| `public/modules/emby/instances.js`（「Emby → 实例」页） | 实例列表：每行是名称 / 端口徽章 / **首页插件行内下拉**（点一下就 PATCH）/ 运行状态点（端口被占时红点 + 原因）/ 连接地址（一键复制）/ 编辑 / 删除（默认实例不给删）。编辑弹窗含名称、端口、首页插件、启用；**服务器名就是这个实例的 `name`** |
+| `public/modules/emby/accounts.js`（「Emby → 账号」页） | 顶部**实例选择器**，下方账号增删改只作用于所选实例（端点 `/api/emby/instances/{iid}/accounts`）；每行带上该实例的 `UserId`（`md5(serverId\|用户名)`，服务端现算），便于对着客户端日志排查 |
 | `public/modules/panel/settings.js`（「面板设置」页） | 备份还原 / **缓存设置**（用量 + 上限 + 清空，端点 `GET\|DELETE /api/panel/cache`）/ **站点测速**（开关与间隔）/ 面板密码。⚠️ **TMDB 设置已不在这一页**（归元数据插件自己的设置页：「插件」→ tmdb → 「设置」） |
-| `data/settings/emby.json` | `account`（**只剩空壳**，账号已搬到 sqlite）、`serverId`、`imageKey`（`tmdb.*` 与 `cache.*` 搬到 `panel.json`；`play.filter` 搬到 `agg.json` 的 `lineFilter`，盘上那两个老键既不读也不校验） |
+| `data/settings/emby.json` | `account`（**只剩空壳**，账号已搬到 sqlite）。（`serverId` / `imageKey` **已迁出**到 `data/emby/instances.json`，首次加载时从旧值搬一次；`tmdb.*` 与 `cache.*` 搬到 `panel.json`；`play.filter` 搬到 `agg.json` 的 `lineFilter`，盘上那几个老键既不读也不校验） |
 | `data/settings/panel.json` | 面板监听参数、`logMax`、`modules`、`speedTest*`、**`cache.{imageTtlDays,imageMaxMB,detailTtlMinutes,detailNeverExpire,detailMaxMB}`**。⚠️ `tmdb.*` 已不在这里（归元数据插件自己的 `data/settings.json`）；盘上留着老键也没人读 |
 | `data/emby/emby.db` | 客户端登录账号表（内置 sqlite；密码为 scrypt 哈希）。**「配置备份/还原」不包含它**（`backup.js` 只打包 `settings/`）—— 还原备份后账号要重建 |
 

@@ -19,6 +19,7 @@
  * （见 `rowsOf` 的过期判据与 `warmHome()`）。改行参数后最迟几秒内反映到「媒体库」上。
  */
 const host = require('../../plugin/host');
+const instance = require('../instance');
 
 /** 一个库最多放这么多条目（与改造前一致） */
 const MAX_ITEMS = 200;
@@ -26,9 +27,43 @@ const MAX_ITEMS = 200;
 /** 快照的保鲜期：过了就在后台刷一次（不阻塞同步调用方） */
 const SNAPSHOT_STALE_MS = 5000;
 
-/** `home` 类型插件 = 首页插件；没在跑（崩了 / 还没起来）也照样算进来，它会如实报状态 */
-function homePlugins() {
+/** 所有 `home` 类型且启用中的插件；没在跑（崩了 / 还没起来）也照样算进来，它会如实报状态 */
+function allHomePlugins() {
   return host.states().filter((x) => x.type === 'home' && x.enabled);
+}
+
+/**
+ * **当前 Emby 实例选中的那个首页插件** —— 它决定这个实例的媒体库长什么样。
+ *
+ * 实例级"选一个首页插件"（见 `instance.js`）：没选就给空数组，客户端看到的是**空库列表**
+ * （面板「Emby → 实例」里会红字提示"未选择首页"，不会静默地把别人的库塞过去）。
+ * 选中的插件被停用 / 卸掉了，同样回空 —— 如实反映"这个实例现在没有首页"。
+ */
+function homePlugins() {
+  const cur = instance.current();
+  const want = String((cur && cur.homePlugin) || '').trim();
+  if (!want) return [];
+  return allHomePlugins().filter((x) => x.id === want);
+}
+
+/**
+ * 可选的首页插件清单 —— 面板「Emby → 实例」里那个下拉用。
+ *
+ * 列的是**所有** `home` 类型插件（含未启用的）：没启用也要如实出现在下拉里，
+ * 否则会出现"下拉里看不见、盘上却存着"这种对不上的状态（该实例的库为空但看不出原因）。
+ * `rowCount` 只在启用时读快照 —— 未启用本来就取不到行，回 0 而不是编一个数。
+ */
+function pluginChoices() {
+  return host
+    .states()
+    .filter((x) => x.type === 'home' && x.id)
+    .map((x) => ({
+      id: x.id,
+      name: x.name || x.id,
+      enabled: !!x.enabled,
+      running: x.status === 'running',
+      rowCount: x.enabled ? rowsOf(x.id).length : 0,
+    }));
 }
 
 /* ------------------------------------------------------- 行清单快照 */
@@ -64,17 +99,19 @@ function rowsOf(pluginId) {
 }
 
 /**
- * 开局预热：面板启动时（插件起来之后）把各首页插件的行清单拉一遍，
- * 免得第一发 `Views` 拿到空。失败不挡启动 —— 反正过期会自己重试。
+ * 开局预热：面板启动时（插件起来之后）把**所有启用中**首页插件的行清单拉一遍，
+ * 免得第一发 `Views` 拿到空。**预热的是全部插件、不是只有被选中的那个** ——
+ * 这样在面板上切换首页是瞬时的，不用等上游。
+ * 失败不挡启动 —— 反正过期会自己重试。
  */
 async function warmHome() {
-  const list = homePlugins();
+  const list = allHomePlugins();
   for (const st of list) {
     // eslint-disable-next-line no-await-in-loop
     await refreshRows(st.id);
   }
   /* 刚起来那一下插件可能还没就绪：等一小会儿再补一次（只补这次失败的） */
-  const missed = homePlugins().filter((st) => !snapshots.has(st.id));
+  const missed = allHomePlugins().filter((st) => !snapshots.has(st.id));
   if (missed.length) {
     await new Promise((r) => setTimeout(r, 800));
     for (const st of missed) {
@@ -82,8 +119,8 @@ async function warmHome() {
       await refreshRows(st.id);
     }
   }
-  const total = homePlugins().reduce((n, st) => n + (snapshots.get(st.id) || { rows: [] }).rows.length, 0);
-  if (list.length) console.log(`  ✔ 首页插件：${list.length} 个启用中，共 ${total} 行（每个行 = 客户端上的一个媒体库）`);
+  const total = allHomePlugins().reduce((n, st) => n + (snapshots.get(st.id) || { rows: [] }).rows.length, 0);
+  if (list.length) console.log(`  ✔ 首页插件：${list.length} 个启用中，共 ${total} 行（每个实例选一个插件，其行 = 该实例客户端上的媒体库）`);
   return { plugins: list.length, rows: total };
 }
 
@@ -340,4 +377,5 @@ module.exports = {
   rowByFeed,
   listByQuery,
   warmHome,
+  pluginChoices,
 };

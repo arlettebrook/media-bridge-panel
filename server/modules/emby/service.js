@@ -23,24 +23,23 @@
  * 改密或删账号会作废该账号的所有 token。豁免：握手、登录、面板自用端点、501 通配（图片端点将来也要豁免）。
  */
 const crypto = require('crypto');
-const settings = require('../../core/settings');
 const tmdb = require('./tmdb');
 const agg = require('../agg/api'); // 聚合层的进程内调用面（原来是打自己的 /api/agg/*，会撞面板门禁 → 见那个文件顶部）
 const BRAND = require('../../core/branding'); // 默认服务器名（客户端「服务器列表」里显示的那个）
 const home = require('./home');
 const db = require('./db');
 const cache = require('./cache');
+const instance = require('./instance'); // 当前请求属于哪个 Emby 实例（见 instance.js）
 
 /** 兼容目标版本：客户端按 Emby 的版本号判断能力，这里报一个常见的 Emby 4.8 */
 const EMBY_VERSION = '4.8.0.0';
 
-/** 服务器 Id：首次使用时生成一次并落到设置里，保证客户端缓存的服务器身份稳定 */
+/**
+ * 服务器 Id：**每个 Emby 实例各一个**，首次用到时生成一次并落到实例清单里，
+ * 保证客户端缓存的服务器身份稳定（见 instance.identityOf）。
+ */
 function serverId() {
-  const s = settings.read('emby');
-  if (s.serverId) return s.serverId;
-  const id = crypto.randomBytes(8).toString('hex');
-  settings.patch('emby', { serverId: id });
-  return id;
+  return instance.identityOf().serverId;
 }
 
 /**
@@ -137,13 +136,13 @@ function buildUser(username, account) {
 /**
  * 服务器名 —— 客户端「服务器列表」里显示的就是它。
  *
- * 默认 `BRAND.embyServerName`（core/branding.js），可在面板「Emby → 连接设置」里改（存 `settings/emby.json` 的 `serverName`）。
+ * 默认 `BRAND.embyServerName`（core/branding.js），**每个实例一个名字**，在面板「Emby → 实例」
+ * 里改（存实例清单 `data/emby/instances.json` 的 `name`，见 instance.js）。
  * **取不到 / 空 / 全空白就回默认值**：客户端拿空 ServerName 会显示成空白条目，比显示默认名更糟。
- * 长度上限在模块设置的 `validate` 里管（不在这一层兜）。
+ * 长度上限在实例的 `validate` 里管（不在这一层兜）。
  */
 function serverName() {
-  const s = settings.read('emby') || {};
-  return String(s.serverName || '').trim() || BRAND.embyServerName;
+  return instance.identityOf().serverName;
 }
 
 function publicInfo(req) {
@@ -490,8 +489,8 @@ function playableOf(rawItemId) {
   const p = tmdb.parseItemId(String(rawItemId || '').trim());
   if (!p || !isPlayableId(p)) return null;
   return {
-    itemId: tmdb.itemId(p.type, p.tmdbId, p.season, p.episode),
-    seriesId: p.season !== null ? tmdb.itemId('tv', p.tmdbId) : null,
+    itemId: tmdb.itemId(p.domain, p.type, p.tmdbId, p.season, p.episode),
+    seriesId: p.season !== null ? tmdb.itemId(p.domain, 'tv', p.tmdbId) : null,
     season: p.season,
     episode: p.episode,
   };
@@ -600,13 +599,15 @@ function setPlayed(req, requestedUserId, rawItemId, played) {
 async function progressItem(r, accountId) {
   const p = tmdb.parseItemId(r.item_id);
   if (!p) return null;
+  const domain = p.domain;
   const prog = progressOf(accountId, r.item_id);
 
   if (p.type === 'movie') {
-    const look = await tmdb.lookup({ type: 'movie', tmdbId: p.tmdbId });
+    const look = await tmdb.lookup({ type: 'movie', tmdbId: p.tmdbId, domain });
     if (!look.ok) return null;
     const item = leanItemDto({
       type: 'movie',
+      domain,
       tmdbId: p.tmdbId,
       parentId: defaultLibraryId(),
       title: look.item.title,
@@ -622,14 +623,14 @@ async function progressItem(r, accountId) {
   }
 
   if (p.season === null || p.episode === null) return null; // 剧（`_tv`）本身没有进度，见 applyUserData 的说明
-  const seasonLook = await tmdb.lookupSeason({ tmdbId: p.tmdbId, season: p.season });
+  const seasonLook = await tmdb.lookupSeason({ tmdbId: p.tmdbId, season: p.season, domain });
   if (!seasonLook.ok) return null;
   const e = (seasonLook.item.episodes || []).find((x) => Number(x.episodeNumber) === Number(p.episode));
   if (!e) return null; // 这一季里没有这一集（源与 TMDB 对不上）→ 不列，不编
 
-  const showLook = await tmdb.lookup({ type: 'tv', tmdbId: p.tmdbId }); // 只为剧名（缓存里通常已有）
+  const showLook = await tmdb.lookup({ type: 'tv', tmdbId: p.tmdbId, domain }); // 只为剧名（缓存里通常已有）
   const item = baseItem({
-    id: tmdb.itemId('tv', p.tmdbId, p.season, p.episode),
+    id: tmdb.itemId(domain, 'tv', p.tmdbId, p.season, p.episode),
     parentId: defaultLibraryId(),
     name: e.name || `第 ${p.episode} 集`,
     type: 'Episode',
@@ -637,15 +638,15 @@ async function progressItem(r, accountId) {
     premiereDate: e.premiereDate,
     overview: e.overview,
     communityRating: e.rating,
-    providerIds: { Tmdb: String(p.tmdbId) },
-    posterUrl: tmdb.imageUrlOf('w300', e.stillPath),
+    providerIds: { [tmdb.providerIdKey(domain)]: String(p.tmdbId) },
+    posterUrl: tmdb.imageUrlOf(domain, 'w300', e.stillPath),
   });
   item.IsFolder = false;
   item.IndexNumber = e.episodeNumber;
   item.ParentIndexNumber = p.season;
-  item.SeriesId = tmdb.itemId('tv', p.tmdbId);
+  item.SeriesId = tmdb.itemId(domain, 'tv', p.tmdbId);
   if (showLook.ok) item.SeriesName = showLook.item.title || '';
-  item.SeasonId = tmdb.itemId('tv', p.tmdbId, p.season);
+  item.SeasonId = tmdb.itemId(domain, 'tv', p.tmdbId, p.season);
   item.SeasonName = seasonLook.item.name || `第 ${p.season} 季`;
   if (e.runtimeMinutes) item.RunTimeTicks = e.runtimeMinutes * 600000000;
   if (e.stillPath) item.PrimaryImageAspectRatio = 1.7777778;
@@ -937,6 +938,9 @@ function searchTypesOf(include) {
 function searchRowDto(row, type) {
   return leanItemDto({
     type,
+    /* 行里带的是**它属于哪个域**（`tmdb.js` 的 `search()` 逐域遍历时打上的）——
+     * 条目 Id 与 `ProviderIds` 的键都按它取（见 `leanItemDto`）。 */
+    domain: row.domain,
     tmdbId: row.entryId,
     parentId: defaultLibraryId(),
     title: row.title || '',
@@ -1028,6 +1032,7 @@ async function getNextUp(requestedId, req, query) {
 async function nextEpisodeItem(row, accountId) {
   const p = tmdb.parseItemId(row.item_id);
   if (!p || p.season === null || p.episode === null) return null;
+  const domain = p.domain;
 
   let season = p.season;
   let episode = p.episode;
@@ -1041,13 +1046,13 @@ async function nextEpisodeItem(row, accountId) {
     let fellBack = false;
     let found = null;
     for (let i = 0; i < 50 && !found; i += 1) {
-      if (!(await episodeExists(p.tmdbId, cur.season, cur.episode))) {
+      if (!(await episodeExists(domain, p.tmdbId, cur.season, cur.episode))) {
         if (fellBack) break; // 下一季第 1 集也不存在 → 放弃
         fellBack = true;
         cur = { season: p.season + 1, episode: 1 };
         continue;
       }
-      const id = tmdb.itemId('tv', p.tmdbId, cur.season, cur.episode);
+      const id = tmdb.itemId(domain, 'tv', p.tmdbId, cur.season, cur.episode);
       if (Number((db.getPlayback(accountId, id) || {}).hidden) === 1) cur = { season: cur.season, episode: cur.episode + 1 };
       else found = cur;
     }
@@ -1056,7 +1061,7 @@ async function nextEpisodeItem(row, accountId) {
     episode = found.episode;
   }
 
-  const nextId = tmdb.itemId('tv', p.tmdbId, season, episode);
+  const nextId = tmdb.itemId(domain, 'tv', p.tmdbId, season, episode);
   const next = db.getPlayback(accountId, nextId);
   if (next) return progressItem(next, accountId);
   /* 下一集还没看过 → 库里没有它的行。造一条**只用于组装、不写库**的临时行，
@@ -1068,8 +1073,8 @@ async function nextEpisodeItem(row, accountId) {
 }
 
 /** TMDB 的季数据里有没有这一集（`NextUp` 只回真实存在的下一集） */
-async function episodeExists(tmdbId, season, episode) {
-  const look = await tmdb.lookupSeason({ tmdbId, season });
+async function episodeExists(domain, tmdbId, season, episode) {
+  const look = await tmdb.lookupSeason({ tmdbId, season, domain });
   if (!look.ok) return false;
   return (look.item.episodes || []).some((e) => Number(e.episodeNumber) === Number(episode));
 }
@@ -1489,9 +1494,10 @@ async function getSeasons(showId, requestedId) {
     return { status: 404, body: { error: '没有这个剧' }, log: `Id 不是剧 → 404：${showId}` };
   }
   const tmdbId = parsed.tmdbId;
-  const showKey = tmdb.itemId('tv', tmdbId);
+  const domain = parsed.domain;
+  const showKey = tmdb.itemId(domain, 'tv', tmdbId);
 
-  const look = await tmdb.lookup({ type: 'tv', tmdbId, withSeasons: true });
+  const look = await tmdb.lookup({ type: 'tv', tmdbId, withSeasons: true, domain });
   if (!look.ok) return tmdbFailure(look.error, `tv/${tmdbId}`);
 
   const show = look.item;
@@ -1499,15 +1505,15 @@ async function getSeasons(showId, requestedId) {
     .filter((s) => Number.isFinite(s.seasonNumber) && s.seasonNumber > 0)
     .map((s) => {
       const item = baseItem({
-        id: tmdb.itemId('tv', tmdbId, s.seasonNumber),
+        id: tmdb.itemId(domain, 'tv', tmdbId, s.seasonNumber),
         name: s.name || `第 ${s.seasonNumber} 季`,
         type: 'Season',
         year: s.year,
         premiereDate: s.premiereDate,
         overview: s.overview,
         communityRating: s.rating,
-        providerIds: { Tmdb: String(tmdbId) },
-        posterUrl: tmdb.imageUrlOf('w500', s.posterPath || show.posterPath), // 季海报缺失时退回剧海报，免得客户端出白块
+        providerIds: { [tmdb.providerIdKey(domain)]: String(tmdbId) },
+        posterUrl: tmdb.imageUrlOf(domain, 'w500', s.posterPath || show.posterPath), // 季海报缺失时退回剧海报，免得客户端出白块
       });
       item.Genres = []; // TMDB 的季没有 genres，空是如实，不套剧的
       item.ChildCount = s.episodeCount;
@@ -1572,11 +1578,11 @@ async function getEpisodes(showId, requestedId, seasonId) {
     if (season.tmdbId !== show.tmdbId) return empty(`SeasonId 不是这个剧的季 → 空：${seasonId}`);
     n = season.season;
   }
-  const look = await tmdb.lookupSeason({ tmdbId: show.tmdbId, season: n });
+  const look = await tmdb.lookupSeason({ tmdbId: show.tmdbId, season: n, domain: show.domain });
   if (!look.ok) return tmdbFailure(look.error, `tv/${show.tmdbId} S${n}`);
 
-  const showKey = tmdb.itemId('tv', show.tmdbId);
-  const seasonKey = tmdb.itemId('tv', show.tmdbId, n);
+  const showKey = tmdb.itemId(show.domain, 'tv', show.tmdbId);
+  const seasonKey = tmdb.itemId(show.domain, 'tv', show.tmdbId, n);
   const seasonName = look.item.name || `第 ${n} 季`;
 
   /* 不填 SeriesName：那要再打一次剧接口，而客户端是在剧/季页里发的这条请求，本来就知道剧名 */
@@ -1584,15 +1590,15 @@ async function getEpisodes(showId, requestedId, seasonId) {
     .filter((e) => Number.isFinite(e.episodeNumber))
     .map((e) => {
       const item = baseItem({
-        id: tmdb.itemId('tv', show.tmdbId, n, e.episodeNumber),
+        id: tmdb.itemId(show.domain, 'tv', show.tmdbId, n, e.episodeNumber),
         name: e.name || `第 ${e.episodeNumber} 集`,
         type: 'Episode',
         year: e.year,
         premiereDate: e.premiereDate,
         overview: e.overview,
         communityRating: e.rating,
-        providerIds: { Tmdb: String(show.tmdbId) },
-        posterUrl: tmdb.imageUrlOf('w300', e.stillPath), // 集的 Primary 图是剧照（still_path），不是海报
+        providerIds: { [tmdb.providerIdKey(show.domain)]: String(show.tmdbId) },
+        posterUrl: tmdb.imageUrlOf(show.domain, 'w300', e.stillPath), // 集的 Primary 图是剧照（still_path），不是海报
       });
       item.IsFolder = false; // 集不是容器（baseItem 默认 true，这里必须改掉）
       item.IndexNumber = e.episodeNumber;
@@ -1639,7 +1645,7 @@ function statusOf(s) {
  *   · `ScreenshotImageTags`：TMDB 没有"截图"这个独立类别，它那些就是背景图，给了等于重复。
  *   · 合集（Boxset）：Emby 里是另一类条目，要单独建，不是塞个字段就行。
  */
-function applyRich(item, got) {
+function applyRich(item, got, domain) {
   if (got.overview) item.Overview = got.overview; // rich 的简介更长，覆盖列表用的短版
   if (got.certification) item.OfficialRating = got.certification; // PG-13 / TV-MA 那个徽章
   if (got.runtimeMinutes > 0) item.RunTimeTicks = got.runtimeMinutes * 600000000; // 1 分钟 = 6e8 ticks
@@ -1677,7 +1683,7 @@ function applyRich(item, got) {
     const one = Object.assign({ Name: p.name }, extra);
     if (p.tmdbPersonId) {
       one.Id = String(p.tmdbPersonId);
-      const avatar = p.profilePath ? tagAndRemember(one.Id, 'Primary', 0, tmdb.imageUrlOf('w185', p.profilePath)) : '';
+      const avatar = p.profilePath ? tagAndRemember(one.Id, 'Primary', 0, tmdb.imageUrlOf(domain, 'w185', p.profilePath)) : '';
       if (avatar) one.PrimaryImageTag = avatar;
     }
     people.push(one);
@@ -1705,7 +1711,9 @@ function applyRich(item, got) {
   if (got.externalIds && got.externalIds.imdb) {
     urls.push({ Name: 'IMDb', Url: `https://www.imdb.com/title/${got.externalIds.imdb}` });
   }
-  if (got.tmdbId) {
+  /* 只给默认域（tmdb）的条目拼这一条：别的域（如 MissAV）的 `got.tmdbId` 装的是**它自己的编号**
+   * （如 `ssis-001`），拿它去拼 themoviedb.org 的链接是一条必 404 的假链。 */
+  if (got.tmdbId && domain === tmdb.DEFAULT_DOMAIN) {
     urls.push({ Name: 'TheMovieDb', Url: `https://www.themoviedb.org/${isMovie ? 'movie' : 'tv'}/${got.tmdbId}` });
   }
   if (!isMovie && got.externalIds && got.externalIds.tvdb) {
@@ -1729,8 +1737,12 @@ function applyRich(item, got) {
  *   · 首页模块给的列表项走 `homeItemDto()`（同样形状，只是数据来自插件）。
  */
 function leanItemDto(r) {
+  /* 域决定三样：条目 Id 的前缀、`ProviderIds` 的键、图片基地址。
+   * 不给就用默认域（tmdb 那条老路：相似推荐、按外部 id 搜到的条目都走它）。 */
+  const domain = r.domain || tmdb.DEFAULT_DOMAIN;
+  const entryId = r.entryId === undefined || r.entryId === null ? r.tmdbId : r.entryId;
   const item = baseItem({
-    id: tmdb.itemId(r.type, r.tmdbId),
+    id: tmdb.itemId(domain, r.type, entryId),
     /* 搜索命中的那一条没有库上下文 → 由调用方给兜底库（`defaultLibraryId()`）；相似推荐不给 */
     parentId: r.parentId,
     name: r.title,
@@ -1738,9 +1750,9 @@ function leanItemDto(r) {
     year: r.year,
     overview: r.overview,
     communityRating: r.communityRating,
-    providerIds: { Tmdb: String(r.tmdbId) },
-    posterUrl: tmdb.imageUrlOf('w500', r.posterPath),
-    backdropUrl: tmdb.imageUrlOf('w780', r.backdropPath),
+    providerIds: { [tmdb.providerIdKey(domain)]: String(entryId) },
+    posterUrl: tmdb.imageUrlOf(domain, 'w500', r.posterPath),
+    backdropUrl: tmdb.imageUrlOf(domain, 'w780', r.backdropPath),
   });
   item.IsFolder = r.type === 'tv';
   /* 有就带上（相似推荐那份没有这几个键 → 不填，输出与以前一致） */
@@ -1761,13 +1773,13 @@ function leanItemDto(r) {
  *
  * `rich: true` —— 详情页要的那一批（分级/时长/标语/演职/公司/关键词/预告/图集/相似）**一次拿回**。
  */
-async function tmdbItemDto(type, tmdbId) {
-  const look = await tmdb.lookup({ type, tmdbId, rich: true });
+async function tmdbItemDto(type, tmdbId, domain = tmdb.DEFAULT_DOMAIN) {
+  const look = await tmdb.lookup({ type, tmdbId, rich: true, domain });
   if (!look.ok) return { ok: false, error: look.error };
 
   const got = look.item;
   const item = baseItem({
-    id: tmdb.itemId(type, tmdbId),
+    id: tmdb.itemId(domain, type, tmdbId),
     /* 详情/相似没有库上下文 → 用兜底库（见 defaultLibraryId）。列表项另有准确值。 */
     parentId: defaultLibraryId(),
     name: got.title,
@@ -1776,11 +1788,11 @@ async function tmdbItemDto(type, tmdbId) {
     premiereDate: got.premiereDate,
     overview: got.overview,
     communityRating: got.communityRating,
-    providerIds: { Tmdb: String(tmdbId) },
-    posterUrl: tmdb.imageUrlOf('w500', got.posterPath),
-    backdropUrl: tmdb.imageUrlOf('w780', got.backdropPath),
-    backdropUrls: (got.backdropPaths || []).map((p) => tmdb.imageUrlOf('w780', p)),
-    logoUrl: tmdb.imageUrlOf('w500', got.logoPath),
+    providerIds: { [tmdb.providerIdKey(domain)]: String(tmdbId) },
+    posterUrl: tmdb.imageUrlOf(domain, 'w500', got.posterPath),
+    backdropUrl: tmdb.imageUrlOf(domain, 'w780', got.backdropPath),
+    backdropUrls: (got.backdropPaths || []).map((p) => tmdb.imageUrlOf(domain, 'w780', p)),
+    logoUrl: tmdb.imageUrlOf(domain, 'w500', got.logoPath),
   });
   item.OriginalTitle = got.originalTitle;
   item.Genres = got.genres;
@@ -1788,7 +1800,7 @@ async function tmdbItemDto(type, tmdbId) {
   /* 剧是容器（能进季集）→ true；**电影不是** → false。`baseItem()` 默认给 true，
    * 电影必须显式改掉，否则客户端可能当目录去浏览而不是打开详情。 */
   item.IsFolder = type === 'tv';
-  applyRich(item, got);
+  applyRich(item, got, domain);
   /* 交给调用方的"搜源用名字"：主标题没中文时已在 lookup 里回退成中文别名（见 emby/tmdb.js） */
   return { ok: true, item, searchTitle: got.searchTitle || got.title };
 }
@@ -1810,10 +1822,11 @@ async function getSimilar(itemId, requestedId, limit) {
   const p = tmdb.parseItemId(itemId);
   if (!p) return { status: 404, body: { error: '没有这个条目' }, log: `Id 认不出 → 404：${itemId}` };
 
-  const look = await tmdb.lookup({ type: p.type, tmdbId: p.tmdbId, rich: true });
+  const look = await tmdb.lookup({ type: p.type, tmdbId: p.tmdbId, rich: true, domain: p.domain });
   if (!look.ok) return tmdbFailure(look.error, `${p.type}/${p.tmdbId}`);
 
-  const all = (look.item.recommendations || []).map(leanItemDto);
+  /* 相似推荐是**同一个域**里的条目 → 把域带进每一行（推荐项自己没有域字段）。 */
+  const all = (look.item.recommendations || []).map((r) => leanItemDto(Object.assign({}, r, { domain: p.domain })));
   const n = Number(limit) > 0 ? Number(limit) : all.length;
   const items = all.slice(0, n);
   return {
@@ -1851,9 +1864,9 @@ async function getItem(itemId, requestedId, host = '') {
   let year = '';
 
   if (p.season !== null) {
-    const showKey = tmdb.itemId('tv', p.tmdbId);
+    const showKey = tmdb.itemId(p.domain, 'tv', p.tmdbId);
     if (p.episode !== null) {
-      const out = await getEpisodes(showKey, requestedId, tmdb.itemId('tv', p.tmdbId, p.season));
+      const out = await getEpisodes(showKey, requestedId, tmdb.itemId(p.domain, 'tv', p.tmdbId, p.season));
       if (out.status !== 200) return out;
       found = (out.body.Items || []).find((i) => i.Id === itemId);
     } else {
@@ -1865,7 +1878,7 @@ async function getItem(itemId, requestedId, host = '') {
      * ⚠️ 搜源用的是 `searchTitle`（主标题没中文时回退中文别名），**不是** `title`：
      * 客户端看到的仍是被 TMDB 标成主标题的那个名字，但拿它去源里搜会一条都对不上
      * （见 emby/tmdb.js 的 searchTitleOf）。 */
-    const show = await tmdb.lookup({ type: 'tv', tmdbId: p.tmdbId });
+    const show = await tmdb.lookup({ type: 'tv', tmdbId: p.tmdbId, domain: p.domain });
     if (!show.ok) return tmdbFailure(show.error, `tv/${p.tmdbId}`);
     name = show.item.searchTitle || show.item.title;
     year = show.item.year;
@@ -1875,7 +1888,7 @@ async function getItem(itemId, requestedId, host = '') {
      * 这一环就是「客户端点条目 → TMDB 反查显示资源」里的"反查"（见指南「五」）。
      * ⚠️ 与检索那条的关系：`Items?AnyProviderIdEquals=tmdb.{id}` 是**反向**的一步
      * （客户端只有 tmdb 号 → 问本面板要 Id），最终都会走到这里。 */
-    const look = await tmdbItemDto(p.type, p.tmdbId);
+    const look = await tmdbItemDto(p.type, p.tmdbId, p.domain);
     if (!look.ok) return tmdbFailure(look.error, `${p.type}/${p.tmdbId}`);
     found = look.item;
     /* 同上面那条：搜源用 `searchTitle`（可能回退成中文别名），显示名仍旧是 `found.Name` */
@@ -2808,15 +2821,11 @@ const ZERO_STAMP = '0001-01-01T00:00:00.0000000Z';
  * **为什么要签名**：图片端点**必须豁免 token**（实测图片请求的凭证携带不统一，同批 8 条里 3 条啥都不带），
  * 那它就是一个"面板代为取任意 URL"的接口 —— 不签名等于把面板变成局域网/Tailscale 上的**开放代理（SSRF）**。
  * 签名绑 `Id|URL`：tag 既不能挪到别的条目上用，也造不出新的 URL。
- * 密钥 `imageKey` 首次用到时随机生成、落在 `data/settings/emby.json`（**不随任何 DTO 外发**）。
+ * 密钥 `imageKey` **每个实例各一个**，首次用到时随机生成、落在实例清单（见 instance.identityOf，
+ * 老版本写在 `data/settings/emby.json`），**不随任何 DTO 外发**。
  */
 function imageKey() {
-  const s = settings.read('emby');
-  if (s.imageKey) return s.imageKey;
-  const key = crypto.randomBytes(32).toString('hex');
-  settings.patch('emby', { imageKey: key });
-  console.log('  ✔ emby 首次生成图片签名密钥 imageKey（已写入 settings/emby.json）');
-  return key;
+  return instance.identityOf().imageKey;
 }
 
 function imageSig(itemId, url) {

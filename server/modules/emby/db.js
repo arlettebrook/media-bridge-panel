@@ -9,12 +9,14 @@
  * 而账号是用户数据（要增删改、要哈希、以后还会挂进度与收藏）—— 两件事混在一起会互相拖累。
  *
  * 惰性开库：只有真正用到账号时才建文件，避免「设置还没定义完就碰库」的顺序耦合。
+ *
+ * **一个实例一份库**（见 `instance.js`）：账号 / 会话 / 播放进度互不相通。
+ * 这里只负责**库的形状**（建表、加列迁移）；"哪份库"由 `instance.dbOf()` 决定 ——
+ * 所以下面这些函数体一行都不用改，它们全都经由 `ensure()` 拿句柄。
  */
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 
-const { EMBY_DIR, EMBY_DB } = require('../../core/paths');
+const instance = require('./instance');
 
 const SCHEMA_VERSION = 4;
 
@@ -22,41 +24,28 @@ const SCHEMA_VERSION = 4;
  * maxmem 必须显式给（默认 32MiB），否则调大 N 会直接抛 memory limit exceeded。 */
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32, maxmem: 64 * 1024 * 1024 };
 
-let db = null;
+/* 已经跑过建表与迁移的**库句柄** —— 一个实例一份库，所以按句柄记账（不是"开过了"一个布尔） */
+const ready = new WeakSet();
 
 /**
  * 表里有没有这一列（`pragma_table_info` 查一眼）—— **加列迁移的幂等判据**。
  * 见 `open()` 里 3 → 4 那次：`CREATE TABLE IF NOT EXISTS` 对**已存在的表**不会补列。
  */
-function hasColumn(table, column) {
-  return (
-    db.prepare('SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?').get(String(table), String(column)).n > 0
-  );
+function hasColumn(d, table, column) {
+  return d.prepare('SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?').get(String(table), String(column)).n > 0;
 }
 
-/** 打开（首次会建库建表并 chmod）；老 Node 上给一句人话报错 */
+/** 打开（首次会建库建表）；老 Node 上给一句人话报错 */
 function open() {
-  if (db) return db;
-
-  let DatabaseSync;
-  try {
-    ({ DatabaseSync } = require('node:sqlite'));
-  } catch {
-    throw new Error(`本面板需要 Node ≥ 22.13 才能使用内置 sqlite（当前 ${process.version}），请升级 Node 后重启`);
-  }
-
-  fs.mkdirSync(EMBY_DIR, { recursive: true });
-  db = new DatabaseSync(EMBY_DB);
-  try {
-    fs.chmodSync(EMBY_DB, 0o600); // 含密码哈希，别让同机其它用户读
-  } catch {
-    /* 平台不支持就算了，不因此起不来 */
-  }
+  /* 「哪份库、目录不存在就建、chmod 0600」全归 `instance.dbOf()` ——
+   * 实例是"用哪份库"的唯一来源（见 instance.js），这一层只管**库的形状**。 */
+  const d = instance.dbOf(instance.current());
+  if (ready.has(d)) return d;
 
   /* journal_mode 保持默认（DELETE）：不产生 -wal/-shm，文件级拷贝/备份不会漏数据；
    * 本库写入量极小，不需要 WAL 的并发收益。 */
-  db.exec('PRAGMA busy_timeout = 5000;');
-  db.exec(`
+  d.exec('PRAGMA busy_timeout = 5000;');
+  d.exec(`
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS accounts (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,21 +95,16 @@ function open() {
   /* 3 → 4：`playback` 加 `hidden`（客户端 `POST …/HideFromResume`）。
    * ⚠️ 老库的表**已经建过**，上面那句 `CREATE TABLE IF NOT EXISTS` 不会补列 —— 必须显式 ALTER。
    * 幂等：列已在就跳过（每次开库都会走到这里，重复 ALTER 会直接报错）。 */
-  if (!hasColumn('playback', 'hidden')) {
-    db.exec('ALTER TABLE playback ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;');
+  if (!hasColumn(d, 'playback', 'hidden')) {
+    d.exec('ALTER TABLE playback ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;');
   }
 
-  db.prepare('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)').run('schema_version', String(SCHEMA_VERSION));
+  d.prepare('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)').run('schema_version', String(SCHEMA_VERSION));
 
-  /* 进程退出时收尾；server.js 的 shutdown 只停源，没有库钩子 */
-  process.on('exit', () => {
-    try {
-      db.close();
-    } catch {
-      /* ignore */
-    }
-  });
-  return db;
+  /* 记账用**句柄**而不是"开过了"一个布尔：一个实例一份库，句柄跟着实例走。
+   * 收尾关库在 instance.js（进程退出时把每个句柄都关掉）。 */
+  ready.add(d);
+  return d;
 }
 
 /** 归一化用户名：登录、查重、派生 UserId 都用它，避免「登录成功但取资料 404」 */

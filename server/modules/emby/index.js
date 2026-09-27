@@ -13,10 +13,10 @@
  * `plugins/metadata/tmdb/`）；本模块只留 emby 专有的那层 DTO 与图片地址，
  * 取数经 `meta.js` 转发给插件。
  */
-const BRAND = require('../../core/branding');
 const routes = require('./routes');
 const home = require('./home');
 const meta = require('./meta');
+const listener = require('./listener');
 
 /**
  * 拉流方式（`play.mode`）**已删** —— 现在一律 302，见 service.js 的 `redirectUrl()`。
@@ -32,12 +32,11 @@ module.exports = {
 
   settings: {
     defaults: () => ({
-      /* 握手时对外自称的服务器名（`System/Info/Public` 的 `ServerName`）—— 客户端「服务器列表」里显示的就是它。
-       * 面板「Emby → 连接设置」可改；留空/全空白回落到 `BRAND.name`（见 service.serverName）。
-       * 默认名不带"面板"二字，因为它显示在客户端「服务器列表」里，位置小；
-       * 默认值取 `BRAND.embyServerName`（「媒体桥 Emby」）。 */
-      serverName: BRAND.embyServerName,
-      /* 老的单账号（明文）—— 只为兼容老备份/老前端而留的空壳：
+      /* ⚠️ 服务器名 / 服务器 Id / 图片签名密钥**都不在这里了** —— 它们现在是**实例属性**：
+       * 面板支持多个 Emby 实例（见 instance.js），每个实例各有一套握手身份，
+       * 改在「Emby → 实例」的编辑弹窗里（存 `data/emby/instances.json` 的 name / serverId / imageKey）。
+       * `settings/emby.json` 里老的同名字段只在**首次迁移**时被读一次（instance.migrate），此后不再使用。
+       * 老的单账号（明文）—— 只为兼容老备份/老前端而留的空壳：
        * 真正的账号在 data/emby/emby.db（多账号，见 db.js），首次用到库时这个空壳会被清空。 */
       account: { username: '', password: '' },
       /* ⚠️ TMDB 设置**不在这里**（也不在面板层了）：它属于**元数据插件** ——
@@ -51,25 +50,20 @@ module.exports = {
        * 盘上老的 `play.filter` 由 `server.js` 启动时搬一次到 `agg.json`（搬完这里就不认它）。 */
       servers: [],
       defaultIndex: 0,
-      serverId: '', // 首次握手时生成并落盘，保证客户端缓存的服务器身份稳定
-      /* 图片签名密钥：首次用到时随机生成（见 service.imageKey）。只在本机校验 tag 用，
-       * **不随任何 DTO 外发** —— 它把"面板代为取图"这个豁免 token 的端点钉死成不是开放代理。 */
-      imageKey: '',
+      /* ⚠️ `serverId` / `imageKey` **也搬去了实例清单**（同上）—— 一个实例一套身份，
+       * 它们由 instance.identityOf() 首次用到时生成并落盘，这里不再有对应键。 */
       /* ⚠️ 缓存设置**不在这里**了（已搬到面板层 `panel.json` 的 `cache.*`）：
        * 缓存已跨两个库（core 的 `data/cache/tmdb.db` 与这里的 `data/emby/cache.db`），
        * 而「清空缓存」与「用量显示」要一把抓两个 —— 设置跟着面板走才不会出现
        * "面板上管一半、模块里管一半"。UI 在「面板设置 → 缓存设置」。 */
     }),
-    fields: [
-      { key: 'serverName', label: '服务器名', type: 'text', placeholder: `默认 ${BRAND.embyServerName} —— 客户端「服务器列表」里显示的就是它` },
-    ],
-    /** 只校验服务器名与线路过滤，其余一律放过（validate 收到的是全量对象） */
-    validate: (o) => {
-      /* 服务器名：**禁止超长**（客户端列表里显示不下，而且这是要写进握手响应的东西）；
-       * 空 / 全空白**不算错** —— 那是"用默认名"，service.serverName 会兜住 */
-      const sn = String((o && o.serverName) || '').trim();
-      if (sn.length > 40) return `serverName 最长 40 个字符（当前 ${sn.length} 个）`;
-      /* ⚠️ `play.mode` **不再校验**（"面板代理"已去掉，该键已无意义）——
+    /* ⚠️ 这一层**没有可编辑的设置项了**：服务器名 / 服务器 Id / 图片签名密钥都是实例属性
+     * （见上），改在「Emby → 实例」页；老的单账号空壳是内部兼容字段，不给人看。 */
+    fields: [],
+    /** 没有面板侧设置项要校验（validate 收到的是全量对象）；恒回 null */
+    validate: () => {
+      /* ⚠️ 服务器名的校验**搬去了 instance.validate** —— 它是实例名，长度上限同在那里管。
+       * `play.mode` **不再校验**（"面板代理"已去掉，该键已无意义）——
        * 老配置盘上留着这个键照样能保存任意一张卡片。 */
       /* ⚠️ 线路过滤的校验**搬走了**（→ `agg/settings.js` 的 `lineFilter`）：设置跟着它的新位置走。
        * 盘上老键 `play.filter` 既不读也不校验（启动时已搬到 agg.json）。 */
@@ -93,6 +87,19 @@ module.exports = {
       console.log('  ✘ 首页插件预热失败（面板继续）：' + ((e && e.message) || e));
     }
   },
+
+  /**
+   * 每个**启用中**的实例在它自己的端口上挂一个监听（见 `listener.js`）——
+   * 客户端填 `http://<面板主机>:<实例端口>` 就能连上，不再与面板的 8099 混用。
+   *
+   * 调用时机**必须在 `warmHome()` 之后、插件起来之后**：清单首次生成时要读插件清单
+   * 挑一个首页插件（`instance.migrate`），插件没起来就挑不到。
+   * 单个实例的端口被占**不挡面板启动** —— 错误记在该实例的运行态里，面板上红字提示。
+   */
+  startListeners: () => listener.startAll(),
+  stopListeners: () => listener.stopAll(),
+  /** 增删改实例之后调：先停旧的，再按新端口 / 新启停状态起一个（见 routes.js 的实例端点） */
+  restartListener: (iid) => listener.restart(iid),
 
   routes,
 

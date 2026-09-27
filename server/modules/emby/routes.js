@@ -25,9 +25,14 @@
  *   GET  /api/emby/Items/{Id}/Images/{type}  图片（**豁免 token**；tag = `cpimg.<base64url(URL)>.<签名>`，验签不过 404；支持 `/Images/{type}/{index}`）
  *   GET  /api/emby/Items/{Id}/Similar        相似推荐（按 tmdb 坐标反查 TMDB，归 emby 层）
  *
- * 面板自用（不是 Emby 客户端协议，但同样必须注册在通配之前）：
- *   GET/POST    /api/emby/accounts       账号列表 / 新增
- *   PUT/DELETE  /api/emby/accounts/{id}  改（用户名/密码）/ 删
+ * 面板自用（不是 Emby 客户端协议，但同样必须注册在通配之前）—— **都走面板门禁**：
+ *   GET    /api/emby/instances                Emby 实例列表（含运行态与账号/会话/库数）
+ *   POST   /api/emby/instances                新增实例（端口留空则自动挑一个空闲的）
+ *   PATCH  /api/emby/instances/{iid}          改名 / 改端口 / 改首页插件 / 启停
+ *   DELETE /api/emby/instances/{iid}          删实例（连带删掉它的账号与进度；默认实例不给删）
+ *   GET    /api/emby/home-plugins             可选首页插件清单（实例编辑弹窗的下拉用）
+ *   GET/POST    /api/emby/instances/{iid}/accounts       账号列表 / 新增（**按实例**）
+ *   PUT/DELETE  /api/emby/instances/{iid}/accounts/{id}  改（用户名/密码）/ 删
  *   （TMDB 的设置与自检在**元数据插件自己的设置页**里：插件 → tmdb → 设置）
  *   （首页插件的行清单 / 参数 / token 在**首页插件自己的设置页**里：插件 → example → 设置。
  *    原先那 8 个 `/api/emby/home/**` 端点已随批次 9 删除 —— 老宿主与老管理面没了。）
@@ -53,6 +58,9 @@ const service = require('./service');
 const log = require('./log');
 const tmdb = require('./tmdb');
 const db = require('./db');
+const home = require('./home');
+const instance = require('./instance');
+const listener = require('./listener');
 
 /** 图片端点单张上限：海报/剧照正常几十 KB～1MB，超过这个数说明取到的东西不对 */
 const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
@@ -540,9 +548,117 @@ module.exports = function routes(r) {
   r.add('GET', '/api/emby/Items/:itemId/Images/:type', imagesByType);
   r.add('GET', '/api/emby/Items/:itemId/Images/:type/:index', imagesByType);
 
-  /* ---------------- 面板自用（非 Emby 客户端协议） ---------------- */
+  /* ---------------- 面板自用（非 Emby 客户端协议） ----------------
+   * 这一节里的端点**都走面板门禁**（core/auth.js 的 EMBY_PANEL_RE）：Emby 客户端不该、
+   * 也调不到它们；实例端口那一侧由 listener.js 的 PANEL_ONLY_RE 用同一份名单挡掉。
+   * ⚠️ 必须全部注册在下面那条 ANY 通配之前，否则一律 501。
+   */
 
-  /* 账号管理：Emby 客户端登录用的账号表（存 data/emby/emby.db，密码只有 scrypt 哈希）。
+  /**
+   * 把处理器跑在某个实例的上下文里（见 instance.runWith）——
+   * 账号、会话、播放进度、握手身份、首页插件全跟着这个实例走。
+   *
+   * 实例不存在就 404，**绝不回落默认实例**：面板传错 id 时要看得见错误，
+   * 而不是悄悄把改动落到别人头上（那是"删错账号"级别的坑）。
+   */
+  const withInstance = (fn) => (req, res, ctx) => {
+    const inst = instance.get(ctx.params.iid);
+    if (!inst) return sendJson(res, 404, { error: '实例不存在' });
+    return instance.runWith(inst, () => fn(req, res, ctx));
+  };
+
+  /** 面板对外的主机名：从请求的 Host 头取、去掉端口 —— 拼"连接地址"给用户复制用。
+   * 写死 127.0.0.1 对用户没用：客户端多半在另一台机器上（面板跑在容器里更是如此）。 */
+  function reqHost(req) {
+    const h = String((req.headers && req.headers.host) || '').trim();
+    if (!h) return '127.0.0.1';
+    if (h.startsWith('[')) return h.slice(0, h.indexOf(']') + 1); // IPv6 字面量
+    return h.split(':')[0];
+  }
+
+  /* ---------------- 面板自用：Emby 实例（多实例） ----------------
+   * 清单 = `data/emby/instances.json`（见 instance.js）；运行态 = listener.states()。
+   * ⚠️ 下面那几个计数**必须在实例上下文里取**：账号与会话在各自的库里，媒体库条数跟着
+   * 该实例选中的首页插件走（见 home.enabledRows）。 */
+  function describeInstance(inst, req) {
+    const st = listener.states()[inst.id] || {};
+    return {
+      ...instance.publicInstance(inst),
+      running: !!st.running,
+      error: st.error || '',
+      url: `http://${reqHost(req)}:${inst.port}`,
+      accountCount: db.countAccounts(),
+      sessionCount: db.countSessions(),
+      viewCount: home.enabledRows().length,
+    };
+  }
+
+  const described = (inst, req) => instance.runWith(inst, () => describeInstance(inst, req));
+
+  r.add('GET', '/api/emby/instances', (req, res) => {
+    const list = instance.list().map((x) => described(x, req));
+    log.logResult(req, 'Emby 实例列表', { status: 200, log: `${list.length} 个` });
+    return sendJson(res, 200, { instances: list, max: instance.MAX_INSTANCES });
+  });
+
+  /* 实例编辑弹窗那个下拉用：列**所有** home 插件（含未启用的，见 home.pluginChoices） */
+  r.add('GET', '/api/emby/home-plugins', (req, res) => {
+    const plugins = home.pluginChoices();
+    log.logResult(req, '首页插件清单', { status: 200, log: `${plugins.length} 个` });
+    return sendJson(res, 200, { plugins });
+  });
+
+  r.add('POST', '/api/emby/instances', async (req, res) => {
+    const body = (await readBody(req)) || {};
+    let inst;
+    try {
+      inst = await instance.add(body); // 端口留空则自己挑一个空闲的（见 instance.findFreePort）
+    } catch (e) {
+      console.log(`  ✘ emby 新增实例 → HTTP 400 ${(e && e.message) || e}`);
+      return sendJson(res, 400, { error: (e && e.message) || '新增实例失败' });
+    }
+    /* 当场起监听：**失败也不回错** —— 实例已经建好了，端口被占只是运行态（面板上红字提示） */
+    const up = await listener.restart(inst.id);
+    console.log(`  ✔ emby 新增实例 → HTTP 200 id=${inst.id} 端口=${inst.port}${up.ok ? '' : `（未监听：${up.error}）`}`);
+    return sendJson(res, 200, { instance: described(inst, req) });
+  });
+
+  r.add('PATCH', '/api/emby/instances/:iid', async (req, res, { params }) => {
+    const body = (await readBody(req)) || {};
+    let inst;
+    try {
+      /* 校验都在 instance.validate 里（名字长度 / 端口范围 / 不能占 8099 与托管源段 / 端口不能与别的实例重复） */
+      inst = instance.patch(params.iid, body);
+    } catch (e) {
+      console.log(`  ✘ emby 改实例 → HTTP 400 ${(e && e.message) || e}`);
+      return sendJson(res, 400, { error: (e && e.message) || '修改实例失败' });
+    }
+    if (!inst) return sendJson(res, 404, { error: '实例不存在' });
+
+    /* 端口 / 启停可能变了 —— 一律重开一次监听（restart 幂等：同端口且已在听就什么都不做） */
+    const up = await listener.restart(inst.id);
+    console.log(`  ✔ emby 改实例 → HTTP 200 id=${inst.id} 端口=${inst.port} 启用=${inst.enabled}${up.ok ? '' : `（未监听：${up.error}）`}`);
+    return sendJson(res, 200, { instance: described(inst, req) });
+  });
+
+  r.add('DELETE', '/api/emby/instances/:iid', (req, res, { params }) => {
+    /* 先停监听：否则实例文件都删了、端口上还挂着一个"属于不存在实例"的服务 */
+    listener.stop(params.iid);
+    let inst;
+    try {
+      inst = instance.remove(params.iid);
+    } catch (e) {
+      /* 默认实例不给删（见 instance.remove）—— 老数据的落点在它身上 */
+      console.log(`  ✘ emby 删实例 → HTTP 400 ${(e && e.message) || e}`);
+      return sendJson(res, 400, { error: (e && e.message) || '删除实例失败' });
+    }
+    if (!inst) return sendJson(res, 404, { error: '实例不存在' });
+    console.log(`  ✔ emby 删实例 → HTTP 200 id=${inst.id}（该实例的账号与观看进度一并删掉）`);
+    return sendJson(res, 200, { ok: true, remaining: instance.list().length });
+  });
+
+  /* ---------------- 面板自用：账号（**按实例**） ----------------
+   * 账号表在**该实例自己的库**里（`dbFile`，见 instance.js），密码只有 scrypt 哈希。
    * 入参校验 + 日志都在这里；**响应与日志绝不出现密码或哈希**（对外的形状统一走 db.publicAccount）。 */
   const ACC_NAME_MAX = 64;
   const ACC_PASS_MIN = 6;
@@ -559,39 +675,41 @@ module.exports = function routes(r) {
 
   const isUniqueErr = (e) => /UNIQUE/i.test(String((e && e.message) || ''));
 
-  r.add('GET', '/api/emby/accounts', (req, res) => {
-    const list = db.listAccounts().map(db.publicAccount);
-    log.logResult(req, '账号列表', { status: 200, log: `${list.length} 个` });
+  const listAccounts = (req, res, ctx) => {
+    /* UserId 是**算出来**的（md5(serverId|用户名)，见 service.userId），库里没这一列；
+     * 客户端日志里只出现它，页面上带上才排查得动。 */
+    const list = db.listAccounts().map((a) => ({ ...db.publicAccount(a), userId: service.userId(a.username) }));
+    log.logResult(req, `账号列表 [${ctx.params.iid}]`, { status: 200, log: `${list.length} 个` });
     return sendJson(res, 200, { accounts: list });
-  });
+  };
 
-  r.add('POST', '/api/emby/accounts', async (req, res) => {
+  const createAccount = async (req, res, ctx) => {
     const body = await readBody(req);
     const input = readNewAccount(body);
     if (input.error) {
-      console.log(`  ✘ emby 新增账号 → HTTP 400 ${input.error}`);
+      console.log(`  ✘ emby 新增账号 [${ctx.params.iid}] → HTTP 400 ${input.error}`);
       return sendJson(res, 400, { error: input.error });
     }
     if (db.findAccountByName(input.username)) {
-      console.log(`  ✘ emby 新增账号 → HTTP 409 用户名已存在：${input.username}`);
+      console.log(`  ✘ emby 新增账号 [${ctx.params.iid}] → HTTP 409 用户名已存在：${input.username}`);
       return sendJson(res, 409, { error: '用户名已存在' });
     }
     try {
       const acc = db.publicAccount(db.addAccount(input.username, input.password));
-      console.log(`  ✔ emby 新增账号 → HTTP 200 id=${acc.id} user=${acc.username}`);
+      console.log(`  ✔ emby 新增账号 [${ctx.params.iid}] → HTTP 200 id=${acc.id} user=${acc.username}`);
       return sendJson(res, 200, { account: acc });
     } catch (e) {
       /* 并发插入时唯一约束兜底（上面的查重只是给友好提示） */
       if (isUniqueErr(e)) return sendJson(res, 409, { error: '用户名已存在' });
       throw e;
     }
-  });
+  };
 
   /* 改：username / password 各自可选（只传 password 就是改密）；两个都不传 = 没内容可改 */
-  r.add('PUT', '/api/emby/accounts/:id', async (req, res, { params }) => {
+  const updateAccount = async (req, res, { params }) => {
     const exists = db.getAccount(params.id);
     if (!exists) {
-      console.log(`  ✘ emby 改账号 → HTTP 404 id=${params.id}`);
+      console.log(`  ✘ emby 改账号 [${params.iid}] → HTTP 404 id=${params.id}`);
       return sendJson(res, 404, { error: '账号不存在' });
     }
     const body = (await readBody(req)) || {};
@@ -603,7 +721,7 @@ module.exports = function routes(r) {
       if (username.length > ACC_NAME_MAX) return sendJson(res, 400, { error: `用户名最长 ${ACC_NAME_MAX} 个字符` });
       const other = db.findAccountByName(username);
       if (other && Number(other.id) !== Number(exists.id)) {
-        console.log(`  ✘ emby 改账号 → HTTP 409 用户名已存在：${username}`);
+        console.log(`  ✘ emby 改账号 [${params.iid}] → HTTP 409 用户名已存在：${username}`);
         return sendJson(res, 409, { error: '用户名已存在' });
       }
       patch.username = username;
@@ -618,24 +736,32 @@ module.exports = function routes(r) {
     try {
       const acc = db.publicAccount(db.updateAccount(params.id, patch));
       const changed = [patch.username && patch.username !== exists.username ? '用户名' : '', patch.password ? '密码' : ''].filter(Boolean).join('+');
-      console.log(`  ✔ emby 改账号 → HTTP 200 id=${acc.id} user=${acc.username} 改了：${changed}`);
+      console.log(`  ✔ emby 改账号 [${params.iid}] → HTTP 200 id=${acc.id} user=${acc.username} 改了：${changed}`);
       return sendJson(res, 200, { account: acc });
     } catch (e) {
       if (isUniqueErr(e)) return sendJson(res, 409, { error: '用户名已存在' });
       throw e;
     }
-  });
+  };
 
-  r.add('DELETE', '/api/emby/accounts/:id', (req, res, { params }) => {
+  const removeAccount = (req, res, { params }) => {
     const acc = db.getAccount(params.id);
     if (!acc || !db.removeAccount(params.id)) {
-      console.log(`  ✘ emby 删账号 → HTTP 404 id=${params.id}`);
+      console.log(`  ✘ emby 删账号 [${params.iid}] → HTTP 404 id=${params.id}`);
       return sendJson(res, 404, { error: '账号不存在' });
     }
     /* 删最后一个也允许：删光后退化成「还没有账号 → 登录 401」，面板随时能重建 */
-    console.log(`  ✔ emby 删账号 → HTTP 200 user=${acc.username} 剩余 ${db.countAccounts()} 个`);
+    console.log(`  ✔ emby 删账号 [${params.iid}] → HTTP 200 user=${acc.username} 剩余 ${db.countAccounts()} 个`);
     return sendJson(res, 200, { ok: true, remaining: db.countAccounts() });
-  });
+  };
+
+  /* 四条**都带实例维度**：面板「Emby → 账号」页顶部先选实例，下面这张表只作用于它。
+   * 注册在这里 = 在下面那条 ANY 通配之前；路径里的 `:iid` 由 withInstance 翻成实例上下文，
+   * 所以处理器里 db.* 取到的就是**那个实例自己的库**（见 instance.js 的 dbOf）。 */
+  r.add('GET', '/api/emby/instances/:iid/accounts', withInstance(listAccounts));
+  r.add('POST', '/api/emby/instances/:iid/accounts', withInstance(createAccount));
+  r.add('PUT', '/api/emby/instances/:iid/accounts/:id', withInstance(updateAccount));
+  r.add('DELETE', '/api/emby/instances/:iid/accounts/:id', withInstance(removeAccount));
 
   /* 缓存用量 / 清空**不在这一层**了：缓存跨两个库（`data/cache/detail.db` +
    * `data/emby/cache.db`），"清空"必须只有一个入口 —— 见面板层 `GET|DELETE /api/panel/cache`。 */

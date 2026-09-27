@@ -7,7 +7,7 @@
  */
 const http = require('http');
 
-const { serveStatic, sendError, notFound } = require('./server/core/http');
+const { serveStatic, sendError, sendJson, notFound } = require('./server/core/http');
 const router = require('./server/core/router');
 const settings = require('./server/core/settings');
 const registry = require('./server/core/registry');
@@ -42,6 +42,19 @@ const panel = settings.read('panel');
 const WEB_PORT = Number(process.env.WEB_PORT || panel.port || 8099);
 const WEB_HOST = process.env.WEB_HOST || panel.host || '0.0.0.0';
 
+/* 面板端口上**只放行**两类 `/api/emby/*`：
+ *   ① 面板自用端点（账号 / 实例 / 首页插件清单）—— 要登面板，名单与 core/auth.js 的 needsAuth 同一份；
+ *   ② `System/Info/Public` 这一条垫片 —— 老镜像的 HEALTHCHECK 与客户端探测打它。
+ *
+ * 其余全是 **Emby 客户端协议端点**，归**实例端口**（见 emby/listener.js）：面板端口与 Emby
+ * 不再共用一个端口（决策见 .trae/documents/emby-多实例与首页切换-plan.md），
+ * 这里在面板端口上把那些路径一律挡成 404 并指路。与 listener.js 的 PANEL_ONLY_RE 正好对称
+ * —— 那边挡面板自用端点，这边挡客户端协议端点。 */
+const EMBY_PANEL_ONLY_RE = [/^\/api\/emby\/accounts\b/, /^\/api\/emby\/instances\b/, /^\/api\/emby\/home-plugins\b/];
+function embyServedOnPanelPort(pathname) {
+  return pathname === '/api/emby/System/Info/Public' || EMBY_PANEL_ONLY_RE.some((re) => re.test(pathname));
+}
+
 /* 设置读完了，按 `panel.logMax` 落实日志缓冲条数（默认 500）。
  * `resize` 会清空缓冲但不重置序号 —— 这里紧跟着启动，丢掉的那几条本来就还没产生。 */
 logbus.resize(panel.logMax);
@@ -69,16 +82,30 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    /* 面板自有健康检查：**永远 200、不属任何模块、不进门禁**。容器的 HEALTHCHECK 打它。
+     *
+     * 为什么要单开一条：Emby 兼容端点在多实例之后归**实例端口**（见 emby/listener.js），
+     * 面板端口 8099 上那些端点是"面板自己的页面在用"，不能拿来做存活探针
+     * （实例没起来 / 首页没选都会影响它）。这条只回答"这个进程还活着吗"。
+     * ⚠️ 必须放在下面那道门禁**之前**：探针不带面板 cookie，被拦成 401 就是假告警。 */
+    if (pathname === '/api/health') return sendJson(res, 200, { ok: true });
+
     // 面板接口（各模块注册的路由；插件宿主那几条也在其中）
     if (pathname.startsWith('/api/')) {
       /* 面板门禁（单密码，见 core/auth.js）：**只拦面板自己的接口**。
-       * `/api/auth/*` 与 `/api/emby/*` 由 auth.needsAuth 直接放行 —— 前者不然登录不了；
-       * 后者是 Emby 客户端打的（它们有自己的 AccessToken 校验，拦了等于把所有客户端断掉，
-       * docker 的健康检查也走那条路）。 */
+       * `/api/auth/*` 由 auth.needsAuth 放行（不然登录不了）；`/api/emby/*` 下
+       * 只有面板自用端点要登录（名单与 auth.needsAuth 同一份），客户端协议端点
+       * 根本不在这里提供（见下面那条 404）。
+       * ⚠️ 容器健康检查**不再走这里**：它打的是上面那条 `/api/health`（本进程存活即可）。 */
       const deny = auth.guard(req, pathname);
       if (deny) {
         res.setHeader('Set-Cookie', auth.cookieHeader('', req)); // 顺手清掉过期/无效的那个 cookie
         return sendError(res, 401, deny);
+      }
+      /* 面板端口不再伺候 Emby 客户端协议（理由见上面 embyServedOnPanelPort）——
+       * 放在门禁之后、路由之前：面板自用端点照旧要登录，客户端协议端点直接指路。 */
+      if (pathname.startsWith('/api/emby/') && !embyServedOnPanelPort(pathname)) {
+        return sendError(res, 404, 'Emby 客户端协议在**实例端口**上提供，不在面板端口；连接地址见面板「Emby → 实例」页');
       }
       /* Emby 客户端打进来的请求：顺手同步一次**元数据域表** ——
        * "装/启用了元数据插件"这件事要当场生效，不该等到重启面板（认哪个前缀由插件说了算，
@@ -124,6 +151,10 @@ server.listen(WEB_PORT, WEB_HOST, async () => {
    * **必须排在插件起来之后** —— 它要调 home 插件的 `rows` 动作（见 emby/index.js warmHome）。
    * 失败不挡面板启动。 */
   if (embyModule && typeof embyModule.warmHome === 'function') await embyModule.warmHome();
+  /* Emby 实例：每个启用中的实例在**它自己的端口**上挂一个监听（见 emby/listener.js）。
+   * **必须排在上面的 warmHome 之后** —— 清单首次生成时要读插件清单挑一个首页插件（instance.migrate），
+   * 插件没起来就挑不到。单个实例的端口被占只记运行态、**不挡面板启动**（面板上红字提示）。 */
+  if (embyModule && typeof embyModule.startListeners === 'function') await embyModule.startListeners();
   /* 元数据域表：插件的清单与开关决定"哪些条目 Id 前缀认得出来"（见 core/providers.js 与 emby/meta.js）。
    * 必须排在插件起来之后；再顺手把每个域的声明拉一份（图片基地址这类值早一点就是对的）。 */
   if (embyModule && typeof embyModule.syncMetaProviders === 'function') {
@@ -153,6 +184,15 @@ process.on('unhandledRejection', (e) => {
 });
 
 async function shutdown() {
+  /* Emby 实例的监听（每个一个 http.Server）先关 —— 它们挂在同一个进程里，
+   * 不关就会在 `server.close()` 之后继续占着那些端口（见 emby/listener.js）。 */
+  if (embyModule && typeof embyModule.stopListeners === 'function') {
+    try {
+      embyModule.stopListeners();
+    } catch (e) {
+      console.error('  ✗ 停止 Emby 实例监听失败：' + e.message);
+    }
+  }
   /* 插件子进程（含源插件**自己**起的那些源实例）由**宿主**直接终止 —— 见 docs/adr/0028：
    * 宿主杀了插件，插件自己起的进程也跟着没（它的子进程挂在它下面）。
    * 插件要额外清理的东西，由它在收到停止指令时自行处理。 */
