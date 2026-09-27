@@ -222,25 +222,6 @@ async function search(domain, type, wd) {
   return v.rows || [];
 }
 
-/** 任意路径（首页插件取榜单这类）：成功回响应体本体，失败**抛** */
-async function get(domain, path, params) {
-  const r = await call(domain, 'get', { path, params: params || {} });
-  if (!r.ok) {
-    const e = new Error(r.error.message);
-    e.code = r.error.code;
-    throw e;
-  }
-  const v = r.value || {};
-  if (v.ok === false) {
-    const e = new Error((v.error && v.error.message) || '取数失败');
-    e.code = (v.error && v.error.code) || 'UPSTREAM';
-    e.status = (v.error && v.error.status) || 0;
-    e.data = v.error && v.error.data;
-    throw e;
-  }
-  return v.body;
-}
-
 /** 开机把每个开着且注册了的域的声明拉一份（图片基地址这类值早一点就是对的） */
 async function warm() {
   ensureProviders();
@@ -262,6 +243,5 @@ module.exports = {
   lookup,
   season,
   search,
-  get,
   warm,
 };

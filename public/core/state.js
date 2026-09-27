@@ -32,6 +32,6 @@ export const S = {
   plugins: null,
   /* Emby 侧：实例清单（多实例，见 server/modules/emby/instance.js）、可选首页插件（实例编辑的下拉）、
    * 以及**当前选中实例**的账号表 —— 账号是按实例分的，所以 `accounts` 必须带上是哪个实例的那一份。 */
-  emby: { instances: null, homePlugins: null, accounts: null, accountsFor: '', iid: '' },
+  emby: { instances: null, homePlugins: null, metaDomains: null, accounts: null, accountsFor: '', iid: '' },
   panel: { settings: null },
 };

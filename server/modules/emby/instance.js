@@ -49,6 +49,12 @@ const INSTANCE_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** 首页插件 id 的合法形状 —— 与 `home/index.js` 的 `PLUGIN_ID_RE` 同一套（插件 id 允许 `.`/`_`/`-`） */
 const PLUGIN_ID_RE = /^[a-z][a-z0-9._-]{1,63}$/i;
 
+/** 元数据域前缀的合法形状 —— 与 `core/providers.js` 的 `PREFIX_RE` 同一套（只允许字母数字，首字符为字母） */
+const DOMAIN_RE = /^[a-z][a-z0-9]*$/i;
+
+/** 一个实例最多能限定这么多个搜索域（域本身就少，给个上界防脏数据） */
+const MAX_META_DOMAINS = 32;
+
 const als = new AsyncLocalStorage();
 
 /** 清单的内存副本（惰性加载一次）；写盘后同步更新 */
@@ -184,6 +190,8 @@ function publicInstance(x) {
     port: x.port,
     enabled: !!x.enabled,
     homePlugin: x.homePlugin || '',
+    /* 搜索通过的域：回副本不回引用；**null = 全部**（字段缺席，老实例与未限定时的口径） */
+    metaDomains: Array.isArray(x.metaDomains) ? x.metaDomains.slice() : null,
     isDefault: x.id === DEFAULT_ID,
     createdAt: x.createdAt,
   };
@@ -191,6 +199,19 @@ function publicInstance(x) {
 
 function normName(v) {
   return String(v === undefined || v === null ? '' : v).trim();
+}
+
+/**
+ * 归一化「搜索通过的域」清单：trim → 小写 → 去重（空项与形状不合法的项丢弃，形状校验在 `validate` 里）。
+ * 统一存小写，与 `core/providers.byPrefixOf` 的大小写不敏感口径对齐。
+ */
+function normDomains(v) {
+  const out = [];
+  for (const x of Array.isArray(v) ? v : []) {
+    const d = normName(x).toLowerCase();
+    if (d && DOMAIN_RE.test(d) && !out.includes(d)) out.push(d);
+  }
+  return out;
 }
 
 /** 校验一份"要写进去的字段"；返回错误文案或 null */
@@ -212,6 +233,16 @@ function validate(o, self) {
   if (o.homePlugin !== undefined) {
     const h = normName(o.homePlugin);
     if (h && !PLUGIN_ID_RE.test(h)) return '首页插件 id 不合法';
+  }
+  /* 「搜索通过的域」：必须是数组，逐项是合法前缀。**空数组合法**（= 一个域都不搜；
+   * 字段缺席 = 全部域，所以这里只在显式传了的时候校验）。 */
+  if (o.metaDomains !== undefined) {
+    if (!Array.isArray(o.metaDomains)) return '搜索域必须是数组';
+    if (o.metaDomains.length > MAX_META_DOMAINS) return `最多只能限定 ${MAX_META_DOMAINS} 个搜索域`;
+    for (const x of o.metaDomains) {
+      const d = normName(x).toLowerCase();
+      if (d && !DOMAIN_RE.test(d)) return `搜索域不合法：${d}（只允许字母数字）`;
+    }
   }
   return null;
 }
@@ -276,6 +307,8 @@ async function add(o = {}) {
     dbFile: path.posix.join('instances', id, 'emby.db'),
     createdAt: new Date().toISOString(),
   };
+  /* 「搜索通过的域」：只有显式给了才落盘 —— 缺席 = 全部域（老实例与新实例的默认口径） */
+  if (o.metaDomains !== undefined) inst.metaDomains = normDomains(o.metaDomains);
   s.instances.push(inst);
   save();
   return inst;
@@ -292,6 +325,7 @@ function patch(iid, o = {}) {
   if (o.port !== undefined) inst.port = Number(o.port);
   if (o.enabled !== undefined) inst.enabled = !!o.enabled;
   if (o.homePlugin !== undefined) inst.homePlugin = normName(o.homePlugin);
+  if (o.metaDomains !== undefined) inst.metaDomains = normDomains(o.metaDomains);
   save();
   return inst;
 }

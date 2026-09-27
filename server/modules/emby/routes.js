@@ -28,9 +28,10 @@
  * 面板自用（不是 Emby 客户端协议，但同样必须注册在通配之前）—— **都走面板门禁**：
  *   GET    /api/emby/instances                Emby 实例列表（含运行态与账号/会话/库数）
  *   POST   /api/emby/instances                新增实例（端口留空则自动挑一个空闲的）
- *   PATCH  /api/emby/instances/{iid}          改名 / 改端口 / 改首页插件 / 启停
+ *   PATCH  /api/emby/instances/{iid}          改名 / 改端口 / 改首页插件 / 改搜索域 / 启停
  *   DELETE /api/emby/instances/{iid}          删实例（连带删掉它的账号与进度；默认实例不给删）
  *   GET    /api/emby/home-plugins             可选首页插件清单（实例编辑弹窗的下拉用）
+ *   GET    /api/emby/meta-domains             可选元数据域清单（实例编辑弹窗的多选用：这个实例的搜索走哪些域）
  *   GET/POST    /api/emby/instances/{iid}/accounts       账号列表 / 新增（**按实例**）
  *   PUT/DELETE  /api/emby/instances/{iid}/accounts/{id}  改（用户名/密码）/ 删
  *   （TMDB 的设置与自检在**元数据插件自己的设置页**里：插件 → tmdb → 设置）
@@ -60,6 +61,7 @@ const tmdb = require('./tmdb');
 const db = require('./db');
 const home = require('./home');
 const instance = require('./instance');
+const meta = require('./meta');
 const listener = require('./listener');
 
 /** 图片端点单张上限：海报/剧照正常几十 KB～1MB，超过这个数说明取到的东西不对 */
@@ -606,6 +608,14 @@ module.exports = function routes(r) {
     const plugins = home.pluginChoices();
     log.logResult(req, '首页插件清单', { status: 200, log: `${plugins.length} 个` });
     return sendJson(res, 200, { plugins });
+  });
+
+  /* 实例编辑弹窗那个多选用：列所有元数据域（含未启用的，见 meta.domains）—— 决定这个实例的搜索走哪些域 */
+  r.add('GET', '/api/emby/meta-domains', (req, res) => {
+    meta.ensureProviders();
+    const domains = meta.domains().map((d) => ({ domain: d.domain, label: d.label, enabled: d.enabled, status: d.status }));
+    log.logResult(req, '元数据域清单', { status: 200, log: `${domains.length} 个` });
+    return sendJson(res, 200, { domains });
   });
 
   r.add('POST', '/api/emby/instances', async (req, res) => {

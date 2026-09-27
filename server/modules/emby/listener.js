@@ -8,7 +8,7 @@
  *
  * 与 8099 上那一套的两点不同：
  *   ① **只伺候 Emby 客户端协议** —— 实例端口不放行面板自用端点
- *      （`/api/emby/accounts`、`/api/emby/instances`、`/api/emby/home-plugins`：
+ *      （`/api/emby/accounts`、`/api/emby/instances`、`/api/emby/home-plugins`、`/api/emby/meta-domains`：
  *      那些要登面板，见 core/auth.js 的 needsAuth，客户端没有面板 cookie）；
  *   ② 每个请求都包在 `instance.runWith(inst, …)` 里 —— 下游（service.js / db.js / home）
  *      靠这份上下文认"这是哪个实例"，账号、会话、进度、首页插件全跟着它走。
@@ -31,6 +31,7 @@ const PANEL_ONLY_RE = [
   /^\/api\/emby\/accounts\b/,
   /^\/api\/emby\/instances\b/,
   /^\/api\/emby\/home-plugins\b/,
+  /^\/api\/emby\/meta-domains\b/,
 ];
 
 /** iid → { inst, server, port, error } */

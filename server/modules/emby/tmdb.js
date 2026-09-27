@@ -21,6 +21,7 @@
  */
 const providers = require('../../core/providers');
 const meta = require('./meta');
+const instance = require('./instance');
 
 /** 没指明域时的默认域：tmdb 这条链的老调用点最多，多域的调用点一律显式传域 */
 const DEFAULT_DOMAIN = 'tmdb';
@@ -195,23 +196,34 @@ async function lookupSeason({ tmdbId, season, domain = DEFAULT_DOMAIN } = {}) {
  * 按名字搜索 —— 给 emby 的搜索端点用。
  *
  * 走每个**已装且启用**的元数据域的「搜索」动作，按域顺序拼接（这一版只有一个域）。
+ * **域还被当前实例限定**：实例上存了「搜索通过的域」（`instance.metaDomains`）时只走那些域；
+ * 字段缺席（`null`）= 全部域，空数组 = 一个都不搜（见 `instance.js`）。
  * 失败**照实抛**（调用方按类型分别 catch，一个域失败不影响别的域）。
  * 每一行都带上是哪个域的（`domain`）—— 条目 Id 将来就是按它拼的。
  * ⚠️ 行里是**归一化字段**（`entryId` / `title` / `posterPath`…），不翻成上游那套叫法：
  * 消费方（`searchRowDto`）读的就是这几个名字 —— 面板不该懂上游的字段形状。
  */
 async function search(type, name) {
+  const cur = instance.current();
+  /* 实例限定的域（小写，见 instance.normDomains）；null = 不限，即全部域 */
+  const only = cur && Array.isArray(cur.metaDomains) ? cur.metaDomains.map((d) => String(d).toLowerCase()) : null;
   const all = providers.list();
-  const on = all.filter((p) => p.enabled);
+  const pool = only ? all.filter((p) => only.includes(String(p.prefix).toLowerCase())) : all;
+  const on = pool.filter((p) => p.enabled);
   /* 一个开着的域都没有 ⇒ **如实报错，不回空列表**：客户端搜不到东西时，
    * "元数据插件没启用"与"上游确实没有这部片"是两件事，混成一样就查不下去了。 */
   if (!on.length) {
+    const labels = pool.map((p) => p.label);
     const e = new Error(
-      all.length
-        ? `元数据插件 ${all.map((p) => p.label).join('、')} 没启用（「插件」页可以打开）`
-        : '还没有装元数据插件（「插件」页可以装一个）'
+      labels.length
+        ? `元数据插件 ${labels.join('、')} 没启用（「插件」页可以打开）`
+        : only && only.length
+          ? `这个实例选定的搜索域（${only.join('、')}）都没有对应的元数据插件（「插件」页可以装/启用）`
+          : only
+            ? '这个实例没有勾选任何搜索域（客户端搜不到内容）'
+            : '还没有装元数据插件（「插件」页可以装一个）'
     );
-    e.code = all.length ? 'PLUGIN_DISABLED' : 'NO_PLUGIN';
+    e.code = labels.length ? 'PLUGIN_DISABLED' : 'NO_PLUGIN';
     throw e;
   }
   /* **电影式的域不接 `tv` 这一趟**：它声明的条目只有条目一层（`series: false`），
@@ -226,17 +238,6 @@ async function search(type, name) {
   return out;
 }
 
-/**
- * 任意路径的取数 —— 给「首页插件」的 `Catpaw.tmdb.get(api, {params})` 用。
- *
- * 与 `lookup()` / `lookupSeason()` 的区别：那两条是**固定端点 + 归一化输出**；
- * 这条是**任意路径 + 原样返回响应体**（插件自由取榜单用），不解析、不裁剪。
- * 契约：成功 → 响应体本体；失败 → **抛错**（`err.code` / `err.status` / `err.data`）。
- */
-function get(api, opts = {}) {
-  return meta.get(opts.domain || DEFAULT_DOMAIN, api, opts.params || {});
-}
-
 module.exports = {
   DEFAULT_DOMAIN,
   DEFAULT_IMAGE_BASE,
@@ -247,7 +248,6 @@ module.exports = {
   lookup,
   lookupSeason,
   search,
-  get,
   imageBase,
   imageUrlOf,
   splitImageUrl,

@@ -43,14 +43,19 @@ const WEB_PORT = Number(process.env.WEB_PORT || panel.port || 8099);
 const WEB_HOST = process.env.WEB_HOST || panel.host || '0.0.0.0';
 
 /* 面板端口上**只放行**两类 `/api/emby/*`：
- *   ① 面板自用端点（账号 / 实例 / 首页插件清单）—— 要登面板，名单与 core/auth.js 的 needsAuth 同一份；
+ *   ① 面板自用端点（账号 / 实例 / 首页插件清单 / 元数据域清单）—— 要登面板，名单与 core/auth.js 的 needsAuth 同一份；
  *   ② `System/Info/Public` 这一条垫片 —— 老镜像的 HEALTHCHECK 与客户端探测打它。
  *
  * 其余全是 **Emby 客户端协议端点**，归**实例端口**（见 emby/listener.js）：面板端口与 Emby
  * 不再共用一个端口（决策见 .trae/documents/emby-多实例与首页切换-plan.md），
  * 这里在面板端口上把那些路径一律挡成 404 并指路。与 listener.js 的 PANEL_ONLY_RE 正好对称
  * —— 那边挡面板自用端点，这边挡客户端协议端点。 */
-const EMBY_PANEL_ONLY_RE = [/^\/api\/emby\/accounts\b/, /^\/api\/emby\/instances\b/, /^\/api\/emby\/home-plugins\b/];
+const EMBY_PANEL_ONLY_RE = [
+  /^\/api\/emby\/accounts\b/,
+  /^\/api\/emby\/instances\b/,
+  /^\/api\/emby\/home-plugins\b/,
+  /^\/api\/emby\/meta-domains\b/,
+];
 function embyServedOnPanelPort(pathname) {
   return pathname === '/api/emby/System/Info/Public' || EMBY_PANEL_ONLY_RE.some((re) => re.test(pathname));
 }
