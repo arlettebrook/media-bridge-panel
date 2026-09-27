@@ -4,15 +4,15 @@
  * 两种结果显示：合并视图（renderMerged）与分站诊断（renderBySite）。
  *
  * **打分匹配**：搜索这一步就给每条结果打分（口径见 `server/modules/agg/match.js`）：
- *   · 搜索行里带**季 / 集 / 年份**（都是"要哪一部"的坐标，与关键字一样属于搜索参数）；
+ *   · 搜索行里带**电影 / 剧集**这次要的是哪种，以及**季 / 集 / 年份**（"要哪一部"的坐标，与关键字同属搜索参数）；
+ *     选剧集时季与集必填（少一个，详情那步定位不到那一集），选电影不问季集 —— 这一条与客户端那条路一致
+ *     （客户端对电影是按「每条线路的全部播放项」列的，见 docs/adr/0022）；
  *   · 每条结果上标 `命中 0.95` / `没进 0.72（为什么）`，命中的左边有一道高亮；
  *   · 「这条的版本」→ 拿 `source+site+vodId` 走快路径调 `detail`，**弹窗**显示客户端会看到什么
  *     （线路 N · 定位到这一集 M、逐条线路的定位情况）。
- *     弹窗里**逐条标出「线路过滤」与「定位」的结论**，并在没填集号时明说"没做定位"、
- *     给一个「按第 1 项重查」（电影在客户端就是按第 1 项取的）—— 早先那句"不会进客户端的版本列表"
- *     在没填集号时并不成立，会让用户误以为"拿不到版本"。
+ *     弹窗里**逐条标出「线路过滤」与「定位」的结论**。
  *
- * 布局上的取舍：**模板选择器**打头，后面跟搜索参数（关键字 / 季 / 集 / 年份）与按钮，同一行；
+ * 布局上的取舍：**模板选择器 + 电影/剧集**打头，后面跟搜索参数（关键字 / 季 / 集 / 年份）与按钮，同一行；
  * 下面一行只放「全量站点」这个调试开关
  * —— **打分与调优旋钮一概不放这里**（分数线 / 条数 / 超时 / 并发 / 线路过滤都是"这一套模板"的属性，
  * 在「聚合设置 · 模板」里改一处，见 docs/adr/0033）；**上游第几页也不放**（客户端那条路固定取第 1 页，
@@ -61,6 +61,22 @@ export async function renderAgg(v) {
     renderPage();
   });
 
+  /* ---- 电影 / 剧集：这次要的是哪种 ----
+   * 它决定两件事（都是"客户端会怎么要这部片"的形状）：
+   *   ① 必填项：**剧集必须填季与集**（客户端是按 TMDB 的季集号来要片子的，缺了定位不到那一集）；
+   *      电影不问季集 —— 客户端对电影是按「每条线路的全部播放项」列的；
+   *   ② 弹窗用哪套取法：电影走 `pick: 'items'`，剧集按季集定位（见 docs/adr/0022）。 */
+  const kind = S.aggKind === 'movie' ? 'movie' : 'tv';
+  const isMovie = kind === 'movie';
+  const kindSel = el('select', { title: '这次要的是电影还是剧集：电影不问季集，剧集必须填季与集' });
+  for (const [val, text] of [['tv', '剧集'], ['movie', '电影']]) {
+    kindSel.append(el('option', { value: val, text, selected: val === kind }));
+  }
+  kindSel.addEventListener('change', () => {
+    S.aggKind = kindSel.value;
+    renderPage();
+  });
+
   /* ---- 打分用的输入（只有季 / 集 / 年份）----
    * 分数线、最多几条、超时、并发、线路过滤**这一页都不填** —— 它们属于模板，
    * 在「聚合设置 · 模板」里改一处（读一份模板就能拿到全部调优项，见 docs/adr/0033）。
@@ -72,8 +88,8 @@ export async function renderAgg(v) {
     inp.addEventListener('input', () => (S[key] = inp.value));
     return inp;
   };
-  const seasonInput = numInput('aggSeason', '', 0, 99, '打分用：源里的集名大多是扁平集号，通常只填「集」就够', 'w-xs');
-  const episodeInput = numInput('aggEpisode', '', 0, 9999, '打分用：想让这一集"能定位到"就必须填它（客户端是按 TMDB 的季集号来要片子的）', 'w-xs');
+  const seasonInput = numInput('aggSeason', '', 0, 99, '剧集必填：客户端是按 TMDB 的季号来要片子的；源里集名的季号对不上会判「季不同」', 'w-xs');
+  const episodeInput = numInput('aggEpisode', '', 0, 9999, '剧集必填：想让这一集「能定位到」就必须填它（客户端是按 TMDB 的集号来要片子的）', 'w-xs');
   const yearInput = numInput('aggYear', '', 1900, 2100, '打分用：年份权重最低（0.1），填错也不会一票否决', 'w-xs');
 
   /**
@@ -94,6 +110,12 @@ export async function renderAgg(v) {
   async function run() {
     const wd = wdInput.value.trim();
     if (!wd) return toast('请输入关键字', true);
+    /* 剧集必须给足季与集：少了集号，详情那一步没法定位到这一集（打回来的全是"没定位到"）；
+     * 少了季号，打分就判不出"这部片对不对得上那一季"。电影不问这两个（见上面那段）。 */
+    if (!isMovie) {
+      if (num(seasonInput) === undefined) return toast('选「剧集」时要填季号', true);
+      if (num(episodeInput) === undefined) return toast('选「剧集」时要填集号', true);
+    }
     /* 源清单是「模板」页负责拉的 —— 直接打开/刷新本页时它是空的，
      * 早先这里一句"还没有源"就挡住了页面（刷新后无法搜索）。补一次就行（面板转给源插件，很快）。 */
     if (!(S.aggSources || []).length) {
@@ -125,8 +147,9 @@ export async function renderAgg(v) {
           tpl: S.aggTpl,
           wd,
           keys: keys || undefined,
-          season: num(seasonInput),
-          episode: num(episodeInput),
+          /* 电影不传季集 —— 客户端对电影也不看这两个（它们只在剧集那条路上参与打分与定位）。 */
+          season: isMovie ? undefined : num(seasonInput),
+          episode: isMovie ? undefined : num(episodeInput),
           year: num(yearInput),
           /* 分数线 / 最多几条 / 超时 / 并发都**不在这里传**：服务端按这套模板取名下的值
            * （见 server/modules/agg/service.js 的 matchOptions）。`page` 也不传 —— 服务端缺省取上游
@@ -147,17 +170,16 @@ export async function renderAgg(v) {
    * 结果**弹窗**显示 —— 而不是追加到页面最底部（追加在最底部时不易发现）。
    * 看到的形状就是 **Emby 客户端点开这条时拿到的**那份（同一条链）。
    *
-   * 季/集就取搜索行里填的那两个；**没填集号时不做定位**（弹窗里会明说，并给「按第 1 项重查」——
-   * 电影在客户端那边就是按第 1 项取的；不写清这一点，用户会看到"没定位到"而误以为没有版本）。
-   * 同时把「线路过滤」（`agg.json` 的 `lineFilter`，只匹配线路名）的结果也标出来：过滤**只作用在
+   * 取法跟着页面上选的「电影 / 剧集」走（与客户端那条路同一条）：
+   *   · 剧集：季/集就取搜索行里填的那两个，按季集定位到这一集；
+   *   · 电影：不传季集，用 `pick: 'items'`（每条线路的全部播放项 —— 客户端对电影就是这么列的）。
+   * 同时把「线路过滤」（模板的 `lineFilter`，只匹配线路名）的结果也标出来：过滤**只作用在
    * 客户端那侧的版本列表**，弹窗给的是原始线路 —— 所以必须标出来，否则看着像"过滤没生效"。
    */
-  async function showItemVersions(m, se, ep, pick) {
-    const useSeason = se === undefined ? num(seasonInput) : se;
-    const useEpisode = ep === undefined ? num(episodeInput) : ep;
-    /* `pick = 'items'` = **电影取法**（每条线路列出全部播放项）—— 客户端对电影走的就是这条，
-     * 弹窗要看"客户端会看到什么"就得用同一取法。剧集不传（按季集号定位）。 */
-    const usePick = pick === 'items' ? 'items' : undefined;
+  async function showItemVersions(m) {
+    const useSeason = isMovie ? undefined : num(seasonInput);
+    const useEpisode = isMovie ? undefined : num(episodeInput);
+    const usePick = isMovie ? 'items' : undefined;
     try {
       /* 过滤规则与详情一起拿（两个请求并发；规则读的是模块端点 —— 权威那份） */
       const [d, st] = await Promise.all([
@@ -178,19 +200,17 @@ export async function renderAgg(v) {
         re = null; // 规则坏了 → 按"不过滤"显示（后端运行时也是这个兜底）
       }
       openVersionsModal(`${m.siteName || m.siteKey} · ${m.vod_name || ''}`, d, {
-        asked: useEpisode !== undefined && useEpisode !== null && useEpisode !== '',
         pickItems: usePick === 'items',
         filterRaw: raw,
         filterRe: re,
-        onRetryItems: () => showItemVersions(m, undefined, undefined, 'items'),
       });
     } catch (e) {
       toast('取版本失败：' + e.message, true);
     }
   }
 
-  /* 搜索行：**模板 + 关键字 + 季/集/年份 + 按钮**全是"这次要搜什么"的参数，摆在一起。
-   * （季集年份曾是按钮下面单独一行；它们与关键字同属搜索参数，放在搜索按钮之前更贴合语义。） */
+  /* 搜索行：**模板 + 电影/剧集 + 关键字 +（剧集才有的）季/集 + 年份 + 按钮**全是"这次要搜什么"的参数，
+   * 摆在一起。（季集年份曾是按钮下面单独一行；它们与关键字同属搜索参数，放在搜索按钮之前更贴合语义。） */
   /* 模板选择器：**这条搜索用哪套模板** —— 站点与参数（分数线 / 条数 / 超时 / 并发 / 线路过滤）全从它来。
    * 不按"域"选：域 → 模板那份对照是**客户端**那条路要的（Emby 按 `tmdb` 这类前缀问，见 docs/adr/0033），
    * 面板上直接挑模板更直白，也少一步"这属于哪个域"的心算。
@@ -209,9 +229,11 @@ export async function renderAgg(v) {
     'div',
     { class: 'toolbar' },
     el('label', { class: 'chk', title: '用哪套模板：站点与参数（分数线 / 条数 / 超时 / 并发 / 线路过滤）都来自它' }, tplSel, ''),
+    el('label', { class: 'chk', title: kindSel.getAttribute('title') }, kindSel, ''),
     wdInput,
-    el('label', { class: 'chk', title: seasonInput.getAttribute('title') }, seasonInput, '季'),
-    el('label', { class: 'chk', title: episodeInput.getAttribute('title') }, episodeInput, '集'),
+    /* 季 / 集只在「剧集」下出现 —— 选电影时它们既不参与打分也不参与定位，摆着只会让人以为要填。 */
+    isMovie ? null : el('label', { class: 'chk', title: seasonInput.getAttribute('title') }, seasonInput, '季'),
+    isMovie ? null : el('label', { class: 'chk', title: episodeInput.getAttribute('title') }, episodeInput, '集'),
     el('label', { class: 'chk', title: yearInput.getAttribute('title') }, yearInput, '年份'),
     el('button', { class: 'btn primary', text: S.aggBusy ? '聚合中…' : '聚合搜索', disabled: S.aggBusy, onclick: run })
   );
@@ -230,7 +252,7 @@ export async function renderAgg(v) {
   );
 
   if (!S.aggResult) {
-    v.append(searchRow, optRow, el('div', { class: 'muted', text: '输入关键字开始聚合搜索。季/集/年份用来给结果打分（想让某一集能定位到，就把集号填上）。' }));
+    v.append(searchRow, optRow, el('div', { class: 'muted', text: '输入关键字开始聚合搜索。选「剧集」要填季与集（详情按季集定位到这一集），选「电影」不问季集、只按片名与年份打分。' }));
     return;
   }
   if (S.aggResult.loading) {
@@ -273,7 +295,7 @@ export async function renderAgg(v) {
         text:
           `这次跳过了 ${skipped.length} 个「最近一次测速失败」的站点（勾选没动，只跳过这几个）：` +
           skipped.map((x) => `${x.name || x.key}（${x.error}）`).join(' / ') +
-          ' —— 想立刻再试就在「站点与参数」点该站的「测速」，下一轮自动测速也会重试。',
+          ' —— 想立刻再试就在「站点与参数」点该站的「测速」，下一轮自动测速也会重试；不想跳过就取消这套模板里的「跳过测速失败的站点」。',
       })
     );
   }
@@ -285,13 +307,12 @@ export async function renderAgg(v) {
  * 版本弹窗：`detail` 的返回里，每站「线路 N · 定位到这一集 M」+ 逐条线路的定位情况。
  *
  * `opts`：
- *   · `asked`      —— 这次请求**有没有带集号**（只对剧集取法有意义）。没带就**没做定位**，此时不能说
- *                     "不会进客户端的版本列表"。
  *   · `pickItems`  —— 这次用的是**电影取法**（`pick: 'items'`）：每条线路的**每个播放项**各成一个版本。
  *                     客户端对电影走的就是这条，所以弹窗的判定与它一致，不再有"没定位到"这回事。
  *   · `filterRaw` / `filterRe` —— 「线路过滤」规则（只匹配线路名）。**过滤只在客户端那侧生效**
  *                     （`emby/service.js` 拼版本列表时），弹窗给的是原始线路 ⇒ 得逐条标出来。
- *   · `onRetryItems` —— 「按电影取法重查（列全部播放项）」的回调。
+ *
+ * 剧集这条路**一定带季与集**（页面上填不齐就不让搜），所以不再有"没填集号 ⇒ 没做定位"那种分支。
  */
 function openVersionsModal(title, d, opts = {}) {
   const sites = d.sites || [];
@@ -305,21 +326,6 @@ function openVersionsModal(title, d, opts = {}) {
         class: 'hint',
         text: '电影取法：每条线路的全部播放项各列成一个版本（同一部片的多个压制版本都会出现）。',
       })
-    );
-  } else if (!opts.asked) {
-    /* 没填集号：把"为什么全是没定位到"和"怎么重查"先说清楚 */
-    body.push(
-      el(
-        'div',
-        { class: 'hint' },
-        '⚠️ 这次没填「集」，所以没做定位 —— 下面每条线路都会显示"没定位到"，那不代表客户端也拿不到。',
-        el('br'),
-        '电影在客户端那边是按「每条线路的全部播放项」列的，点下面那个按钮就能照客户端的方式重查；剧集请把集号填上。',
-        el('br'),
-        opts.onRetryItems
-          ? el('button', { class: 'btn mini primary ml-sm', text: '按电影取法重查（列全部播放项）', onclick: () => opts.onRetryItems() })
-          : null
-      )
     );
   }
   if (opts.filterRaw) {
@@ -352,9 +358,7 @@ function openVersionsModal(title, d, opts = {}) {
         s.detail
           ? opts.pickItems
             ? el('span', { class: 'badge' + (itemAll ? ' ok' : ''), text: `进客户端版本列表 ${itemAll} 个版本` })
-            : opts.asked
-              ? el('span', { class: 'badge' + (tgtAll ? ' ok' : ''), text: `进客户端版本列表 ${tgtAll} 条线路` })
-              : el('span', { class: 'badge', text: `线路 ${allLines.length}（没填集号，未定位）` })
+            : el('span', { class: 'badge' + (tgtAll ? ' ok' : ''), text: `进客户端版本列表 ${tgtAll} 条线路` })
           : el('span', { class: 'badge err', text: s.error || '这条没取到详情' })
       )
     );
@@ -383,8 +387,6 @@ function openVersionsModal(title, d, opts = {}) {
             (dropped ? ` —— 但线路名不匹配 /${opts.filterRaw}/，不会进客户端的版本列表` : '');
         } else if (dropped) {
           why = `✘ 线路名不匹配 /${opts.filterRaw}/ —— 不会进客户端的版本列表`;
-        } else if (!opts.asked) {
-          why = '· 这次没填「集」→ 没做定位（点上面的「按电影取法重查」看客户端那侧的结果）';
         } else {
           why = '✘ 这一集在这条线路里没定位到（不会进客户端的版本列表）';
         }

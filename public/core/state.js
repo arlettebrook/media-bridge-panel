@@ -20,6 +20,7 @@ export const S = {
   /* 「聚合搜索」页这次用哪套模板（按模板选，不按域选）：模板 id。站点与参数都从那套模板来。 */
   aggTpl: '',
   aggUseAll: false,
+  aggKind: 'tv',        // 「聚合搜索」页这次要的是哪种：'tv' = 剧集（季、集必填）/ 'movie' = 电影（不问季集）
   aggResult: null,
   aggView: 'merged',
   aggBusy: false,
