@@ -61,4 +61,40 @@ async function getHtml(url, { siteBase, timeout = 15000 } = {}) {
   return { status: res.status, ok: true, text, bytes, url: res.url || url };
 }
 
-module.exports = { UA, ACCEPT, MIN_BYTES, pageHeaders, getHtml };
+/** playlist（m3u8）请求的头：`Accept` 给 HLS 那两个类型，`Referer` 指回影片页 */
+function playlistHeaders(siteBase, referer) {
+  return {
+    'User-Agent': UA,
+    Accept: 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    Referer: String(referer || '') || String(siteBase || '').replace(/\/+$/, '') + '/',
+  };
+}
+
+/**
+ * 拉一个 playlist（m3u8）。与 `getHtml` 分开走，两处刻意的差别：
+ *   · **不设「体太小判风控」那道闸** —— 主 playlist 只有几百字节，按页面那套量体会把正常结果判成风控页；
+ *   · 头换成 playlist 那一套（`Accept` 给 HLS 类型、`Referer` 指回影片页）。
+ * 非 2xx 照旧抛带 code 的错；调用方拿到它只是**放弃那几项规格**，不该让整次取详情失败。
+ */
+async function getPlaylist(url, { siteBase, referer, timeout = 8000 } = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), Math.max(1000, Number(timeout) || 8000));
+  let res;
+  let text = '';
+  try {
+    res = await fetch(url, { headers: playlistHeaders(siteBase, referer), redirect: 'manual', signal: ctrl.signal });
+    text = Buffer.from(await res.arrayBuffer()).toString('utf8');
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) {
+    const e = new Error(`playlist 回 HTTP ${res.status}`);
+    e.code = 'UPSTREAM_HTTP';
+    e.status = res.status;
+    throw e;
+  }
+  return { status: res.status, ok: true, text, bytes: Buffer.byteLength(text, 'utf8'), url: res.url || url };
+}
+
+module.exports = { UA, ACCEPT, MIN_BYTES, pageHeaders, getHtml, playlistHeaders, getPlaylist };

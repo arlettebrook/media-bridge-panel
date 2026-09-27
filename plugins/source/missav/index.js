@@ -8,6 +8,8 @@
  *   sites   站点清单     —                        这个插件现在有哪些站点（一个）
  *   search  候选         {source,key,wd,page}      站内搜索页 → macCMS 形状的列表
  *   detail  取播放项     {source,key,id,season,episode,pick}
+ *                                                  影片页 → m3u8，再拉一次主 playlist 读规格
+ *                                                  （容器 / 分辨率 / 码率 / 编码），编成一条线路一个播放项
  *   play    解析地址     {ref,clientHost}          一个 ref → 真实 m3u8 + 请求头
  *   probe   站点测速     {source,key,wd}           体检口径的一发（不重试、不看内容）
  *   http    webui 后端   {method,path,query,body}  插件自己设置页的后端
@@ -62,21 +64,56 @@ function toMacRow(x) {
 }
 
 /**
+ * 主 playlist → 播放项规格（容器 / 分辨率 / 码率 / 编码），照契约「能给就给」。
+ *
+ * 站点把规格写在主 playlist 里（`#EXT-X-STREAM-INF:…RESOLUTION=…,CODECS=…`），影片页本身没写，
+ * 所以要多拉一次那一份小文件（几百字节）。带缓存（键含 playlist 地址，换片自然作别）。
+ * 取不到就**如实回空**：调用方照旧把 `container: 'hls'` 报上去，其余项留空让面板那套兜底接手 ——
+ * 缺几项规格不该让整次取详情失败。
+ */
+async function specOfPlaylist(m3u8, { siteBase, referer, timeoutMs }) {
+  const key = [SITE_KEY, 'playlist', m3u8].join('|');
+  const hit = cache.get('upstream', key);
+  if (hit) return hit;
+  const r = await fetcher.getPlaylist(m3u8, { siteBase, referer, timeout: timeoutMs });
+  const spec = parse.playlistSpec(r.text);
+  cache.put('upstream', key, spec, cache.limits().ttlMs);
+  return spec;
+}
+
+/** 规格里挑几个能进日志的项拼一句（诊断用；一个都没有就回空串） */
+function specBrief(spec) {
+  const bits = [];
+  if (spec.width && spec.height) bits.push(`${spec.width}x${spec.height}`);
+  if (spec.bitRate) bits.push(`${Math.round(spec.bitRate / 1000)}kbps`);
+  if (spec.videoCodec) bits.push(spec.videoCodec);
+  if (spec.audioCodec) bits.push(spec.audioCodec);
+  return bits.join(' ');
+}
+
+/**
  * 详情 → 面板要的「线路 → 选集」结构。
  *
  * 一部片一份 m3u8，所以**一条线路、一个播放项**；该项的 `ref` 由插件自己编（面板原样存、播放时原样交回）。
  * `pick = 'items'` 是电影取法（播放项放进 `line.items[]`），否则是剧集取法（放进 `line.target`）。
  * 拿不到 m3u8 时线路为空并在 `note` 里如实说明，不编地址、不编线路。
+ *
+ * `spec` 是主 playlist 里读出来的规格（容器/分辨率/码率/编码），**能给就给**（契约第五节）：
+ * 读不出的项不带，面板那套从集名猜的兜底才接得上。
  */
-function buildDetail(p, { pick, pageLink, slug }) {
-  const item = () => ({
-    flag: LINE_FLAG,
-    name: p.name,
-    id: slug,
-    index: 0,
-    matchedBy: 'item',
-    ref: encodeRef(PLUGIN_ID, { u: pageLink, c: slug }),
-  });
+function buildDetail(p, { pick, pageLink, slug, spec }) {
+  const item = () =>
+    Object.assign(
+      {
+        flag: LINE_FLAG,
+        name: p.name,
+        id: slug,
+        index: 0,
+        matchedBy: 'item',
+        ref: encodeRef(PLUGIN_ID, { u: pageLink, c: slug }),
+      },
+      spec
+    );
 
   const lines = [];
   if (p.m3u8) {
@@ -167,34 +204,40 @@ const actions = {
     if (!wd) return { status: 200, ok: true, text: '', json: { list: [], page, total: 0 }, source, site };
 
     const key = [SITE_KEY, 'search', wd, String(page), cfg.siteBase].join('|');
+
+    /* 站点的搜索页只认番号那一小段：面板给的却是整条名字（`SSIS-001 女友不在的三天 …`），
+     * 拿整串去搜一条都搜不到 ⇒ 先揪出番号再搜，拿到候选后按番号精确过滤。
+     * 归一放在查缓存**之前**：日志要报的是**真正打给站点的词**；缓存键里存的是原始 wd
+     * （整条名字），照它写日志会让人以为拿整串去搜了。 */
+    const code = parse.extractCode(wd);
+    const term = code || wd;
+
     const hit = cache.get('upstream', key);
     if (hit) {
-      if (ctx) ctx.log(`缓存命中：搜索「${wd}」第 ${page} 页 —— 不打站点`);
+      if (ctx) ctx.log(`缓存命中：搜索「${term}」第 ${page} 页 —— 不打站点`);
       return Object.assign({}, hit, { source, site, cached: true });
     }
 
-    /* 站点的搜索页只认番号那一小段：面板给的却是整条名字（`SSIS-001 女友不在的三天 …`），
-     * 拿整串去搜一条都搜不到 ⇒ 先揪出番号再搜，拿到候选后按番号精确过滤。 */
-    const code = parse.extractCode(wd);
-    const term = code || wd;
     const url = parse.searchUrl(cfg.siteBase, cfg.lang, term, page);
     try {
       const r = await fetcher.getHtml(url, { siteBase: cfg.siteBase, timeout: timeoutMs });
       let rows = parse.parseVideoList(r.text, { siteBase: cfg.siteBase, coverBase: cfg.coverBase });
       if (code) rows = rows.filter((x) => parse.sameCode(x.code, code));
+      if (ctx) ctx.log(`搜索「${term}」：站点回 ${rows.length} 条候选`);
       const json = { list: rows.map(toMacRow), page, total: rows.length };
       const out = { status: r.status, ok: true, text: r.text, json, url, source, site, term };
       cache.put('upstream', key, out, cache.limits().ttlMs);
       return out;
     } catch (e) {
-      if (ctx) ctx.log(`搜索失败：「${wd}」— ${(e && e.message) || e}`);
+      if (ctx) ctx.log(`搜索失败：「${term}」— ${(e && e.message) || e}`);
       return { error: failFrom(e), url, source, site };
     }
   },
 
   /**
-   * 取播放项 —— 打影片页，提 m3u8，编成一条线路一个播放项。
-   * 缓存的是**页面原文**：命中时不打站点，但照旧重新跑一遍解析（纯函数，结果一致）。
+   * 取播放项 —— 打影片页，提 m3u8，再拉一次主 playlist 读规格，编成一条线路一个播放项。
+   * 缓存的是**页面原文**与**主 playlist 读出来的规格**：各自命中就不打站点，但照旧重新跑一遍解析
+   * （纯函数，结果一致）。
    */
   async detail(args, ctx) {
     useCtx(ctx);
@@ -209,6 +252,7 @@ const actions = {
 
     const pageLink = parse.pageUrl(cfg.siteBase, cfg.lang, slug);
     const key = [SITE_KEY, 'detail', slug, cfg.siteBase].join('|');
+    const t0 = Date.now();
     try {
       let page = cache.get('upstream', key);
       const cached = !!page;
@@ -217,10 +261,26 @@ const actions = {
         page = { status: r.status, text: r.text };
         cache.put('upstream', key, page, cache.limits().ttlMs);
       } else if (ctx) {
-        ctx.log(`缓存命中：详情 ${slug} —— 用缓存里的页面重建 m3u8，不打站点`);
+        ctx.log(`缓存命中：详情 ${slug} —— 页面用缓存里的，不打站点`);
       }
       const p = parse.parseDetail(page.text, { siteBase: cfg.siteBase, coverBase: cfg.coverBase, lang: cfg.lang, slug });
-      const built = buildDetail(p, { pick, pageLink, slug });
+      /* 规格在主 playlist 里。只留**够用**的预算给它：页面那一趟可能已经花掉大半，
+       * 剩得太少就不去取了（缺几项规格好过整次取详情超时）。 */
+      const left = timeoutMs - (Date.now() - t0);
+      let spec = { container: 'hls' };
+      if (p.m3u8 && left > 1200) {
+        try {
+          spec = Object.assign(spec, await specOfPlaylist(p.m3u8, { siteBase: cfg.siteBase, referer: pageLink, timeoutMs: Math.min(6000, left) }));
+          if (ctx) {
+            const brief = specBrief(spec);
+            if (brief) ctx.log(`主 playlist 规格：${slug} → ${brief}`);
+          }
+        } catch (e) {
+          /* 拿不到规格不报错：容器照报（它本来就是 HLS 流），其余留空让面板那套兜底接手 */
+          if (ctx) ctx.log(`主 playlist 取不到：${slug} — ${(e && e.message) || e}（规格如实留空）`);
+        }
+      }
+      const built = buildDetail(p, { pick, pageLink, slug, spec });
       const out = {
         status: Number(page.status) || 200,
         ok: true,

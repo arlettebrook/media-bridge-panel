@@ -6,6 +6,7 @@
  *
  *   表 meta    影片页解析结果（键 = 语言段 + 类型 + slug）
  *   表 names   搜索词 → 候选列表（键 = 语言段 + 搜索词，只存有结果的响应）
+ *   表 recs    条目的相似推荐（键 = 语言段 + slug）—— 另一套服务给的，与影片页各自成败
  *
  * 为什么不用面板那套 sqlite 缓存：插件是独立包，**不能 require 面板任何代码**；
  * 而这里的量级很小（一部片一个文件），每条一个文件足以，还省掉了库文件与句柄的事。
@@ -25,11 +26,15 @@ const settings = require('./settings');
 
 /** 缓存根目录（相对当前数据目录 —— 动作层可能先调过 `settings.setDataDir`） */
 const root = () => path.join(settings.dataDir(), 'cache');
-const TABLES = ['meta', 'names'];
+const TABLES = ['meta', 'names', 'recs'];
 
 /** 「搜索词 → 候选列表」的固定口径（不进设置：候选越新越好） */
 const NAME_TTL_MS = 6 * 60 * 60 * 1000;
 const NAME_MAX_BYTES = 2 * 1024 * 1024;
+
+/** 「相似推荐」的固定口径（不进设置）：推荐会跟着站点自己的榜单变，一天一刷够用 */
+const REC_TTL_MS = 24 * 60 * 60 * 1000;
+const REC_MAX_BYTES = 8 * 1024 * 1024;
 
 /** 扫一遍的节流：写入是高频动作，每次都全目录 stat 会把缓存变成负担 */
 const SWEEP_MIN_MS = 30 * 1000;
@@ -38,9 +43,10 @@ const lastSweep = new Map();
 const md5 = (s) => crypto.createHash('md5').update(String(s)).digest('hex');
 const dirOf = (table) => path.join(root(), String(table));
 
-/** 各表的存活期与上限：meta 跟设置走，names 固定 */
+/** 各表的存活期与上限：meta 跟设置走，names 与 recs 固定 */
 function limits(table) {
   if (table === 'names') return { ttlMs: NAME_TTL_MS, maxBytes: NAME_MAX_BYTES };
+  if (table === 'recs') return { ttlMs: REC_TTL_MS, maxBytes: REC_MAX_BYTES };
   const c = settings.read();
   return { ttlMs: c.cacheTtlDays * 86400000, maxBytes: c.cacheMaxMB * 1024 * 1024 };
 }
@@ -177,4 +183,17 @@ function clear(table) {
   return stats();
 }
 
-module.exports = { root, TABLES, NAME_TTL_MS, NAME_MAX_BYTES, limits, get, put, sweep, stats, clear };
+module.exports = {
+  root,
+  TABLES,
+  NAME_TTL_MS,
+  NAME_MAX_BYTES,
+  REC_TTL_MS,
+  REC_MAX_BYTES,
+  limits,
+  get,
+  put,
+  sweep,
+  stats,
+  clear,
+};

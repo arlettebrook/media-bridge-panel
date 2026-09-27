@@ -3,12 +3,15 @@
  * MissAV 首页插件 · 行清单与行处理器。
  *
  * 一行 = 客户端上的一个媒体库。第三方 Widget 脚本里的二十多个模块（热门榜、新作、
- * 中文字幕、无码分类、亚洲专区、质量分类……）在这里收敛成九行：榜单类各占一行，
- * 那几个"先选一个分类再进"的模块用枚举参数承载分类清单，再加一行自由输入的入口 ——
- * 于是剩下的模块改一个参数就能用，不必给每个分类各开一个库。
+ * 中文字幕、无码分类、亚洲专区、质量分类……）在这里收敛成十行：榜单类各占一行，
+ * 那几个"先选一个分类再进"的模块用枚举参数承载分类清单，再加一行自由输入的入口、
+ * 一行随机推荐 —— 于是剩下的模块改一个参数就能用，不必给每个分类各开一个库。
  *
  * 每个模块的入口路径里都带一段会变的 `dm<数字>` 前缀（第三方脚本自己也把它写死在代码里）。
  * 这里一律做成行的 `path` 参数**并给内置默认值**：站点换前缀时在设置页改，不用改代码。
+ *
+ * 「随机推荐」那一行额外声明了 `feed: 'random'` —— 客户端首页那条"只要推荐"的查询会路由到它，
+ * 轮播图因此有素材（同 TMDB 示例插件的做法，见 `plugins/home/example/lib/rows.js`）。
  *
  * 翻页：站点自己每页 12 条，客户端把 `startIndex` / `limit` 原样透传进来，换算见 `pageOf` / `windowOf`。
  */
@@ -118,6 +121,23 @@ const ROWS = [
     params: [pathEnum('/dm95/cn/genres/%E9%AB%98%E6%B8%85', QUALITY_OPTIONS)] },
   { id: 'custom', title: 'MissAV 自定义入口', functionName: 'listPage', cacheDuration: 1800,
     params: [pathParam('/dm291/cn/today-hot?sort=today_views')] },
+  {
+    /* 「随机推荐」—— 这一行**同时给客户端首页的轮播图供图**。
+     *
+     * 声明 `feed: 'random'`：客户端那条"不要库 Id、只要推荐"的查询会被路由到这一行；
+     * **不声明 `feed` 的行，那条查询继续回空** → 轮播图没素材。
+     * 它同时也是一行普通的库行（客户端里会多出一个「随机推荐」的库）。
+     *
+     * 半小时：轮播图"每次进来略有不同"就够；一次刷新 = 2 次上游请求（探页数 + 取随机页），
+     * 缓存把这个数压到每半小时 2 次。 */
+    id: 'random_picks',
+    title: 'MissAV 随机推荐',
+    functionName: 'randomPicks',
+    feed: 'random',
+    cacheDuration: 1800,
+    /* 这一行要打两次上游（探页数 + 随机页），把行超时抬到 30 秒，别让慢网络把它掐掉 */
+    timeoutMs: 30000,
+  },
 ];
 
 /* ─────────────────────────── 换算 ─────────────────────────── */
@@ -185,7 +205,82 @@ async function listPage(ctx) {
   return { items: windowOf(items, ctx), total };
 }
 
+/* ─────────────────────── 随机推荐（接客户端的推荐查询） ─────────────────────── */
+
+/** 随机页抽到第几页为止：站点页数很多，抽得太深容易撞空页，60 页够"随机"了 */
+const RANDOM_PAGE_MAX = 60;
+
+/** 1..n 的随机整数 */
+function randomInt(n) {
+  return 1 + Math.floor(Math.random() * n);
+}
+
+/** 洗牌（Fisher–Yates）—— 原数组不动 */
+function shuffle(list) {
+  const a = list.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = a[i];
+    a[i] = a[j];
+    a[j] = t;
+  }
+  return a;
+}
+
+/**
+ * 随机行从哪些入口里抽：把**各行当前的入口路径**（用户改过的优先）攒成一个池子。
+ * 只收声明了 `path` 参数的行 —— 那些就是站点上的榜单 / 分类模块，正是"随便逛逛"要的内容。
+ */
+function randomPool() {
+  const saved = settings.read().rowParams || {};
+  const out = [];
+  for (const row of ROWS) {
+    const decl = (row.params || []).find((p) => p.name === 'path');
+    if (!decl) continue;
+    const one = saved[row.id];
+    const v = one && Object.prototype.hasOwnProperty.call(one, 'path') ? one.path : decl.value;
+    const path = String(v || '').trim();
+    if (path && !out.includes(path)) out.push(path);
+  }
+  return out;
+}
+
+/**
+ * 随机取站点一页：先打第 1 页拿"共几页"（分页条解析不出来就不猜，只给第 1 页），
+ * 再在其中随机挑一页取内容。返回那一页解析出的条目。
+ */
+async function randomPage(cfg, path) {
+  const first = await getHtml(buildUrl(cfg.siteBase, path, 1), { siteBase: cfg.siteBase });
+  const totalPages = parseTotalPages(first);
+  const cap = totalPages > 1 ? Math.min(totalPages, RANDOM_PAGE_MAX) : 1;
+  const page = randomInt(cap);
+  const html = page === 1 ? first : await getHtml(buildUrl(cfg.siteBase, path, page), { siteBase: cfg.siteBase });
+  return parseVideoList(html, { imageBase: cfg.imageBase });
+}
+
+/**
+ * 「随机推荐」—— 站点没有随机接口，只能"随机挑一个模块 + 随机挑一页"，再把这一页打乱。
+ *
+ * 池子里有热门 / 新作 / 分类等入口，每次随机挑一个模块、再随便翻它的一页 —— 换一次刷新就换一批内容。
+ * 代价是一次刷新 **2 次**上游请求（第 1 页探总页数 + 随机页取内容），靠行的 `cacheDuration`
+ * （本行 1800 秒）压住。
+ *
+ * ⚠️ **这一行不翻页**：每次请求本来就是一批新的随机结果，翻页只会拿到重复，
+ * 所以**忽略 `startIndex`**，只按 `limit` 给。回的也是数组（不带 `total`）——
+ * 客户端因此认为这一行翻不动，符合实际。
+ */
+async function randomPicks(ctx) {
+  const cfg = settings.read();
+  const pool = randomPool();
+  if (!pool.length) throw fail('BAD_PARAM', '没有可抽的入口路径（各行都没配 path）');
+
+  const path = pool[Math.floor(Math.random() * pool.length)];
+  const items = shuffle(await randomPage(cfg, path));
+  const limit = ctx.limit > 0 ? Math.min(ctx.limit, items.length) : items.length;
+  return items.slice(0, limit);
+}
+
 /** 键 = 行声明的 `functionName`；`ctx = { params, startIndex, limit, signal }` */
-const handlers = { listPage };
+const handlers = { listPage, randomPicks };
 
 module.exports = { ROWS, handlers, SITE_PAGE, buildUrl, pageOf };

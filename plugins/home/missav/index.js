@@ -193,21 +193,28 @@ async function test(body) {
 
 /* ------------------------------------------------------------- 动作 */
 
+/**
+ * 面板要的行形状（不含 handler —— 那是插件自己的事）。
+ * `collectionType` 一律 `movies`：站上每个条目都是单本影片，没有剧集式的内容，库类型不随参数变。
+ * 声明了 `feed` 的行**必须把它报出去** —— 面板靠它把客户端"只要推荐"的查询路由到那一行。
+ */
+function publicRow(r) {
+  const out = {
+    id: r.id,
+    title: r.title,
+    collectionType: 'movies',
+    cacheDuration: r.cacheDuration || 0,
+    params: r.params || [],
+  };
+  if (r.feed) out.feed = r.feed;
+  return out;
+}
+
 const actions = {
   /** 申报行清单：面板据此做「媒体库」（`Views`），并把某个 `feed` 的查询路由到对应行 */
   rows(args, ctx) {
     bindCtx(ctx);
-    return {
-      ok: true,
-      rows: ROWS.map((r) => ({
-        id: r.id,
-        title: r.title,
-        /* 站上都是单本影片（没有剧集式内容），所以库类型固定，不随参数变 */
-        collectionType: 'movies',
-        cacheDuration: r.cacheDuration || 0,
-        params: r.params || [],
-      })),
-    };
+    return { ok: true, rows: ROWS.map(publicRow) };
   },
 
   /** 跑一行：`{ rowId, params?, startIndex?, limit? }` → `{ items, total, cached? }` */
@@ -242,13 +249,7 @@ const actions = {
           settings: { siteBase: cfg.siteBase, imageBase: cfg.imageBase },
           defaults: settings.defaults(),
           cache: storage.stats(),
-          rows: ROWS.map((r) => ({
-            id: r.id,
-            title: r.title,
-            collectionType: 'movies',
-            cacheDuration: r.cacheDuration || 0,
-            params: r.params || [],
-          })),
+          rows: ROWS.map(publicRow),
           rowParams: rawCfg.rowParams || {},
         },
       };

@@ -22,6 +22,7 @@
 const settings = require('./lib/settings');
 const cache = require('./lib/cache');
 const client = require('./lib/fetch');
+const recombee = require('./lib/recombee');
 const parse = require('./lib/parse');
 const pkg = require('./plugin.json');
 
@@ -30,11 +31,27 @@ const DOMAIN = String(pkg.domain || 'missav');
 
 /**
  * 能力申报（契约第六节的字段清单）：**它会哪些、缺哪些**。
- * 本站影片页只给标题 / 封面 / 简介，以及按名字搜索；类型与演职拿不到，如实不申报。
+ * 本站影片页给的字段：标题 / 原始标题 / 发行日期 / 简介 / 封面（大图）/ 类型（带站点编号）/
+ * 时长 / 女优男优 / 导演 / 发行商与标籤 / 关键词，以及按名字搜索。
+ * 「相似推荐」不在影片页上（那里只有空占位），是站点自己的推荐服务给的 —— 见 lib/recombee.js。
+ * 评分 / 分级 / 季数 / 外部 id / 预告这些本站点没有，如实不申报。
  */
 const CAPABILITIES = {
   series: false,
-  fields: ['identity', 'titles', 'searchTitle', 'overview', 'images', 'search'],
+  fields: [
+    'identity', // 条目 id 与类型
+    'titles', // 主标题 / 原始标题 / 年份 / 首播
+    'searchTitle', // 给源侧搜索用的名字（番号 + 标题）
+    'overview',
+    'images', // 海报 / 背景（本站点两者都是同一张大图封面）
+    'genres', // 类型名 + 带 id 的类型项
+    'runtime',
+    'companies', // 发行商与标籤（带站点编号）
+    'keywords',
+    'people', // 女优男优与导演
+    'recommendations', // 相似推荐（站点推荐服务给的，见 lib/recombee.js）
+    'search',
+  ],
 };
 
 /** 自检用的探测词：一个真实存在的番号，能同时验"搜索页通"与"列表解析对" */
@@ -59,34 +76,67 @@ const pageUrl = (c, slug) => `${settings.stripSlash(c.siteBase)}/${encodeURIComp
 const searchUrl = (c, wd) => `${settings.stripSlash(c.siteBase)}/${encodeURIComponent(c.language)}/search/${encodeURIComponent(wd)}?page=1`;
 
 /**
+ * 相似推荐（**单开一张缓存表**，见 `doLookup` 的说明）：取不到回空数组，只记一行日志。
+ * 空数组也存 —— 上游确实推不出来的条目，没必要每次都再问一趟。
+ */
+async function recommendationsOf(slug, c, log) {
+  const key = `${c.language}|${slug}`;
+  const hit = cache.get('recs', key);
+  if (hit) {
+    try {
+      const rows = JSON.parse(hit);
+      if (Array.isArray(rows)) return rows;
+    } catch {
+      /* 坏条目当没缓存，走网络 */
+    }
+  }
+  let rows;
+  try {
+    rows = await recombee.related({ slug, language: c.language, imageBase: c.imageBase });
+  } catch (e) {
+    if (typeof log === 'function') log(`相似推荐取数失败：${slug} — ${(e && e.message) || e}`);
+    return [];
+  }
+  cache.put('recs', key, JSON.stringify(rows), cache.limits('recs').ttlMs);
+  return rows;
+}
+
+/**
  * 取一个条目的元数据（带落盘缓存）。
  * `entryId` 就是本站条目编号（slug），直接拼页面地址，不依赖任何预先登记过的编号表。
  * 失败一律 `{ ok:false, error }`，不编占位数据。
+ *
+ * 相似推荐是**另一个服务**给的，因此单开一张缓存表：影片页那次取数成败与它无关，各自过期、
+ * 各自重试；而且它**不进 meta 那张表** —— 否则这次取不到就会被钉住一整个 meta 的存活期。
+ * 它取不到时只留空这一项并记一行日志，不让整个条目失败（详情页少一栏还能用，少了标题就废了）。
  */
-async function doLookup(entryId) {
+async function doLookup(entryId, log) {
   const slug = parse.canonicalSlug(entryId);
   if (!slug) return { ok: false, error: { code: 'BAD_ID', message: '条目编号不能为空：' + entryId } };
 
   const c = settings.read();
   const key = `${c.language}|movie|${slug}`;
   const hit = cache.get('meta', key);
+  let item = null;
   if (hit) {
     try {
-      const item = JSON.parse(hit);
-      if (item && item.entryId) return { ok: true, item };
+      const saved = JSON.parse(hit);
+      if (saved && saved.entryId) item = saved;
     } catch {
       /* 坏条目当没缓存，走网络 */
     }
   }
-
-  let r;
-  try {
-    r = await client.htmlOf(pageUrl(c, slug), { siteBase: c.siteBase });
-  } catch (e) {
-    return { ok: false, error: failFrom(e) };
+  if (!item) {
+    let r;
+    try {
+      r = await client.htmlOf(pageUrl(c, slug), { siteBase: c.siteBase });
+    } catch (e) {
+      return { ok: false, error: failFrom(e) };
+    }
+    item = parse.parseDetail(r.text, slug, c.imageBase);
+    cache.put('meta', key, JSON.stringify(item), cache.limits('meta').ttlMs);
   }
-  const item = parse.parseDetail(r.text, slug, c.imageBase);
-  cache.put('meta', key, JSON.stringify(item), cache.limits('meta').ttlMs);
+  item.recommendations = await recommendationsOf(slug, c, log);
   return { ok: true, item };
 }
 
@@ -193,7 +243,7 @@ const actions = {
   /** 取元数据 —— 面板按域分派过来，一次一个条目 */
   async lookup(args = {}, ctx) {
     bind(ctx);
-    return doLookup(args.entryId);
+    return doLookup(args.entryId, ctx && ctx.log);
   },
 
   /** 电影式：没有分集可给，如实回空 */

@@ -188,6 +188,7 @@ function paintCache(c) {
   const rows = [
     ['影片页解析结果', c.tables.meta],
     ['搜索词候选列表', c.tables.names],
+    ['相似推荐（站点推荐服务）', c.tables.recs],
   ];
   for (const [label, one] of rows) {
     const tr = document.createElement('tr');

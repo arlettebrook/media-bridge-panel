@@ -247,6 +247,99 @@ function buildStreamHeaders(siteBase, pageLink) {
   };
 }
 
+/* ------------------------------------------------------------- 主 playlist → 规格 */
+
+/**
+ * 主 playlist（`playlist.m3u8`）→ 变体清单。
+ * 站点给的是**主 playlist**：一个变体两行 —— `#EXT-X-STREAM-INF:BANDWIDTH=…,RESOLUTION=WxH,…`
+ * 加下一行的媒体 playlist 地址。读不出的项留 0（整份读不出就是空数组，不编）。
+ * `CODECS` / `AVERAGE-BANDWIDTH` / `FRAME-RATE` 只有部分片源才写，照实缺省。
+ */
+function parseMasterPlaylist(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const head = /^#EXT-X-STREAM-INF:(.*)$/i.exec(lines[i].trim());
+    if (!head) continue;
+    const next = String(lines[i + 1] || '').trim();
+    if (!next || next.startsWith('#')) continue;
+    const a = head[1];
+    const band = /\bBANDWIDTH=(\d+)/i.exec(a);
+    const avg = /\bAVERAGE-BANDWIDTH=(\d+)/i.exec(a);
+    const res = /\bRESOLUTION=(\d+)x(\d+)/i.exec(a);
+    const codecs = /\bCODECS="([^"]*)"/i.exec(a);
+    const fps = /\bFRAME-RATE=([\d.]+)/i.exec(a);
+    out.push({
+      url: next,
+      bandwidth: band ? Number(band[1]) : 0,
+      averageBandwidth: avg ? Number(avg[1]) : 0,
+      width: res ? Number(res[1]) : 0,
+      height: res ? Number(res[2]) : 0,
+      frameRate: fps ? Number(fps[1]) : 0,
+      codecs: codecs ? codecs[1] : '',
+    });
+  }
+  return out;
+}
+
+/** 变体档位：分辨率优先，其次码率（用来挑「最高档」） */
+const variantRank = (v) => (v.height || 0) * 1e12 + (v.width || 0) * 1e6 + (v.averageBandwidth || v.bandwidth || 0);
+
+/**
+ * RFC 6381 的 `CODECS` 串 → 面板认的那几个值。
+ *   · `avc1.64001f` → 视频 `h264`；头两个十六进制位是 profile_idc（`64` High / `4d` Main / `42` Baseline）
+ *   · `hvc1.*` / `hev1.*` → `hevc`（档位不读：那一段的写法不止一种，读错不如不读）
+ *   · `av01.*` → `av1`；`mp4a.40.*` → `aac`
+ * 认不出的编码**不给**（不填占位值）。
+ */
+function codecSpec(codecs) {
+  const s = String(codecs || '');
+  const out = {};
+  const v = /\b(avc1|avc3|hvc1|hev1|av01)\.([0-9a-f]+)/i.exec(s);
+  if (v) {
+    const kind = v[1].toLowerCase();
+    if (kind === 'avc1' || kind === 'avc3') {
+      out.videoCodec = 'h264';
+      const pp = v[2].slice(0, 2).toLowerCase();
+      const flag = v[2].slice(2, 4).toLowerCase();
+      if (pp === '64') out.videoProfile = 'High';
+      else if (pp === '4d') out.videoProfile = 'Main';
+      /* `42` 带 `E0` 是 Constrained Baseline（`42E01E`），不带才是 Baseline */
+      else if (pp === '42') out.videoProfile = flag === 'e0' ? 'Constrained Baseline' : 'Baseline';
+    } else if (kind === 'hvc1' || kind === 'hev1') out.videoCodec = 'hevc';
+    else out.videoCodec = 'av1';
+  }
+  if (/\bmp4a\.40\b/i.test(s)) out.audioCodec = 'aac';
+  else if (/\bec-3\b/i.test(s)) out.audioCodec = 'eac3';
+  else if (/\bac-3\b/i.test(s)) out.audioCodec = 'ac3';
+  return out;
+}
+
+/**
+ * 主 playlist → 播放项的规格字段。
+ *
+ * 客户端播的是**主 playlist**、由它自己挑档位，所以按**最高档**报（Emby 对 HLS 也是这个口径）。
+ * `container` 固定 `hls` —— 这就是 HLS 流，不是猜。体积与声道数主 playlist 里没有，
+ * 因此给不出（**不给**，不填 0/空串，免得把面板那套兜底挡掉）。
+ */
+function playlistSpec(text) {
+  const variants = parseMasterPlaylist(text);
+  let best = null;
+  for (const v of variants) {
+    if (!best || variantRank(v) > variantRank(best)) best = v;
+  }
+  const out = { container: 'hls' };
+  if (!best) return out;
+  if (best.width && best.height) {
+    out.width = best.width;
+    out.height = best.height;
+  }
+  const bw = best.averageBandwidth || best.bandwidth;
+  if (bw) out.bitRate = bw;
+  if (best.frameRate) out.frameRate = best.frameRate;
+  return Object.assign(out, codecSpec(best.codecs));
+}
+
 /* ------------------------------------------------------------- 番号判定 */
 
 /** 查询词是不是番号形状（`SSIS-001` / `SSIS001`） */
@@ -284,6 +377,9 @@ module.exports = {
   normalizePlayableM3u8,
   pageTitle,
   parseDetail,
+  parseMasterPlaylist,
+  codecSpec,
+  playlistSpec,
   buildStreamHeaders,
   isVideoCode,
   extractCode,
