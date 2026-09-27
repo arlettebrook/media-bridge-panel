@@ -5,7 +5,8 @@
  * 面板与元数据之间只有这一处耦合。条目 Id 的形状
  * `{前缀}_{提供者的条目 id}_{tv|movie}[_s{n}][_e{m}]` 由**面板统一规定** ——
  * 它与客户端、进度库的键、首页插件的条目契约绑在一起，不能让每个来源自定义一套语法。
- * 提供者只负责两件事：给出"它自己的条目 id"，以及声明自己是**剧集式**还是**电影式**。
+ * 提供者只负责两件事：给出"它自己的条目编号"（面板只透传、不解释、不转数字），
+ * 以及声明自己是**剧集式**还是**电影式**。
  *
  * 于是这张表只管一件事：**认哪个前缀**。认不出就如实返回 null（调用方照 404 处理），
  * 不回退到别的提供者、不猜、不静默。
@@ -81,32 +82,46 @@ function list() {
 /**
  * 拼条目 Id。**与 `parseItemId` 必须互逆**，所以挨着放。
  *
- * 传了 season 就是季（只有剧集式提供者才有季）：`{前缀}_{条目 id}_tv_s1`；
- * 再传 episode 就是集：`{前缀}_{条目 id}_tv_s1_e3`。
- * 电影式提供者只到 `{前缀}_{条目 id}_movie`（季集层级对它无意义，传了也不拼）。
+ * 传了 season 就是季（只有剧集式提供者才有季）：`{前缀}_{条目编号}_tv_s1`；
+ * 再传 episode 就是集：`{前缀}_{条目编号}_tv_s1_e3`。
+ * 电影式提供者只到 `{前缀}_{条目编号}_movie`（季集层级对它无意义，传了也不拼）。
  *
- * 这里**不做数值校验**：与既有实现一致，非数字会原样拼进 Id（由 `parseItemId` 那一侧把关）。
+ * 条目编号是**提供者自己的编号**，面板只透传：TMDB 是数字（`550`），MissAV 是它自己那串
+ * slug（`ssis-001`）。所以这里**不转数字、不做校验** —— 那一步是 `parseItemId` 的事。
  */
 function itemId(prefix, entryId, type, season, episode) {
   const kind = type === 'movie' ? 'movie' : 'tv';
-  const base = `${prefix}_${Number(entryId)}_${kind}`;
+  const key = String(entryId === undefined || entryId === null ? '' : entryId).trim();
+  const base = `${prefix}_${key}_${kind}`;
   if (kind !== 'tv' || season === undefined || season === null) return base;
   const s = `${base}_s${Number(season)}`;
   if (episode === undefined || episode === null) return s;
   return `${s}_e${Number(episode)}`;
 }
 
+/** 条目编号允许的字符：字母数字与 `.` `_` `-`（slug 里会出现 `_`，如 `10musume-122023_01`） */
+const ENTRY_KEY_RE = /^[A-Za-z0-9._-]+$/;
+
 /**
  * `itemId()` 的逆 —— 必须与它互逆。
- * `{前缀}_{条目 id}_{tv|movie}[_s{n}][_e{m}]` → { prefix, provider, entryId, type, season, episode }。
+ * `{前缀}_{条目编号}_{tv|movie}[_s{n}][_e{m}]` → { prefix, provider, entryId, type, season, episode }。
  *
- * 认不出来就给 null，包括这几种：前缀没有注册、电影带季号、有集号却没有季号、号不是数字。
+ * 条目编号**原样当字符串回出去**：提供者要的就是它自己那串编号，转数字会把 slug 变成 NaN、
+ * 也会把长编号的精度丢掉。
+ *
+ * 定段按「最短能匹配上类型段的」取（非贪婪），所以编号里允许出现 `_`；但它不能长得像
+ * `_movie` / `_tv` 这类子串 —— 那种形状与类型段分不开。
+ *
+ * 认不出来就给 null，包括这几种：前缀没有注册、编号为空或含非法字符、
+ * 电影带季号、有集号却没有季号、季集号不是数字。
  */
 function parseItemId(id) {
-  const m = /^([a-z][a-z0-9]*)_(\d+)_(movie|tv)(?:_s(\d+))?(?:_e(\d+))?$/i.exec(String(id || '').trim());
+  const m = /^([a-z][a-z0-9]*)_(.+?)_(movie|tv)(?:_s(\d+))?(?:_e(\d+))?$/i.exec(String(id || '').trim());
   if (!m) return null;
   const provider = byPrefixOf(m[1]);
   if (!provider) return null;
+  const entryId = m[2];
+  if (!ENTRY_KEY_RE.test(entryId)) return null;
   const type = m[3].toLowerCase();
   if (m[4] !== undefined && type !== 'tv') return null;
   if (m[5] !== undefined && m[4] === undefined) return null; // 集号必须挂在季号下
@@ -114,7 +129,7 @@ function parseItemId(id) {
   const episode = m[5] === undefined ? null : Number(m[5]);
   if (season !== null && !Number.isFinite(season)) return null;
   if (episode !== null && !Number.isFinite(episode)) return null;
-  return { prefix: provider.prefix, provider, entryId: Number(m[2]), type, season, episode };
+  return { prefix: provider.prefix, provider, entryId, type, season, episode };
 }
 
 module.exports = { sync, get, byPrefixOf, list, itemId, parseItemId };

@@ -1,0 +1,9 @@
+{
+  "id": "missav",
+  "name": "MissAV 片源",
+  "version": "1.0.0",
+  "type": "source",
+  "main": "index.js",
+  "webui": "ui/index.html",
+  "description": "把 MissAV 站作为一个可聚合的站点接进来：站内搜索取候选，影片页提 m3u8，播放地址带 Referer 等请求头"
+}

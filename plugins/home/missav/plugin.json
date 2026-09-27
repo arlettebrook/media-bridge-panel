@@ -1,0 +1,9 @@
+{
+  "id": "missav",
+  "name": "MissAV 首页",
+  "version": "1.0.0",
+  "type": "home",
+  "main": "index.js",
+  "webui": "ui/index.html",
+  "description": "内置 MissAV 首页：今日 / 本周 / 本月热门、新作、中文字幕与各分类浏览做成客户端媒体库行；站点基地址、封面基地址与逐行入口路径都由插件自己存"
+}
