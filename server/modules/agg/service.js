@@ -58,14 +58,18 @@ function matchDefaults(params, opts) {
 /**
  * 单站超时：**设置里是秒、内部一律毫秒**（两层之间传的就是毫秒）。
  *
- * 两个超时**刻意分开**（原来只有一项 `timeoutMs`）：
- *   · `searchTimeoutMs` —— 搜索 / 播放 / 首次 `/init`：这一发本来就该快，默认 5 秒；
+ * 三个超时**刻意分开**（原来只有一项 `timeoutMs`）：
+ *   · `searchTimeoutMs` —— 搜索 / 首次 `/init`：这一发本来就该快，默认 5 秒；
  *   · `detailTimeoutMs` —— 取详情：**剧集动辄几十上百集**（响应体大、上游拼装慢），
- *     与搜索共用一个超时会让"目录里内容多的那种"一律记成超时 / 定位不到，默认 10 秒。
+ *     与搜索共用一个超时会让"目录里内容多的那种"一律记成超时 / 定位不到，默认 10 秒；
+ *   · `playTimeoutMs` —— 取播放地址：**网盘类线路要串行打好几发**（登录 → 查已保存 → 提交离线下载
+ *     → 等完成 → 取直链），跟"搜一下就回"完全不是一个量级。仍和搜索共用 5 秒档的那阵子，
+ *     这类线路一律在 5 秒处被 abort，客户端拿到 502 就原样重试、再走一遍整条链 —— 越重试越慢。
  * 上限与模板保存时的校验一致（60s / 120s），这里再兜一次 —— 手改模板文件也不至于把请求挂死。
  */
 const searchTimeoutMs = (cfg) => Math.min(60000, Math.max(1000, Math.round((Number((cfg || {}).timeoutSec) || 5) * 1000)));
 const detailTimeoutMs = (cfg) => Math.min(120000, Math.max(1000, Math.round((Number((cfg || {}).detailTimeoutSec) || 10) * 1000)));
+const playTimeoutMs = (cfg) => Math.min(120000, Math.max(1000, Math.round((Number((cfg || {}).playTimeoutSec) || 25) * 1000)));
 
 const round3 = (n) => Math.round(Number(n || 0) * 1000) / 1000;
 
@@ -162,6 +166,9 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
   const cfg = params || {};
   const t = Math.max(1000, Number(timeoutMs) || searchTimeoutMs(cfg));
   const c = Math.max(1, Math.min(32, Number(concurrency) || cfg.concurrency || 8));
+  /* 「最近一次测速失败的站要不要先跳过」——**按模板开关**（`skipFailedSites`，缺省开，
+   * 即原有的行为；关掉就照打，用来确认那几个站现在到底行不行）。 */
+  const skipFailed = cfg.skipFailedSites !== false;
   const byId = sourceMap(sources);
   const queue = (sites || []).slice();
   const results = [];
@@ -176,8 +183,9 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
         if (i >= queue.length) return;
         const site = queue[i];
         /* **最近一次测速失败**的站：这几轮**跳过**，不打它 —— 不动勾选，站还在清单里；
-         * 下一轮测速（或点该站的「测速」）成功即自动恢复。判据见 site-stats.shouldSkip。 */
-        const skip = siteStats.shouldSkip(site.source, site.key);
+         * 下一轮测速（或点该站的「测速」）成功即自动恢复。判据见 site-stats.shouldSkip。
+         * 这一条按模板开关（`skipFailedSites`）走：关掉就照打。 */
+        const skip = skipFailed ? siteStats.shouldSkip(site.source, site.key) : null;
         if (skip) {
           skipped += 1;
           results.push({
@@ -546,10 +554,19 @@ async function fetchDetailOnce(source, site, vodId, timeoutMs, season, episode, 
     r0.ok = true;
     r0.detail = res.detail;
     /* 把源标的规格挂上去（面板这半件事，见函数头）。`items` 与 `target` 是**同一个对象的引用**
-     * （电影取法里 target = items[0]），所以按线路各补一次就行 —— 别重复补两遍。 */
+     * （电影取法里 target = items[0]），所以按线路各补一次就行 —— 别重复补两遍。
+     *
+     * ⚠️ **插件自己给的规格优先**，从集名里正则猜的那份只做兜底（原先是 `Object.assign` 直接盖掉）：
+     * 插件手里那份常常是准的（PikPak 的种子清单里就有每个文件的字节数），而集名不一定带标注 ——
+     * 种子里的文件名写成 `4k688.com@SNOS-377.mp4` 时，猜出来的体积是 0，Emby 那条 `Size` 就一直空着。
+     * 判"这项插件给没给"用**空值**：`undefined` / `null` / `''` / `0` / `false` 都算没给。 */
     for (const line of r0.detail.lines || []) {
       for (const x of [].concat(line.items || [], line.target ? [line.target] : [])) {
-        Object.assign(x, parseEpisodeMeta(x.name));
+        const guessed = parseEpisodeMeta(x.name);
+        for (const k of Object.keys(guessed)) {
+          const own = x[k];
+          if (own === undefined || own === null || own === '' || own === 0 || own === false) x[k] = guessed[k];
+        }
       }
     }
     return r0;
@@ -929,8 +946,9 @@ const NON_HTTP_URL = /^(push|magnet|ed2k|thunder|ftp|rtmp):/i;
  */
 async function playEpisode(opts = {}) {
   const cfg = opts.params || {};
-  /* 播放走**搜索那一档**超时（取一个播放地址本来就该快）；要更宽的是详情，不是它。 */
-  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || searchTimeoutMs(cfg));
+  /* 播放走**自己那一档**超时（默认 25 秒，比搜索宽得多）—— 网盘类线路取一个地址要串行打好几发，
+   * 跟搜索共用一个 5 秒档会让它们一律超时（见上面 `playTimeoutMs` 的说明）。 */
+  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || playTimeoutMs(cfg));
   const t0 = Date.now();
   const ref = String(opts.ref || '').trim();
   const done = (payload) => Object.assign({ ref, elapsedMs: Date.now() - t0 }, payload);
@@ -991,6 +1009,7 @@ module.exports = {
   matchDefaults,
   searchTimeoutMs,
   detailTimeoutMs,
+  playTimeoutMs,
   lineFilter,
   fetchDetail,
   aggregateDetail,

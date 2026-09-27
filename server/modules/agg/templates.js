@@ -23,16 +23,24 @@ const DOMAINS = path.join(DIR, 'domains.json');
 const ID_RE = /^tpl_[a-z0-9]{6,32}$/;
 
 /** 进模板的参数（打分、过滤、超时、并发）。留在这里是为了"读一份模板就能拿到全部调优项"。 */
-const PARAM_KEYS = ['timeoutSec', 'detailTimeoutSec', 'concurrency', 'matchMinScore', 'matchMaxItems', 'matchExtraK', 'matchExtraAll', 'lineFilter'];
+const PARAM_KEYS = ['timeoutSec', 'detailTimeoutSec', 'playTimeoutSec', 'concurrency', 'matchMinScore', 'matchMaxItems', 'matchExtraK', 'matchExtraAll', 'lineFilter', 'skipFailedSites'];
 const PARAM_DEFAULTS = {
   timeoutSec: 5,
   detailTimeoutSec: 10,
+  /* 取播放地址（`POST /play`）的单站上限。**必须比搜索宽**：网盘类线路（PikPak 那种）取一个地址
+   * 要串行打登录 → 查保存目录 → 提交离线下载 → 等完成 → 取直链好几发，5 秒档下会被一律判成超时，
+   * 客户端拿到 502 再原样重试，越重试越慢（见 docs/adr/0026 的同款取舍）。 */
+  playTimeoutSec: 25,
   concurrency: 8,
   matchMinScore: 0.85,
   matchMaxItems: 8,
   matchExtraK: 0,
   matchExtraAll: false,
   lineFilter: '',
+  /* 最近一次测速失败的站，聚合搜索时先跳过（勾选不变，测速成功即自动恢复）。
+   * 缺省**开** —— 这是原来一直就有的行为（见 agg/service.js 的 aggregateSearch）；
+   * 关掉 = 照打，用来确认"那几个站现在到底行不行"。 */
+  skipFailedSites: true,
 };
 
 function ensureDir() {
@@ -83,12 +91,15 @@ function normParams(raw) {
   return {
     timeoutSec: num(o.timeoutSec, PARAM_DEFAULTS.timeoutSec),
     detailTimeoutSec: num(o.detailTimeoutSec, PARAM_DEFAULTS.detailTimeoutSec),
+    playTimeoutSec: num(o.playTimeoutSec, PARAM_DEFAULTS.playTimeoutSec),
     concurrency: num(o.concurrency, PARAM_DEFAULTS.concurrency),
     matchMinScore: num(o.matchMinScore, PARAM_DEFAULTS.matchMinScore),
     matchMaxItems: num(o.matchMaxItems, PARAM_DEFAULTS.matchMaxItems),
     matchExtraK: num(o.matchExtraK, PARAM_DEFAULTS.matchExtraK),
     matchExtraAll: o.matchExtraAll === true,
     lineFilter: String(o.lineFilter == null ? '' : o.lineFilter).trim(),
+    /* 缺省 true（= 老模板文件里没有这个字段时也按"跳过"走，行为与从前一致） */
+    skipFailedSites: o.skipFailedSites !== false,
   };
 }
 
@@ -119,6 +130,7 @@ function validate(raw) {
   const p = normParams(o.params);
   if (!(p.timeoutSec >= 1 && p.timeoutSec <= 60)) return '单站超时取值 1~60 秒';
   if (!(p.detailTimeoutSec >= 1 && p.detailTimeoutSec <= 120)) return '取详情超时取值 1~120 秒';
+  if (!(p.playTimeoutSec >= 1 && p.playTimeoutSec <= 120)) return '播放超时取值 1~120 秒';
   if (!(p.concurrency >= 1 && p.concurrency <= 32)) return '并发数取值 1~32';
   if (!(p.matchMinScore >= 0 && p.matchMinScore <= 1)) return '打分分数线取值 0~1（0 = 不筛选）';
   if (!(p.matchMaxItems >= 1 && p.matchMaxItems <= 20)) return '最多留几条命中取值 1~20';

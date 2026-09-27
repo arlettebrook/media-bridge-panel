@@ -260,6 +260,7 @@ function editor(t) {
   const num = (v, d) => (v === undefined || v === null || v === '' ? d : v);
   const to = el('input', { type: 'number', class: 'w-sm', value: String(num(p.timeoutSec, 5)), min: '1', max: '60' });
   const dto = el('input', { type: 'number', class: 'w-sm', value: String(num(p.detailTimeoutSec, 10)), min: '1', max: '120' });
+  const pto = el('input', { type: 'number', class: 'w-sm', value: String(num(p.playTimeoutSec, 25)), min: '1', max: '120' });
   const cc = el('input', { type: 'number', class: 'w-sm', value: String(num(p.concurrency, 8)), min: '1', max: '32' });
   const minScore = el('input', { type: 'number', class: 'w-md', value: String(num(p.matchMinScore, 0.85)), min: '0', max: '1', step: '0.05' });
   const maxItems = el('input', { type: 'number', class: 'w-md', value: String(num(p.matchMaxItems, 8)), min: '1', max: '20' });
@@ -271,7 +272,11 @@ function editor(t) {
     placeholder: '正则，匹配线路名；留空 = 不过滤。例：夸克原画|百度原画',
     spellcheck: 'false',
   });
-  for (const x of [to, dto, cc, minScore, maxItems, extraK, lineFilter]) x.addEventListener('input', mark);
+  for (const x of [to, dto, pto, cc, minScore, maxItems, extraK, lineFilter]) x.addEventListener('input', mark);
+  /* 站点取数：最近一次测速失败的站要不要先跳过（口径见 server/modules/agg/templates.js 的 skipFailedSites）。
+   * 默认勾着 —— 与原来一直就有的行为一致；取消勾选就照打，用来确认那几个站现在到底行不行。 */
+  const skipFailedCb = el('input', { type: 'checkbox', checked: p.skipFailedSites !== false });
+  skipFailedCb.addEventListener('change', mark);
   const extraKLabel = el(
     'label',
     { class: 'chk', title: '前 N 条一条能用的都没拿到时，按分数继续往下打，最多再试这么多条；第一批拿到能用的就不再往下打。填 0 = 不补打' },
@@ -292,12 +297,14 @@ function editor(t) {
     const params = {
       timeoutSec: Number(to.value),
       detailTimeoutSec: Number(dto.value),
+      playTimeoutSec: Number(pto.value),
       concurrency: Number(cc.value),
       matchMinScore: Number(minScore.value),
       matchMaxItems: Number(maxItems.value),
       matchExtraK: Number(extraK.value),
       matchExtraAll: extraAllCb.checked,
       lineFilter: lineFilter.value.trim(),
+      skipFailedSites: skipFailedCb.checked,
     };
     const bad = paramsError(params);
     if (bad) return toast(bad, true);
@@ -333,12 +340,24 @@ function editor(t) {
         el('h3', { text: `编辑「${t.name}」` }),
         el('div', { class: 'row' }, el('span', { class: 'muted', text: '名称' }), name),
         group('超时与并发（单位都是秒）', [
-          el('label', { class: 'chk', title: '搜索 / 播放（以及首次 /init）的单站超时。慢站设太小会被一律判成超时' }, to, '单站超时'),
+          el('label', { class: 'chk', title: '搜索（以及首次 /init）的单站超时。慢站设太小会被一律判成超时' }, to, '单站超时'),
           el(
             'label',
             { class: 'chk', title: '取详情（POST /detail）的单站超时。比搜索更宽 —— 剧集动辄几十上百集，响应体大、上游拼装慢' },
             dto,
             '取详情超时'
+          ),
+          el(
+            'label',
+            {
+              class: 'chk',
+              title:
+                '取播放地址（POST /play）的单站超时。要比搜索宽得多 —— 网盘类线路（PikPak 那种）' +
+                '取一个地址要串行打登录、查已保存、提交离线下载、等完成、取直链好几发，' +
+                '跟搜索共用一档会被一律判成超时（客户端拿到 502 就重试，越重试越慢）',
+            },
+            pto,
+            '播放超时'
           ),
           el('label', { class: 'chk' }, cc, '并发数'),
         ]),
@@ -349,12 +368,27 @@ function editor(t) {
           el('label', { class: 'chk', title: '不看"再往下打几条"，一直往下打到拿到一条能用的或名单打完（每个候选都要打一次站源 /detail，可能慢）' }, extraAllCb, '匹配到底'),
         ]),
         group('线路过滤', [lineFilter]),
+        group('站点取数', [
+          el(
+            'label',
+            {
+              class: 'chk',
+              title:
+                '勾上：最近一次测速失败的站点在聚合搜索时先跳过（模板里的勾选不动，下一轮测速成功就自动恢复）。' +
+                '取消勾选：照打 —— 用来确认"那几个站现在到底行不行"',
+            },
+            skipFailedCb,
+            '跳过测速失败的站点'
+          ),
+        ]),
         el('div', {
           class: 'note',
           text:
-            '「单站超时」= 搜索 / 播放 / 首次 `/init` 的单站上限；「取详情超时」= 取详情 `POST /detail` 的单站上限，单独一项、默认更宽。' +
+            '「单站超时」= 搜索 / 首次 `/init` 的单站上限；「取详情超时」= 取详情 `POST /detail` 的单站上限；' +
+            '「播放超时」= 取播放地址 `POST /play` 的单站上限（网盘类线路要串行打好几发，所以默认更宽）。' +
             '打分口径：名字 0.7 · 季集 0.2 · 年份 0.1（缺的项不计），名字像不上的直接出局。' +
             '「能用的」= 有线路、且定位到你要的那一集；前 N 条一条能用的都没拿到时才按分数往下补打（最多再试 K 条）。' +
+            '「跳过测速失败的站点」勾着时，那几个站这一步不打（勾选不变，测速成功即恢复）。' +
             '⚠️ 打分与过滤只在两层式站点上生效（一层式站点给词就直接回结果，不做筛选）。',
         })
       ),
@@ -367,6 +401,7 @@ function editor(t) {
 function paramsError(p) {
   if (!(p.timeoutSec >= 1 && p.timeoutSec <= 60)) return '单站超时填 1~60 秒';
   if (!(p.detailTimeoutSec >= 1 && p.detailTimeoutSec <= 120)) return '取详情超时填 1~120 秒';
+  if (!(p.playTimeoutSec >= 1 && p.playTimeoutSec <= 120)) return '播放超时填 1~120 秒';
   if (!(p.concurrency >= 1 && p.concurrency <= 32)) return '并发数填 1~32';
   if (!(p.matchMinScore >= 0 && p.matchMinScore <= 1)) return '分数线填 0~1（0 = 不过滤分数线）';
   if (!(p.matchMaxItems >= 1 && p.matchMaxItems <= 20)) return '最多留几条填 1~20';
@@ -475,6 +510,7 @@ function paintSites() {
         '站点按**来源**（源插件的实例）分成页签，一次只开一个来源。勾选只记在这一页的草稿里 —— 点顶部的「保存这套模板」才写回。' +
         '「延迟」= 服务端测速（每站一发 `POST /search`，片名随机取、非 200 换一个再测一发，单站 15 秒超时）；' +
         '测速的开关与间隔在「面板设置」，测速结果是面板共享的一份、不跟模板走。标红 = 测速失败，或比这套模板的单站超时还慢。' +
+        '（这套模板勾了「跳过测速失败的站点」时，标红的站在聚合搜索里会被先跳过。）' +
         '「能力」列是源自己申报的，仅供参考（源常漏报）。',
     })
   );
@@ -692,7 +728,7 @@ function delayCell(s, timeoutMs) {
       'td',
       {
         class: 'note err-note',
-        title: `测速失败：${why}\n用的片名「${one.wd}」${one.tries > 1 ? `（第 ${one.tries} 发，首发失败后换过词）` : ''}\n聚合搜索会先跳过这一列失败的站 —— 点「测速」复测成功即恢复。\n${callNote}`,
+        title: `测速失败：${why}\n用的片名「${one.wd}」${one.tries > 1 ? `（第 ${one.tries} 发，首发失败后换过词）` : ''}\n这套模板开了「跳过测速失败的站点」时，聚合搜索会先跳过它 —— 点「测速」复测成功即恢复。\n${callNote}`,
       },
       one.status ? 'HTTP ' + one.status : '失败',
       btn

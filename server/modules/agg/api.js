@@ -419,7 +419,8 @@ async function play(opts = {}) {
   const ref = String(opts.ref || '').trim();
   if (!ref) return fail('BAD_INPUT', 400, '请提供 ref（版本 Id 里那段，由源插件编）');
 
-  /* 域 → 模板：只借它那一档超时（播放走搜索那一档）。**站点与线路不再经过这里** ——
+  /* 域 → 模板：只借它那一档超时（播放有**自己那一档** `playTimeoutSec`，见 service.playTimeoutMs）。
+   * **站点与线路不再经过这里** ——
    * `ref` 里是什么、去哪儿取，都是插件的事（见 docs/plugin-migration-plan.md 批次 7）。 */
   const dom = ensureDomain(opts.domain);
   if (dom.error) return dom.error;
@@ -433,7 +434,7 @@ async function play(opts = {}) {
 }
 
 /**
- * 测速用的**固定超时** —— **不读 `agg.timeoutSec`**（那个是给播放/搜索链路的，默认 5 秒）。
+ * 测速用的**固定超时** —— **不读 `agg.timeoutSec`**（那个是给搜索链路的，默认 5 秒）。
  * 拿 5 秒去测速，慢站会一律被记成"超时"，量到的是设置而不是站；15 秒够容下实测里最慢的
  * 几发搜索（冷回源 0.4~1s、个别站 5s+），也不至于让一轮测速拖太久。
  */

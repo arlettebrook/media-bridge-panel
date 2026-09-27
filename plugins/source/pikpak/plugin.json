@@ -1,0 +1,9 @@
+{
+  "id": "pikpak",
+  "name": "PikPak 磁力片源",
+  "version": "1.0.0",
+  "type": "source",
+  "main": "index.js",
+  "webui": "ui/index.html",
+  "description": "磁力搜索（Sukebei）→ PikPak 离线下载 → 取回可直连的播放地址；账号、令牌与保存目录都由插件自己保管"
+}
