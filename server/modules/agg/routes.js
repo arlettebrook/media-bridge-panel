@@ -4,11 +4,14 @@
  *   GET  /api/agg/sources 源清单（来自源插件的申报）
  *   GET  /api/agg/sites   源清单 + 站点清单（同一趟拿全；插件自己那个动作一次给齐）
  *   POST /api/agg/search  按片名并发搜**多个源的多个站源**，并**顺手打分**：
- *                         `{wd, page?, year?, season?, episode?, minScore?, maxItems?, keys?}` →
+ *                         `{tpl?|domain?, wd, page?, year?, season?, episode?, minScore?, maxItems?, keys?}` →
  *                         出参里每个条目带 `score`/`matched`/`matchReason`，顶层给 `matched` 与
  *                         `unmatched`（**失败也回，带原因**）+ `match` 计数。打分口径见 `match.js`。
+ *                         ⚠️ 作用域二选一：`tpl` = 直接点名一套模板（web 那页就是这么选的），
+ *                         `domain` = 按域查（客户端那条路）；两者都落到同一份模板上（见 api.scopeOf）。
  *   POST /api/agg/detail  取某部影视的详情：**内部含搜索**（或 `source+site+vodId` 快路径），
  *                         把站源协议（`$$$` / `#` / `$`）拆成「线路 → 选集」，需要时可定位某一集
+ *                         （作用域同上：`tpl` 或 `domain` 二选一）
  *   POST /api/agg/play    按 `{domain, ref}` 取播放地址（`ref` 由源插件编，面板不解释它）
  *
  * 源清单与站点清单都**来自源插件**（`站点清单` 动作，见 `agg/source-bridge.js`）：
@@ -121,8 +124,9 @@ module.exports = function routes(r) {
     const body = await readBody(req);
     if (!body || !String(body.wd || '').trim()) return sendError(res, 400, '请提供搜索关键字 wd');
 
-    /* 域 → 模板：参数与站点都来自那套模板；**没配模板就如实为空并点名**（见 docs/adr/0033） */
-    const dom = api.ensureDomain(body.domain);
+    /* 作用域（参数与站点都来自那一套模板）：web「聚合搜索」页按**模板**选（`tpl`），
+     * 客户端按**域**选（`domain`，由"域 → 模板"对照翻译）。**没配模板就如实为空并点名**（见 docs/adr/0033） */
+    const dom = api.scopeOf(body);
     if (dom.error) return fail(res, dom.error);
     const cfg = dom.params;
     const { sources, sites } = await api.loadSites();
@@ -132,7 +136,7 @@ module.exports = function routes(r) {
       if (!api.liveSources(sources).length) {
         return sendError(res, 400, '所有聚合源都取不到站点：' + sources.map((s) => `${s.id} ${s.error || '未知错误'}`).join('；'));
       }
-      return sendError(res, 400, '没有可聚合的站源：请到「模板」页把要用的站点勾进这个域用的那套模板');
+      return sendError(res, 400, '没有可聚合的站源：请到「模板」页把要用的站点勾进选中的那套模板');
     }
 
     const out = await aggregateSearch(sources, picked, {
@@ -144,7 +148,7 @@ module.exports = function routes(r) {
        * `minScore` / `maxItems` 不传就用**这套模板**的参数。`minScore: 0` = 不按分数线筛选。 */
       want: { name: body.name || body.wd, year: body.year, season: body.season, episode: body.episode },
       matchOptions: { minScore: body.minScore, maxItems: body.maxItems, unmatchedMax: body.unmatchedMax },
-      /* 参数与站点顺序都来自这套模板（上面已按域解析过） */
+      /* 参数与站点顺序都来自这套模板（上面已按模板解析过） */
       params: dom.params,
     });
     /* `ranked` 是"过关全量的排名"，只给聚合层内部（detail 的接续补打）用；

@@ -74,8 +74,8 @@
 | POST | `/api/agg/templates` | 存一份模板（站点集合 + 打分过滤参数 + 超时与并发） |
 | DELETE | `/api/agg/templates/:id` | 删一份模板（各域对它的指向一并清掉） |
 | POST | `/api/agg/domains/:domain` | 把某个域指到某份模板上（`templateId` 传空 = 取消这个域的指向） |
-| POST | `/api/agg/search` | **聚合搜索（带打分）**：`{domain, wd, page?, year?, season?, episode?, minScore?, maxItems?, timeoutMs?, concurrency?, keys?}` → `{wd, page, elapsedMs, sites, matched, unmatched, match, stats}`；`domain` 决定用哪套模板（参数与站点都来自它）；`keys` 是**站点白名单** `[{source,key}, …]`；每条结果带 `score`/`matched`/`matchReason` |
-| POST | `/api/agg/detail` | 取详情（内部含搜索）：`{domain, name, year?, season?, episode?, minScore?, maxItems?, extraK?, extraAll?, timeoutMs?, detailTimeoutMs?, keys?, source?+site?+vodId?}` → `{ok:true, sites, picked, stats, sources, elapsedMs}`（每站一条 `detail`：线路 → 选集）；调用方输入有误 → 400 `{error}`。**命中的站一律全取**（没有「全取」开关） |
+| POST | `/api/agg/search` | **聚合搜索（带打分）**：`{tpl\|domain, wd, page?, year?, season?, episode?, minScore?, maxItems?, timeoutMs?, concurrency?, keys?}` → `{wd, page, elapsedMs, sites, matched, unmatched, match, stats}`；**作用域二选一**：`tpl` = 直接点名一套模板（web 的「聚合搜索」页就这么选），`domain` = 按域查（客户端那条路）—— 两者都落到同一份模板上（参数与站点都来自它，见 `agg/api.js` 的 `scopeOf`）；`keys` 是**站点白名单** `[{source,key}, …]`；每条结果带 `score`/`matched`/`matchReason` |
+| POST | `/api/agg/detail` | 取详情（内部含搜索）：`{tpl\|domain, name, year?, season?, episode?, minScore?, maxItems?, extraK?, extraAll?, timeoutMs?, detailTimeoutMs?, keys?, source?+site?+vodId?}` → `{ok:true, sites, picked, stats, sources, elapsedMs}`（每站一条 `detail`：线路 → 选集）；作用域同上（`tpl` 或 `domain`）；调用方输入有误 → 400 `{error}`。**命中的站一律全取**（没有「全取」开关） |
 | POST | `/api/agg/play` | 取播放地址：`{domain, ref, clientHost?}` → `{ok:true, play:{urls, header, parse, nonHttp}}`。地址会过期，**每次播放都现取**（缓存在插件那边） |
 | GET | `/api/agg/site-test` | **站点测速状态**（服务端后台任务）：`{enabled, hours, concurrency, timeoutMs, running, done, total, okCount, emptyCount, badCount, stopped, lastRunAt, lastElapsedMs, nextRunAt, pending}` |
 | POST | `/api/agg/site-test/start` | **开一轮测速**：body 可带 `keys`（只测这些站；省略 = **全部站点**）；上一次没跑完 → **409** `{busy:true}` |
@@ -98,7 +98,8 @@ emby 层直接 `require` 该模块而**不经过 HTTP**（原因见 [ARCHITECTUR
   画质标注（如 `斗破苍穹年番4更211[2025][动漫]`），直接检索无法命中 ⇒ 版本列表为空
   （在 Emby 中表现为「条目在、点开没有版本」）。本地打分不需要外部依赖，且能说明「为什么是这一条」。
 - **阈值与条数进模板**（`matchMinScore` 默认 0.85 / `matchMaxItems` 默认 8 / `matchExtraK` 默认 0，
-  在「模板」页修改），请求里可覆盖（web「聚合搜索」页的那几个输入框即对应它们）。
+  在「模板」页修改）。web 的「聚合搜索」页**不再填这两项**（它只决定"搜什么"：关键字 / 季 / 集 / 年份），
+  要单次覆盖只能直接调接口（请求体里的 `minScore` / `maxItems`，见上面的接口表）。
 - **条数为什么要限制**：每多保留一条命中，后续就要多打一次站源 `/detail` 取链。实测保留 3 条 ≈ 2s，
   全部保留要到十几秒。
 - **两个超时分开、单位是秒**（见 [ADR-0026](adr/0026-seconds-and-detail-timeout.md)）：

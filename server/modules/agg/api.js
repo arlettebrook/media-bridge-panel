@@ -62,6 +62,35 @@ function ensureDomain(domain) {
 }
 
 /**
+ * 直接按**模板 id** 定位作用域 —— web 的「聚合搜索」页是按模板选的，不必先知道"这属于哪个域"。
+ * 形状与 `ensureDomain` 一致（`{template, params, selection}`），两处只是"怎么找到那份模板"不同。
+ */
+function ensureTemplate(tplId) {
+  const id = String(tplId || '').trim();
+  const template = id ? templates.read(id) : null;
+  if (!template) return { error: fail('NO_TEMPLATE', 404, `没有这份模板：${id || '(空)'}`) };
+  return {
+    template,
+    /* 站点顺序也由模板决定（模板里勾的顺序 = 聚合取站优先级），所以并进 params 一起往下传 */
+    params: Object.assign({}, template.params, { order: template.sites }),
+    selection: { enabled: template.sites, order: template.sites },
+  };
+}
+
+/**
+ * 搜索 / 取详情的**作用域** —— 两种入口最后都落到同一份模板上：
+ *   · `tpl`    —— web「聚合搜索」页按**模板**选（面板上直接挑一套模板，见 docs/adr/0033）；
+ *   · `domain` —— 客户端（Emby）那条路按**域**问（`tmdb` / `tvdb` 这类前缀），
+ *                 由「其他设置」里的"域 → 模板"对照翻译成模板。
+ * 两个都不给 ⇒ 报错点明缺什么：不猜、也不回退到内置默认值。
+ */
+function scopeOf(opts) {
+  const o = opts || {};
+  if (String(o.tpl || '').trim()) return ensureTemplate(o.tpl);
+  return ensureDomain(o.domain);
+}
+
+/**
  * 拉所有**参与聚合**的源的站点清单；给每个站点打上 `source` / `sourceName`。
  *
  * **源与站点都来自源插件**（`站点清单` 动作）：面板这边不再有"聚合源配置"，
@@ -254,7 +283,7 @@ async function detail(opts = {}) {
     return fail('BAD_INPUT', 400, '请提供 name（影视名），或用 source + site + vodId 直接指定绑定');
   }
 
-  const dom = ensureDomain(opts.domain);
+  const dom = scopeOf(opts);
   if (dom.error) return dom.error;
   const cfg = dom.params;
   const { sources, sites } = await loadSites();
@@ -547,6 +576,9 @@ module.exports = {
   fail,
   templates,
   ensureDomain,
+  ensureTemplate,
+  /** 作用域：`tpl`（web 按模板选）或 `domain`（客户端按域选）二选一，见函数说明 */
+  scopeOf,
   /** 某个域的参数（emby 层拼版本列表时要按同一套规则过滤线路，见 docs/adr/0025） */
   paramsFor: (domain) => templates.paramsFor(String(domain || '').trim()),
   lineFilter,

@@ -42,19 +42,22 @@ export function toast(msg, isErr = false) {
  *     title: '添加猫源',
  *     body: [ ...节点 ],                       // 表单字段
  *     actions: [{ label, primary, onclick }],  // onclick 返回 false = **别关**（校验不过时用）
+ *     onClose,                                 // 窗口真关掉时叫一声（✕ / Esc / 点遮罩也算）
  *   }) → { root, close }
  *
  * 关闭方式：右上角 ✕、取消按钮、点遮罩、Esc。同一时刻只留一个（再开就把上一个关掉）。
  */
 let currentModal = null;
 
-export function modal({ title, body = [], actions = [] } = {}) {
+export function modal({ title, body = [], actions = [], onClose } = {}) {
   if (currentModal) currentModal.close();
 
   const close = () => {
     document.removeEventListener('keydown', onKey);
     mask.remove();
     if (currentModal && currentModal.root === mask) currentModal = null;
+    /* 调用方拿它把自己那种"窗口没了 = 用户放弃了"的场景收个尾（页内确认框就靠这个） */
+    if (typeof onClose === 'function') onClose();
   };
   const onKey = (e) => {
     if (e.key === 'Escape') close();
@@ -99,6 +102,33 @@ export function modal({ title, body = [], actions = [] } = {}) {
 
   currentModal = { root: mask, close };
   return currentModal;
+}
+
+/**
+ * 页内确认框（替代原生 `confirm`）：`await` 到一个布尔 —— true = 点了确认那颗按钮。
+ * ✕ / Esc / 点遮罩关掉一律算"取消"（靠 modal 的 onClose 兜住）。
+ *
+ * 为什么不用原生 `confirm`：它在窄屏上被浏览器画成一条窄横条，字挤成一团、按钮还点不准
+ * （模板页那边已按这个口径改过）。
+ */
+export function confirmModal({ title, text, okLabel = '确定', primary = true }) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      resolve(val);
+    };
+    modal({
+      title,
+      body: [el('p', { class: 'note', text })],
+      actions: [
+        { label: '取消', onclick: () => finish(false) },
+        { label: okLabel, primary, onclick: () => finish(true) },
+      ],
+      onClose: () => finish(false),
+    });
+  });
 }
 
 /** 带标题的代码块（接口文档、原始响应体都用它） */

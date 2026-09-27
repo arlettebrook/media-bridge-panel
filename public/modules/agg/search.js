@@ -12,34 +12,42 @@
  *     给一个「按第 1 项重查」（电影在客户端就是按第 1 项取的）—— 早先那句"不会进客户端的版本列表"
  *     在没填集号时并不成立，会让用户误以为"拿不到版本"。
  *
- * 布局上的取舍：搜索参数与按钮同一行；打分旋钮另起一行；
+ * 布局上的取舍：**模板选择器**打头，后面跟搜索参数（关键字 / 季 / 集 / 年份）与按钮，同一行；
+ * 下面一行只放「全量站点」这个调试开关
+ * —— **打分与调优旋钮一概不放这里**（分数线 / 条数 / 超时 / 并发 / 线路过滤都是"这一套模板"的属性，
+ * 在「聚合设置 · 模板」里改一处，见 docs/adr/0033）；**上游第几页也不放**（客户端那条路固定取第 1 页，
+ * 翻页只会看到客户端拿不到的结果）；
  * 结果里**命中的排前面、长列表折叠**；不单列"匹配失败"卡片（合并视图里每条都写着"没进 + 原因"）；
  * 版本详情**弹窗**显示，而不是追加到页面最底部（追加在最底部时不易发现）。
+ *
+ * ⚠️ 这一页的定位是**诊断台**而不是日常入口：客户端要片子走的是 `/api/agg/*`（Emby 那侧调），
+ * 不经过这个页面。这里用来回答"这个名字为什么一条都没命中""某个站到底回了什么""客户端点开
+ * 这个条目会看到哪些线路"。
  */
 import { el, toast, modal, codeBlock } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
-import { ensureAggSites, ensureTemplates, templateOf } from '../../core/store.js';
+import { ensureAggSites, ensureTemplates } from '../../core/store.js';
 import { renderPage } from '../../core/shell.js';
 
 /** 一个站超过这么多条就先折叠，点「展开」再看（一个站挂上百条同名很常见） */
 const FOLD_AT = 12;
 
 export async function renderAgg(v) {
-  /* 模板决定"这次搜索用哪批站点、默认参数是多少"，而模板由**域**决定（见 docs/adr/0033）。
+  /* 模板决定"这次搜索用哪批站点、默认参数是多少"，模板就在**这一页上挑**（见 docs/adr/0033）。
    * 模板清单不走源探测，几十毫秒 —— 等它一下，页面才不会先用错默认值画一遍。 */
   try {
     await ensureTemplates();
   } catch {
-    /* 拿不到就按空模板画：下面的域选择器会显示"（没有已注册的域）" */
+    /* 拿不到就按空模板画：下面的模板选择器会显示"（还没有模板）" */
   }
-  const providers = S.aggProviders || [];
-  /* 域是**页面上显式选的**，不猜：只有一个域时它就是唯一那一项 */
-  if (!S.aggDomain || !providers.some((p) => p.prefix === S.aggDomain)) {
-    S.aggDomain = (providers[0] || {}).prefix || '';
+  const tpls = S.aggTemplates || [];
+  /* 模板是**页面上显式选的**，不猜：选过的那套被删了就重挑一套 ——
+   * 先跟「模板」页正在编的那套（多半就是刚调过参数的那套），再退到第一套。 */
+  if (!S.aggTpl || !tpls.some((t) => t.id === S.aggTpl)) {
+    S.aggTpl = (tpls.some((t) => t.id === S.tplId) ? S.tplId : (tpls[0] || {}).id) || '';
   }
-  const tpl = templateOf(S.aggDomain);
-  const tparams = (tpl && tpl.params) || {};
+  const tpl = tpls.find((t) => t.id === S.aggTpl) || null;
   const tplSites = (tpl && tpl.sites) || [];
 
   const wdInput = el('input', { type: 'text', placeholder: '搜索关键字，例如：斗破苍穹', value: S.aggKeyword, spellcheck: 'false' });
@@ -47,21 +55,17 @@ export async function renderAgg(v) {
   wdInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') run();
   });
-  const pageInput = el('input', { type: 'number', class: 'w-xs', value: S.aggPage, min: '1' });
-  pageInput.addEventListener('input', () => (S.aggPage = pageInput.value));
   const useAllCb = el('input', { type: 'checkbox', checked: S.aggUseAll });
   useAllCb.addEventListener('change', () => {
     S.aggUseAll = useAllCb.checked;
     renderPage();
   });
 
-  /* ---- 打分用的输入（默认值取「聚合设置」里那两个；页面上改只影响这一次请求）---- */
-  const defaults = {
-    minScore: tparams.matchMinScore === undefined ? 0.85 : tparams.matchMinScore,
-    maxItems: tparams.matchMaxItems === undefined ? 8 : tparams.matchMaxItems,
-  };
-  /* 宽度档位见 style.css 的 `.chk > input.w-*`：季/集/年份只要小框（w-xs），
-   * 分数与条数要能看全 `0.85` / `15` 这种值（w-md）—— 编辑框太小时数值显示不全。 */
+  /* ---- 打分用的输入（只有季 / 集 / 年份）----
+   * 分数线、最多几条、超时、并发、线路过滤**这一页都不填** —— 它们属于模板，
+   * 在「聚合设置 · 模板」里改一处（读一份模板就能拿到全部调优项，见 docs/adr/0033）。
+   * 季 / 集 / 年份是"这次要哪一部"的坐标，与关键字同属搜索参数，留在这一行。
+   * 宽度档位见 style.css 的 `.chk > input.w-*`：季 / 集 / 年份只要小框（w-xs）。 */
   const numInput = (key, fallback, min, max, title, cls) => {
     const cur = S[key] === undefined || S[key] === null ? fallback : S[key];
     const inp = el('input', { type: 'number', class: cls || 'w-sm', value: String(cur), min: String(min), max: String(max), title: title || '' });
@@ -71,15 +75,6 @@ export async function renderAgg(v) {
   const seasonInput = numInput('aggSeason', '', 0, 99, '打分用：源里的集名大多是扁平集号，通常只填「集」就够', 'w-xs');
   const episodeInput = numInput('aggEpisode', '', 0, 9999, '打分用：想让这一集"能定位到"就必须填它（客户端是按 TMDB 的季集号来要片子的）', 'w-xs');
   const yearInput = numInput('aggYear', '', 1900, 2100, '打分用：年份权重最低（0.1），填错也不会一票否决', 'w-xs');
-  const minScoreInput = numInput(
-    'aggMinScore',
-    defaults.minScore,
-    0,
-    1,
-    '打分 ≥ 它的才算命中。填 0 = 不过滤分数线（只按分数排名取前 N 条）。权重：名字 0.7 · 季集 0.2 · 年份 0.1（缺的项不计）',
-    'w-md'
-  );
-  const maxItemsInput = numInput('aggMaxItems', defaults.maxItems, 1, 20, '最多留几条命中（想要几条能用的）。每多留一条，后面要多打一次站源 /detail 取链（多 = 慢）', 'w-md');
 
   /**
    * 输入框取值 → 数字（留空 = 不传这一项）。
@@ -112,9 +107,14 @@ export async function renderAgg(v) {
     if (S.aggUseAll) await ensureAggSites();
     const keys = S.aggUseAll ? S.aggSites.filter((s) => s.searchable).map((s) => ({ source: s.source, key: s.key })) : null;
     if (!S.aggUseAll && !tplSites.length) {
-      return toast(tpl ? `「${tpl.name}」这套模板还没勾站点，去「聚合 · 模板」勾` : `域 ${S.aggDomain || '?'} 还没有配模板，去「聚合 · 模板」配一套`, true);
+      return toast(
+        tpl
+          ? `「${tpl.name}」这套模板还没勾站点，去「聚合设置 · 模板」勾`
+          : '还没有模板：先去「聚合设置 · 模板」建一套',
+        true
+      );
     }
-    if (S.aggUseAll && !keys.length) return toast('拿不到可搜索站点列表，先去「聚合 · 模板」刷新站点', true);
+    if (S.aggUseAll && !keys.length) return toast('拿不到可搜索站点列表，先去「聚合设置 · 模板」刷新站点', true);
     S.aggBusy = true;
     S.aggResult = { loading: true, wd, keyCount: keys ? keys.length : tplSites.length };
     renderPage();
@@ -122,17 +122,15 @@ export async function renderAgg(v) {
       const r = await api('/api/agg/search', {
         method: 'POST',
         body: {
-          domain: S.aggDomain,
+          tpl: S.aggTpl,
           wd,
-          page: pageInput.value || '1',
           keys: keys || undefined,
-          /* 空字符串 = 没给（后端读设置里的默认值）。只有"最低分填 0"是**有意义的**：
-           * 那表示不按分数线筛，只按分数排名取前 N 条。 */
           season: num(seasonInput),
           episode: num(episodeInput),
           year: num(yearInput),
-          minScore: num(minScoreInput),
-          maxItems: num(maxItemsInput),
+          /* 分数线 / 最多几条 / 超时 / 并发都**不在这里传**：服务端按这套模板取名下的值
+           * （见 server/modules/agg/service.js 的 matchOptions）。`page` 也不传 —— 服务端缺省取上游
+           * 第 1 页（与客户端那条路一致）。这一页只决定"搜什么"。 */
         },
       });
       S.aggResult = r;
@@ -165,15 +163,13 @@ export async function renderAgg(v) {
       const [d, st] = await Promise.all([
         api('/api/agg/detail', {
           method: 'POST',
-          body: { domain: S.aggDomain, source: m.source, site: m.siteKey, vodId: m.vod_id, season: useSeason, episode: useEpisode, pick: usePick },
+          body: { tpl: S.aggTpl, source: m.source, site: m.siteKey, vodId: m.vod_id, season: useSeason, episode: useEpisode, pick: usePick },
         }),
         api('/api/agg/templates').catch(() => null),
       ]);
-      /* 线路过滤跟着模板走（见 docs/adr/0033）：这里现读一次，免得用内存里可能过期的那份 */
-      const tnow = (() => {
-        const id = ((st && st.domains) || {})[S.aggDomain];
-        return id ? (((st && st.templates) || []).find((x) => x.id === id) || null) : null;
-      })();
+      /* 线路过滤跟着模板走（见 docs/adr/0033）：按**这份模板**现读一次，
+       * 免得用内存里可能过期的那份 */
+      const tnow = ((st && st.templates) || []).find((x) => x.id === S.aggTpl) || null;
       const raw = String(((tnow && tnow.params) || {}).lineFilter || '').trim();
       let re = null;
       try {
@@ -193,25 +189,26 @@ export async function renderAgg(v) {
     }
   }
 
-  /* 搜索行：**关键字 + 季/集/年份 + 页 + 按钮**全是"这次要搜什么"的参数，摆在一起。
+  /* 搜索行：**模板 + 关键字 + 季/集/年份 + 按钮**全是"这次要搜什么"的参数，摆在一起。
    * （季集年份曾是按钮下面单独一行；它们与关键字同属搜索参数，放在搜索按钮之前更贴合语义。） */
-  /* 域选择器：**这条搜索属于哪个元数据域** —— 决定用哪套模板（哪批站点、哪些参数）。
-   * 不放在"打分旋钮"那一行的原因：它是这一页的**前提**，比打分更靠前。 */
-  const domSel = el('select', { title: '这条搜索属于哪个元数据域：决定用哪套模板（站点与参数）' });
-  if (!providers.length) domSel.append(el('option', { value: '', text: '（没有已注册的域）' }));
-  for (const p of providers) {
-    const o = el('option', { value: p.prefix, text: p.label || p.prefix, selected: p.prefix === S.aggDomain });
-    domSel.append(o);
+  /* 模板选择器：**这条搜索用哪套模板** —— 站点与参数（分数线 / 条数 / 超时 / 并发 / 线路过滤）全从它来。
+   * 不按"域"选：域 → 模板那份对照是**客户端**那条路要的（Emby 按 `tmdb` 这类前缀问，见 docs/adr/0033），
+   * 面板上直接挑模板更直白，也少一步"这属于哪个域"的心算。
+   * 放在搜索行最前面：它是这一页的**前提**，比关键字更靠前。 */
+  const tplSel = el('select', { title: '这条搜索用哪套模板：站点与参数都来自它' });
+  if (!tpls.length) tplSel.append(el('option', { value: '', text: '（还没有模板）' }));
+  for (const x of tpls) {
+    tplSel.append(el('option', { value: x.id, text: `${x.name}（${(x.sites || []).length} 站）`, selected: x.id === S.aggTpl }));
   }
-  domSel.addEventListener('change', () => {
-    S.aggDomain = domSel.value;
+  tplSel.addEventListener('change', () => {
+    S.aggTpl = tplSel.value;
     renderPage();
   });
 
   const searchRow = el(
     'div',
     { class: 'toolbar' },
-    el('label', { class: 'chk', title: '域决定用哪套模板；模板决定这批站点与参数' }, domSel, ''),
+    el('label', { class: 'chk', title: '用哪套模板：站点与参数（分数线 / 条数 / 超时 / 并发 / 线路过滤）都来自它' }, tplSel, ''),
     wdInput,
     el('label', { class: 'chk', title: seasonInput.getAttribute('title') }, seasonInput, '季'),
     el('label', { class: 'chk', title: episodeInput.getAttribute('title') }, episodeInput, '集'),
@@ -219,15 +216,16 @@ export async function renderAgg(v) {
     el('button', { class: 'btn primary', text: S.aggBusy ? '聚合中…' : '聚合搜索', disabled: S.aggBusy, onclick: run })
   );
 
-  /* 打分旋钮与范围：低频，另起一行 */
+  /* 调试开关：低频，另起一行。
+   * 分数线 / 最多几条**这一页不再填** —— 它们与站点、超时、并发同属"这一套模板"的调优项，
+   * 改一处就行（「聚合设置 · 模板」）；上游第几页也不填 —— 客户端那条路**固定只取上游第 1 页**
+   * （见 `plugins/source/catpaw/index.js` 的搜索动作与 `server/modules/emby/service.js` 的注释），
+   * 这里翻页只会看到客户端拿不到的结果。 */
   const optRow = el(
     'div',
     { class: 'toolbar' },
-    el('label', { class: 'chk', title: minScoreInput.getAttribute('title') }, minScoreInput, '最低分'),
-    el('span', { class: 'note', text: '0 = 不过滤分数线' }),
-    el('label', { class: 'chk', title: maxItemsInput.getAttribute('title') }, maxItemsInput, '最多几条'),
-    el('label', { class: 'chk' }, pageInput, '页'),
     el('label', { class: 'chk', title: '忽略模板里勾的站点，改用全部标了"可搜索"的站点（调试用）' }, useAllCb, '全量站点'),
+    el('span', { class: 'note', text: '分数线与条数按模板来 —— 「聚合设置 · 模板」里调' }),
     el('span', { class: 'spacer' })
   );
 

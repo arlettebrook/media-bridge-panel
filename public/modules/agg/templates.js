@@ -1,74 +1,118 @@
 'use strict';
 /**
- * 聚合模块 · 「模板」页 —— **模板就是一份配置数据文件**：选中的站点 + 打分过滤参数 + 超时与并发。
+ * 聚合模块 · 「模板」页 —— **只管模板的增 / 删 / 改**。
  *
- * 这一页把原来的「站点与参数」与「聚合参数」合成一处（两页本来就是同一件事的两半：
- * 一套模板里的东西）。页面分三块：
- *   ① 模板本身：选哪一套、新建 / 改名 / 删除，以及**每个域用哪一套**（域 → 模板 一对一，见 ADR-0033）
- *   ② 这套模板的参数（超时 / 并发 / 打分 / 匹配到底 / 线路过滤）—— 收在折叠区里，
- *      因为它是"偶尔调一次"的旋钮，不该跟天天勾的站点表抢地方
- *   ③ 站点表：勾选参与这套模板的站点（勾选即存回模板）
+ * 一份模板 = 名字 + 选中的站点 + 打分过滤参数 + 超时与并发（见 docs/adr/0033）。
+ * 左边挑一套（或新建 / 删除），右边编辑这一套，改完按**一个**「保存」整份写回
+ * （`POST /api/agg/templates`）。「哪个域用哪套模板」不在这里 —— 见「聚合设置 → 其他设置」。
+ * 「保存」跟在左边那张卡的「新建 / 删除」后面 —— 三者都是"对模板集本身"的动作，归一处；
+ * 草稿动过时按钮下面亮一个「未保存」，换模板前先拦一句。
+ * 页面里的问一句（新建 / 删除 / 切模板 / 全不选 / 测速）一律走 `modal()` —— 原生 `confirm`
+ * 在窄屏上被浏览器画成一条窄横条，字挤成一团、按钮还点不准。
+ *
+ * ⚠️ 勾选、改名、参数都只活在**这一个模块的草稿**（`draft`）里：不写全局状态、不落服务端，
+ * 点「保存」才整份提交；换模板或保存成功时草稿作废，按服务端那一份重画。
+ *
+ * 站点表按**来源**（`s.source` = 插件 id / 实例 id）分组：多实例下站点 key 只在各自实例内唯一，
+ * 上百条堆成一张扁平表既对不上号，也看不出哪个实例勾了多少。来源做成**横向页签**、一次只开一个 ——
+ * 两三个来源的表上下堆着，页面会被拉得很长。组头带「整组全选 / 整组反选」。
  *
  * ⚠️ **测速的开关与间隔不在这里**（已搬到「面板设置」）—— 测速是"这台机器与这条网络"的体检，
  * 与内容偏好无关，而测速的**结果**是面板级共享的一份、不跟模板走。本站点表里的「延迟」列
  * 与「立即测速」按钮仍在（那是"看结果"和"手点一轮"）。
  */
-import { $, el, toast } from '../../core/dom.js';
+import { $, el, modal, toast } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { sid, ensureAggSites, ensureTemplates } from '../../core/store.js';
-import { renderPage, renderNav } from '../../core/shell.js';
+import { renderPage } from '../../core/shell.js';
 
-/** 当前编辑的模板 id（放在 `S` 上：翻页回来还是同一套） */
+/* ------------------------------------------------------------------ 草稿 */
+
+/** 正在编辑的那一份：`{id, name, sites:[{source,key}], params}`。null = 还没建草稿 */
+let draft = null;
+/** 草稿动过没有 —— 换模板前拿它拦一下，免得勾了半天被切走 */
+let dirty = false;
+
+/** 从服务端那一份抄出草稿（站点数组要深拷，免得改草稿顺手改了全局状态里那份） */
+function draftOf(t) {
+  return {
+    id: t.id,
+    name: t.name || '',
+    sites: (t.sites || []).map((x) => ({ source: x.source, key: x.key })),
+    params: Object.assign({}, t.params || {}),
+  };
+}
+
 function curTpl() {
   const list = S.aggTemplates || [];
   return list.find((t) => t.id === S.tplId) || list[0] || null;
 }
 
+/** 切模板 / 存成功之后：草稿作废，下次渲染按服务端那一份重建 */
+function resetDraft() {
+  draft = null;
+  dirty = false;
+}
+
+/** 草稿动过没有：改草稿的地方都走它，顶部操作条上那颗「未保存」跟着亮 */
+function setDirty(on) {
+  dirty = on;
+  const chip = $('#tplDirty');
+  if (chip) chip.classList.toggle('hidden', !dirty);
+}
+
+/** 页内确认框（替代原生 `confirm`）：resolve(true) = 用户点了确认那颗按钮。
+ *  ✕ / Esc / 点遮罩关掉一律算"取消" —— 靠 modal 的 onClose 兜住。 */
+function confirmModal({ title, text, okLabel = '确定', primary = true }) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      resolve(v);
+    };
+    modal({
+      title,
+      body: [el('p', { class: 'note', text })],
+      actions: [
+        { label: '取消', onclick: () => finish(false) },
+        { label: okLabel, primary, onclick: () => finish(true) },
+      ],
+      onClose: () => finish(false),
+    });
+  });
+}
+
+/* ------------------------------------------------------------------ 页面 */
+
 export async function renderTemplates(v) {
   await loadTemplates();
 
   if (!(S.aggTemplates || []).length) {
-    v.append(
-      el(
-        'div',
-        { class: 'card' },
-        el('h3', { text: '模板' }),
-        el('p', {
-          class: 'note',
-          text:
-            '还没有模板。模板 = 一份配置：选中的站点 + 打分过滤参数 + 超时与并发。' +
-            '每个元数据域（比如 tmdb）指定一套模板；没配模板的域，它的内容会搜不到（如实为空，不猜）。',
-        }),
-        el('div', { class: 'row' }, el('button', { class: 'btn primary', text: '新建一套模板', onclick: () => createTemplate() }))
-      )
-    );
+    v.append(emptyCard());
     return;
   }
 
   const t = curTpl();
-  v.append(tplCard(t), paramsCard(t), sitesBlock(t));
-  if (S.aggLoadedFor) {
-    paintSites(t);
-    return;
+  if (!draft || draft.id !== t.id) {
+    draft = draftOf(t);
+    dirty = false;
   }
-  /* 站点清单归源插件：它要挨个问自己那些实例的 `/config`（连不上的要等超时），先画上面的卡片。
-   * ⚠️ 这一块用的是**另一个宿主**（`siteAreaHost`），拿到之后必须把它清掉 ——
-   * 否则那句"正在取…"会一直挂在站点表下面（实测就是这么留着的）。 */
-  const host = el('div', { id: 'siteAreaHost' });
-  v.append(host);
-  host.append(el('div', { class: 'hint', text: '正在取站点清单…（连不上的实例要等超时；模板与参数可以先改）' }));
+
+  const ed = editor(t);
+  v.append(el('div', { class: 'tpl-layout' }, tplList(t, ed.save), ed.node));
+
+  /* 站点清单归源插件：它要挨个问自己那些实例的 `/config`（连不上的要等超时），先画别的卡片。 */
+  paintSites();
+  if (S.aggLoadedFor) return;
   try {
     await ensureAggSites();
   } catch (e) {
-    if (!host.isConnected) return;
-    host.textContent = '';
-    host.append(el('div', { class: 'hint warn', text: '读取站点失败：' + e.message }));
+    toast('读取站点失败：' + e.message, true);
     return;
   }
-  if (!host.isConnected) return;
-  host.textContent = '';
-  paintSites(curTpl());
+  paintSites();
 }
 
 /** 拉模板清单 / 域对照 / 已注册的域（走 store 那一份，页面与搜索页共用同一处）。
@@ -83,130 +127,136 @@ async function loadTemplates(force = false) {
   if (S.tplId && !(S.aggTemplates || []).some((t) => t.id === S.tplId)) S.tplId = '';
 }
 
-async function createTemplate() {
-  const name = prompt('这套模板叫什么？（例如「影视」「动漫」）', '新模板');
-  if (!name || !name.trim()) return;
-  try {
-    const r = await api('/api/agg/templates', { method: 'POST', body: { template: { name: name.trim(), sites: [] } } });
-    S.tplId = r.template.id;
-    await loadTemplates(true);
-    toast('已新建模板：' + r.template.name);
-    renderPage();
-  } catch (e) {
-    toast('新建失败：' + e.message, true);
-  }
-}
-
-/** 把当前模板整份存回去（勾选、改名、参数都走它） */
-async function saveTemplate(t, patch) {
-  const body = {
-    id: t.id,
-    name: patch.name === undefined ? t.name : patch.name,
-    sites: patch.sites === undefined ? t.sites : patch.sites,
-    params: patch.params === undefined ? t.params : patch.params,
-  };
-  const r = await api('/api/agg/templates', { method: 'POST', body: { template: body } });
-  const i = (S.aggTemplates || []).findIndex((x) => x.id === r.template.id);
-  if (i >= 0) S.aggTemplates[i] = r.template;
-  return r.template;
-}
-
-/* ------------------------------------------------------------------ ① 模板本身 + 域对照 */
-
-function tplCard(t) {
-  const sel = el('select', { title: '选一套模板来编辑' });
-  for (const x of S.aggTemplates || []) {
-    const o = el('option', { value: x.id, text: `${x.name}（${x.sites.length} 个站点）` });
-    if (x.id === t.id) o.selected = true;
-    sel.append(o);
-  }
-  sel.addEventListener('change', () => {
-    S.tplId = sel.value;
-    renderPage();
-  });
-
-  const name = el('input', { type: 'text', class: 'w-lg', value: t.name, maxlength: '40' });
-  const saveName = el('button', { class: 'btn', text: '改名' });
-  saveName.addEventListener('click', async () => {
-    const v = name.value.trim();
-    if (!v) return toast('名字不能空', true);
-    saveName.disabled = true;
-    try {
-      await saveTemplate(t, { name: v });
-      toast('已改名');
-      renderNav();
-      renderPage();
-    } catch (e) {
-      toast('改名失败：' + e.message, true);
-      saveName.disabled = false;
-    }
-  });
-
-  const del = el('button', { class: 'btn', text: '删除这套' });
-  del.addEventListener('click', async () => {
-    const used = Object.entries(S.aggDomains || {}).filter(([, id]) => id === t.id).map(([d]) => d);
-    const tip =
-      `删除模板「${t.name}」？` +
-      (used.length ? `\n\n⚠️ 它还被这些域用着：${used.join(' / ')} —— 删掉之后它们会变成"没有配模板"（内容搜不到）。` : '');
-    if (!confirm(tip)) return;
-    try {
-      const r = await api('/api/agg/templates/' + encodeURIComponent(t.id), { method: 'DELETE' });
-      S.aggDomains = r.domains || {};
-      S.tplId = '';
-      await loadTemplates(true);
-      toast('已删除');
-      renderPage();
-    } catch (e) {
-      toast('删除失败：' + e.message, true);
-    }
-  });
-
-  /* 域对照：每个已注册的域一行。**一个域最多一套**（选「（没配）」= 取消）。 */
-  const domRows = (S.aggProviders || []).map((p) => {
-    const cur = (S.aggDomains || {})[p.prefix] || '';
-    const dsel = el('select', { title: `域 ${p.prefix} 用哪套模板` });
-    dsel.append(el('option', { value: '', text: '（没配 —— 这个域的内容搜不到）', selected: !cur }));
-    for (const x of S.aggTemplates || []) {
-      const o = el('option', { value: x.id, text: x.name, selected: cur === x.id });
-      dsel.append(o);
-    }
-    dsel.addEventListener('change', async () => {
-      try {
-        const r = await api('/api/agg/domains/' + encodeURIComponent(p.prefix), {
-          method: 'POST',
-          body: { templateId: dsel.value },
-        });
-        S.aggDomains = r.domains || {};
-        toast(dsel.value ? `域 ${p.prefix} → ${(S.aggTemplates.find((x) => x.id === dsel.value) || {}).name}` : `域 ${p.prefix} 已取消指向`);
-      } catch (e) {
-        toast('设置失败：' + e.message, true);
-      }
-    });
-    return el(
-      'div',
-      { class: 'kv' },
-      el('span', { class: 'k', text: `${p.label}（域 ${p.prefix}）` }),
-      dsel,
-      el('span', { class: 'note', text: !cur ? '⚠️ 没配模板 ⇒ 这个域的内容搜不到（如实为空）' : '' })
-    );
-  });
-
+function emptyCard() {
   return el(
     'div',
     { class: 'card' },
     el('h3', { text: '模板' }),
-    el('div', { class: 'row' }, el('span', { class: 'muted', text: '编辑哪一套：' }), sel, name, saveName, del, el('button', { class: 'btn primary', text: '新建一套', onclick: () => createTemplate() })),
-    el('div', { class: 'note', text: '模板 = 一份配置数据文件：选中的站点 + 打分过滤参数 + 超时与并发。模板自己的 id 就是它的身份。' }),
-    el('h3', { class: 'mt-md', text: '哪个域用这套' }),
-    el('div', { class: 'note', text: '一个域最多一套模板（没配的域，内容搜不到）；同一套模板可以给多个域共用。' }),
-    ...domRows
+    el('p', {
+      class: 'note',
+      text:
+        '还没有模板。模板 = 一份配置：选中的站点 + 打分过滤参数 + 超时与并发。' +
+        '每个元数据域（比如 tmdb）指定一套模板；没配模板的域，它的内容会搜不到（如实为空，不猜）。',
+    }),
+    el('div', { class: 'row' }, el('button', { class: 'btn primary', text: '新建一套模板', onclick: () => createTemplate() }))
   );
 }
 
-/* ------------------------------------------------------------------ ② 这套模板的参数 */
+/* ------------------------------------------------------------------ ① 左边：挑一套 / 新建 / 删除 */
 
-function paramsCard(t) {
-  const p = t.params || {};
+function tplList(t, save) {
+  const list = el('div', { class: 'tpl-list' });
+  for (const x of S.aggTemplates || []) {
+    list.append(
+      el(
+        'button',
+        { class: 'tpl-item' + (x.id === t.id ? ' active' : ''), title: x.name, onclick: () => selectTemplate(x.id) },
+        el('span', { class: 'tpl-name', text: x.name }),
+        el('span', { class: 'tpl-meta', text: `${(x.sites || []).length} 站` })
+      )
+    );
+  }
+  return el(
+    'div',
+    { class: 'card' },
+    el('h3', { text: '模板' }),
+    list,
+    /* 「保存」跟新建 / 删除挤在一行里（三者都是"对模板集本身"的动作，归一处看着顺） */
+    el(
+      'div',
+      { class: 'row' },
+      el('button', { class: 'btn', text: '新建', onclick: () => createTemplate() }),
+      el('button', { class: 'btn', text: '删除', onclick: () => removeTemplate(t) }),
+      save
+    ),
+    el('span', { class: 'dirty-chip' + (dirty ? '' : ' hidden'), id: 'tplDirty', text: '未保存' })
+  );
+}
+
+/** 换一套编辑：草稿动过就先问一句（勾了半天被一句话切走最亏） */
+async function selectTemplate(id) {
+  if (draft && draft.id === id) return;
+  if (dirty) {
+    const go = await confirmModal({
+      title: '切换模板',
+      text: '这一套还没保存，切过去就不保留了。继续？',
+      okLabel: '切过去',
+    });
+    if (!go) return;
+  }
+  S.tplId = id;
+  resetDraft();
+  renderPage();
+}
+
+function createTemplate() {
+  const name = el('input', { type: 'text', value: '新模板', maxlength: '40', placeholder: '这套模板叫什么' });
+  modal({
+    title: '新建模板',
+    body: [
+      el('div', { class: 'field' }, el('label', { text: '名字（例如「影视」「动漫」）' }), name),
+      el('p', { class: 'note', text: '新模板先是空的 —— 建好之后在下面的站点表里挑站点，再点顶部的「保存这套模板」。' }),
+    ],
+    actions: [
+      { label: '取消' },
+      {
+        label: '新建',
+        primary: true,
+        onclick: async () => {
+          const nm = name.value.trim();
+          if (!nm) {
+            toast('名字不能空', true);
+            return false;
+          }
+          try {
+            const r = await api('/api/agg/templates', { method: 'POST', body: { template: { name: nm, sites: [] } } });
+            S.tplId = r.template.id;
+            resetDraft();
+            await loadTemplates(true);
+            toast('已新建模板：' + r.template.name);
+            renderPage();
+          } catch (e) {
+            toast('新建失败：' + e.message, true);
+            return false;
+          }
+        },
+      },
+    ],
+  });
+}
+
+async function removeTemplate(t) {
+  const used = Object.entries(S.aggDomains || {}).filter(([, id]) => id === t.id).map(([d]) => d);
+  const tip =
+    `删除模板「${t.name}」？` +
+    (used.length ? `；它还被这些域用着：${used.join(' / ')} —— 删掉之后它们会变成"没有配模板"（内容搜不到）。` : '');
+  const go = await confirmModal({ title: '删除模板', text: tip, okLabel: '删除', primary: false });
+  if (!go) return;
+  try {
+    const r = await api('/api/agg/templates/' + encodeURIComponent(t.id), { method: 'DELETE' });
+    S.aggDomains = r.domains || {};
+    S.tplId = '';
+    resetDraft();
+    await loadTemplates(true);
+    toast('已删除');
+    renderPage();
+  } catch (e) {
+    toast('删除失败：' + e.message, true);
+  }
+}
+
+/* ------------------------------------------------------------------ ② 右边：编辑这一套 */
+
+/** 名称 / 参数 / 站点在**同一份草稿**里，改完按一个「保存」整份写回。
+ *  返回 `{ save, node }`：`save` 那颗按钮归左边那张卡（跟新建 / 删除排一起），`node` 是编辑器本体。 */
+function editor(t) {
+  const mark = () => setDirty(true);
+
+  const name = el('input', { type: 'text', class: 'w-lg', value: draft.name, maxlength: '40', placeholder: '这套模板叫什么' });
+  name.addEventListener('input', mark);
+
+  /* 参数是"偶尔调一次"的旋钮，但**不折叠** —— 它和名称、站点同属"这一套模板"，一屏看完比点开找强。 */
+  const p = draft.params || {};
   const num = (v, d) => (v === undefined || v === null || v === '' ? d : v);
   const to = el('input', { type: 'number', class: 'w-sm', value: String(num(p.timeoutSec, 5)), min: '1', max: '60' });
   const dto = el('input', { type: 'number', class: 'w-sm', value: String(num(p.detailTimeoutSec, 10)), min: '1', max: '120' });
@@ -221,6 +271,7 @@ function paramsCard(t) {
     placeholder: '正则，匹配线路名；留空 = 不过滤。例：夸克原画|百度原画',
     spellcheck: 'false',
   });
+  for (const x of [to, dto, cc, minScore, maxItems, extraK, lineFilter]) x.addEventListener('input', mark);
   const extraKLabel = el(
     'label',
     { class: 'chk', title: '前 N 条一条能用的都没拿到时，按分数继续往下打，最多再试这么多条；第一批拿到能用的就不再往下打。填 0 = 不补打' },
@@ -228,11 +279,16 @@ function paramsCard(t) {
     '一条都没拿到时再往下打几条'
   );
   const syncExtra = () => extraKLabel.classList.toggle('hidden', extraAllCb.checked);
-  extraAllCb.addEventListener('change', syncExtra);
+  extraAllCb.addEventListener('change', () => {
+    mark();
+    syncExtra();
+  });
   syncExtra();
 
-  const save = el('button', { class: 'btn primary', text: '保存这套模板的参数' });
+  const save = el('button', { class: 'btn primary', text: '保存这套模板' });
   save.addEventListener('click', async () => {
+    const nm = name.value.trim();
+    if (!nm) return toast('名字不能空', true);
     const params = {
       timeoutSec: Number(to.value),
       detailTimeoutSec: Number(dto.value),
@@ -243,70 +299,90 @@ function paramsCard(t) {
       matchExtraAll: extraAllCb.checked,
       lineFilter: lineFilter.value.trim(),
     };
-    if (!(params.timeoutSec >= 1 && params.timeoutSec <= 60)) return toast('单站超时填 1~60 秒', true);
-    if (!(params.detailTimeoutSec >= 1 && params.detailTimeoutSec <= 120)) return toast('取详情超时填 1~120 秒', true);
-    if (!(params.concurrency >= 1 && params.concurrency <= 32)) return toast('并发数填 1~32', true);
-    if (!(params.matchMinScore >= 0 && params.matchMinScore <= 1)) return toast('分数线填 0~1（0 = 不过滤分数线）', true);
-    if (!(params.matchMaxItems >= 1 && params.matchMaxItems <= 20)) return toast('最多留几条填 1~20', true);
-    if (!(params.matchExtraK >= 0 && params.matchExtraK <= 10)) return toast('「一条都没拿到时再往下打几条」填 0~10（0 = 不补打）', true);
+    const bad = paramsError(params);
+    if (bad) return toast(bad, true);
     save.disabled = true;
     try {
-      await saveTemplate(t, { params });
-      toast('参数已保存到「' + t.name + '」');
+      const r = await api('/api/agg/templates', {
+        method: 'POST',
+        body: { template: { id: t.id, name: nm, sites: draft.sites, params } },
+      });
+      const i = (S.aggTemplates || []).findIndex((x) => x.id === r.template.id);
+      if (i >= 0) S.aggTemplates[i] = r.template;
+      resetDraft();
+      toast(`已保存「${r.template.name}」：名称 / 参数 / 站点一起写回`);
+      renderPage();
     } catch (e) {
       toast('保存失败：' + e.message, true);
-    } finally {
       save.disabled = false;
     }
   });
 
-  return el(
-    'div',
-    { class: 'card' },
-    el(
-      'details',
-      {},
-      el('summary', { text: `这套模板的参数（超时 / 并发 / 打分 / 线路过滤）· ${t.name}` }),
+  /* 参数是"偶尔调一次"的旋钮，但**不折叠** —— 它和名称、站点同属"这一套模板"，一屏看完比点开找强。
+   * 分三小块排：八颗控件原来挤在同一行里，宽屏还能看，窄屏一折行就成了一大片没有归属感的数字。 */
+  const group = (title, row) => el('div', { class: 'param-block' }, el('div', { class: 'param-title', text: title }), el('div', { class: 'row' }, row));
+
+  return {
+    save,
+    node: el(
+      'div',
+      { class: 'grid' },
       el(
         'div',
-        { class: 'row mt-sm' },
-        el('label', { class: 'chk', title: '搜索 / 播放（以及首次 /init）的单站超时，单位秒。慢站设太小会被一律判成超时' }, to, '秒 单站超时'),
-        el(
-          'label',
-          { class: 'chk', title: '取详情（POST /detail）的单站超时，单位秒。比搜索更宽 —— 剧集动辄几十上百集，响应体大、上游拼装慢' },
-          dto,
-          '秒 取详情超时'
-        ),
-        el('label', { class: 'chk' }, cc, '并发数'),
-        el('label', { class: 'chk', title: '打分 ≥ 它的才算命中。填 0 = 不过滤分数线（只按分数排名取前 N 条）' }, minScore, '分数线'),
-        el('label', { class: 'chk', title: '阶段一要取几条（有线路、且定位到你要的那一集）。每多取一条就多打一次站源 /detail' }, maxItems, '最多留几条命中'),
-        extraKLabel,
-        el('label', { class: 'chk', title: '不看"再往下打几条"，一直往下打到拿到一条能用的或名单打完（每个候选都要打一次站源 /detail，可能慢）' }, extraAllCb, '匹配到底'),
-        el('label', { class: 'chk' }, el('span', { class: 'muted', text: '时间单位都是秒' })),
-        save
+        { class: 'card' },
+        el('h3', { text: `编辑「${t.name}」` }),
+        el('div', { class: 'row' }, el('span', { class: 'muted', text: '名称' }), name),
+        group('超时与并发（单位都是秒）', [
+          el('label', { class: 'chk', title: '搜索 / 播放（以及首次 /init）的单站超时。慢站设太小会被一律判成超时' }, to, '单站超时'),
+          el(
+            'label',
+            { class: 'chk', title: '取详情（POST /detail）的单站超时。比搜索更宽 —— 剧集动辄几十上百集，响应体大、上游拼装慢' },
+            dto,
+            '取详情超时'
+          ),
+          el('label', { class: 'chk' }, cc, '并发数'),
+        ]),
+        group('打分与取条数', [
+          el('label', { class: 'chk', title: '打分 ≥ 它的才算命中。填 0 = 不过滤分数线（只按分数排名取前 N 条）' }, minScore, '分数线'),
+          el('label', { class: 'chk', title: '阶段一要取几条（有线路、且定位到你要的那一集）。每多取一条就多打一次站源 /detail' }, maxItems, '最多留几条命中'),
+          extraKLabel,
+          el('label', { class: 'chk', title: '不看"再往下打几条"，一直往下打到拿到一条能用的或名单打完（每个候选都要打一次站源 /detail，可能慢）' }, extraAllCb, '匹配到底'),
+        ]),
+        group('线路过滤', [lineFilter]),
+        el('div', {
+          class: 'note',
+          text:
+            '「单站超时」= 搜索 / 播放 / 首次 `/init` 的单站上限；「取详情超时」= 取详情 `POST /detail` 的单站上限，单独一项、默认更宽。' +
+            '打分口径：名字 0.7 · 季集 0.2 · 年份 0.1（缺的项不计），名字像不上的直接出局。' +
+            '「能用的」= 有线路、且定位到你要的那一集；前 N 条一条能用的都没拿到时才按分数往下补打（最多再试 K 条）。' +
+            '⚠️ 打分与过滤只在两层式站点上生效（一层式站点给词就直接回结果，不做筛选）。',
+        })
       ),
-      el('div', { class: 'row' }, lineFilter),
-      el('div', {
-        class: 'note',
-        text:
-          '「单站超时」= 搜索 / 播放 / 首次 `/init` 的单站上限；「取详情超时」= 取详情 `POST /detail` 的单站上限，单独一项、默认更宽。' +
-          '打分口径：名字 0.7 · 季集 0.2 · 年份 0.1（缺的项不计），名字像不上的直接出局。' +
-          '「能用的」= 有线路、且定位到你要的那一集；前 N 条一条能用的都没拿到时才按分数往下补打（最多再试 K 条）。' +
-          '⚠️ 打分与过滤只在两层式站点上生效（一层式站点给词就直接回结果，不做筛选）。',
-      })
-    )
-  );
+      sitesCard()
+    ),
+  };
 }
 
-/* ------------------------------------------------------------------ ③ 站点表 */
+/** 参数范围校验：返回错误文案；没问题回空串 */
+function paramsError(p) {
+  if (!(p.timeoutSec >= 1 && p.timeoutSec <= 60)) return '单站超时填 1~60 秒';
+  if (!(p.detailTimeoutSec >= 1 && p.detailTimeoutSec <= 120)) return '取详情超时填 1~120 秒';
+  if (!(p.concurrency >= 1 && p.concurrency <= 32)) return '并发数填 1~32';
+  if (!(p.matchMinScore >= 0 && p.matchMinScore <= 1)) return '分数线填 0~1（0 = 不过滤分数线）';
+  if (!(p.matchMaxItems >= 1 && p.matchMaxItems <= 20)) return '最多留几条填 1~20';
+  if (!(p.matchExtraK >= 0 && p.matchExtraK <= 10)) return '「一条都没拿到时再往下打几条」填 0~10（0 = 不补打）';
+  return '';
+}
 
-function sitesBlock(t) {
+/* ------------------------------------------------------------------ ③ 站点：按来源分组 */
+
+function sitesCard() {
   const toolbar = el('div', { class: 'toolbar' });
   toolbar.append(
     el('button', { class: 'btn', text: '刷新站点', onclick: () => { S.aggLoadedFor = null; renderPage(); } }),
     (() => {
       const inp = el('input', { type: 'text', placeholder: '过滤站点名', value: S.siteFilter });
-      inp.addEventListener('input', () => { S.siteFilter = inp.value; paintSites(curTpl()); });
+      inp.addEventListener('input', () => { S.siteFilter = inp.value; paintSites(); });
       return inp;
     })(),
     (() => {
@@ -316,10 +392,11 @@ function sitesBlock(t) {
         if ((S.siteView || 'all') === val) o.selected = true;
         sel.append(o);
       }
-      sel.addEventListener('change', () => { S.siteView = sel.value; paintSites(curTpl()); });
+      sel.addEventListener('change', () => { S.siteView = sel.value; paintSites(); });
       return el('label', { class: 'chk' }, sel, '');
     })(),
     el('span', { class: 'spacer' }),
+    el('span', { class: 'muted', id: 'aggCount' }),
     el('button', {
       class: 'btn',
       id: 'siteTestBtn',
@@ -338,42 +415,121 @@ function sitesBlock(t) {
         onclick: () => {
           S.siteSort = S.siteSort === 'fast' ? 'slow' : S.siteSort === 'slow' ? '' : 'fast';
           btn.textContent = sortLabel();
-          paintSites(curTpl());
+          paintSites();
         },
       });
       return btn;
     })(),
-    el('button', { class: 'btn', text: '清空这套的站点', onclick: () => clearSelection(t) }),
-    el('span', { class: 'muted', id: 'aggCount' })
+    el('button', { class: 'btn', text: '全部不选', onclick: () => clearAll() })
   );
-  return el('div', { class: 'card' }, el('h3', { text: '站点' }), toolbar, el('div', { id: 'siteTableHost' }), el('div', { id: 'siteAreaHost' }));
+  return el('div', { class: 'card' }, el('h3', { text: '站点' }), toolbar, el('div', { id: 'siteTableHost' }));
 }
 
-/** 重绘站点表（勾选一下不必整页重刷）。`t` = 当前模板。 */
-function paintSites(t) {
+/** 重画站点表（勾一下就地重画，不必整页重刷）。勾选来自草稿，草稿来自服务端那一份。 */
+function paintSites() {
   const host = $('#siteTableHost');
-  if (!host) return;
-  if (!t) return;
+  if (!host || !draft) return;
+  host.textContent = '';
+
+  if (!S.aggLoadedFor) {
+    host.append(el('div', { class: 'hint', text: '正在取站点清单…（连不上的实例要等超时；模板与参数可以先改）' }));
+    return;
+  }
   if (!(S.aggSources || []).length) {
-    host.textContent = '';
     host.append(el('div', { class: 'hint warn' }, '还没有源 —— 到「插件 → 管理」找到源插件（猫爪源），在它自己的设置页里加一个实例。'));
     return;
   }
   if (!(S.aggSites || []).length) {
     const bad = (S.aggSources || []).filter((s) => s.enabled !== false && !s.ok);
-    host.textContent = '';
     host.append(el('div', { class: 'hint warn', text: '这些源都取不到站点：' + (bad.map((s) => `${s.id} ${s.error || '未知错误'}`).join('；') || '未知原因') }));
     return;
   }
-  const chosen = (t.sites || []).map((x) => ({ source: x.source, key: x.key }));
-  const chosenSet = new Set(chosen.map((x) => sid(x.source, x.key)));
+
+  const chosenSet = new Set(draft.sites.map((x) => sid(x.source, x.key)));
   const list = sortSites((S.aggSites || []).filter((s) => siteVisible(s, chosenSet)));
   const srcN = new Set((S.aggSites || []).map((s) => s.source)).size;
-  const timeoutMs = (Number((t.params || {}).timeoutSec) || 0) * 1000;
   const cnt = $('#aggCount');
   if (cnt) cnt.textContent = `这套勾了 ${chosenSet.size} / ${(S.aggSites || []).length} 站点 · ${srcN} 个源`;
 
-  host.textContent = '';
+  if (!list.length) {
+    host.append(el('div', { class: 'hint', text: '当前筛选下没有站点。' }));
+    return;
+  }
+
+  /* 归组：按源清单里的出现顺序（Map 保序） */
+  const groups = new Map();
+  for (const s of list) {
+    if (!groups.has(s.source)) groups.set(s.source, []);
+    groups.get(s.source).push(s);
+  }
+  /* 来源做成**横向页签**、一次只开一个：两三个来源、上百条站点上下堆成好几张长表，
+   * 页面会被拉得很长，而一组一组的表本来也是分开勾的。 */
+  S.siteGroup = pickGroup(groups, chosenSet);
+  if (groups.size > 1) host.append(srcTabs(groups, chosenSet));
+  host.append(srcGroup(S.siteGroup, groups.get(S.siteGroup), chosenSet));
+
+  host.append(
+    el('div', {
+      class: 'note',
+      text:
+        '站点按**来源**（源插件的实例）分成页签，一次只开一个来源。勾选只记在这一页的草稿里 —— 点顶部的「保存这套模板」才写回。' +
+        '「延迟」= 服务端测速（每站一发 `POST /search`，片名随机取、非 200 换一个再测一发，单站 15 秒超时）；' +
+        '测速的开关与间隔在「面板设置」，测速结果是面板共享的一份、不跟模板走。标红 = 测速失败，或比这套模板的单站超时还慢。' +
+        '「能力」列是源自己申报的，仅供参考（源常漏报）。',
+    })
+  );
+  void initSpeedTestUi();
+}
+
+/** 页签默认落在**这套模板勾了站点的那个来源**上（一个都没勾过就落在第一个）；
+ *  当前那个在筛选下没有站点时也退回 —— 免得点开一个空页签。 */
+function pickGroup(groups, chosenSet) {
+  if (S.siteGroup && groups.has(S.siteGroup)) return S.siteGroup;
+  for (const [src, sites] of groups) {
+    if (sites.some((s) => chosenSet.has(sid(s.source, s.key)))) return src;
+  }
+  return [...groups.keys()][0];
+}
+
+/** 来源页签：一个来源一颗，页签上带"这一组勾了几个 / 当前列出来几个" */
+function srcTabs(groups, chosenSet) {
+  const bar = el('div', { class: 'src-tabs' });
+  for (const [src, sites] of groups) {
+    const on = sites.filter((s) => chosenSet.has(sid(s.source, s.key))).length;
+    const name = `${sites[0].sourceName || src}（${src}）`;
+    const tab = el('button', {
+      class: 'src-tab' + (src === S.siteGroup ? ' active' : ''),
+      title: `${name}：这一组 ${on}/${sites.length} 已勾选`,
+      onclick: () => {
+        S.siteGroup = src;
+        paintSites();
+      },
+    });
+    tab.append(el('span', { text: name }), el('span', { class: 'src-tab-meta', text: `${on}/${sites.length}` }));
+    bar.append(tab);
+  }
+  return bar;
+}
+
+/** 一组 = 一个来源（一个源插件实例）的站点：组头 + 一张表 */
+function srcGroup(src, sites, chosenSet) {
+  const on = sites.filter((s) => chosenSet.has(sid(s.source, s.key))).length;
+  const head = el(
+    'div',
+    { class: 'src-head' },
+    el('b', { text: `${sites[0].sourceName || src}（${src}）` }),
+    el('span', { class: 'muted', text: `这一组 ${on}/${sites.length} 已勾选` }),
+    el('span', { class: 'spacer' }),
+    el('button', { class: 'btn mini', title: '把这一组**当前列出来的**站点全部勾上', text: '整组全选', onclick: () => bulk(sites, 'on') }),
+    el('button', {
+      class: 'btn mini',
+      title: '把这一组**当前列出来的**站点整组翻转：勾上的取消、没勾的勾上',
+      text: '整组反选',
+      onclick: () => bulk(sites, 'invert'),
+    })
+  );
+
+  const timeoutMs = (Number((draft.params || {}).timeoutSec) || 0) * 1000;
   const table = el('table', { class: 'sites-table' });
   table.append(
     el(
@@ -383,7 +539,6 @@ function paintSites(t) {
         'tr',
         {},
         el('th', { text: '这套模板' }),
-        el('th', { text: '来源' }),
         el('th', { text: '名称' }),
         el('th', { title: '测速结果：一发 POST /search 的往返耗时。悬停可看用的片名与真实业务的耗时', text: '延迟' }),
         el('th', { title: '还有哪几套模板用了这个站点', text: '别的模板' }),
@@ -392,27 +547,24 @@ function paintSites(t) {
     )
   );
   const tb = el('tbody');
-  for (const s of list) {
+  for (const s of sites) {
     const cb = el('input', { type: 'checkbox', checked: chosenSet.has(sid(s.source, s.key)), class: 'switch' });
     cb.addEventListener('change', () => {
-      /* 站点身份 = (源, 站点 key)：多源下同名 key 是两条不同的站点 */
-      const next = chosen.filter((x) => !(x.source === s.source && x.key === s.key));
-      if (cb.checked) next.push({ source: s.source, key: s.key });
-      saveSites(curTpl(), next);
+      setChosen(s, cb.checked);
+      paintSites();
     });
-    const others = (s.templates || []).filter((x) => x.id !== t.id).map((x) => x.name);
+    const others = (s.templates || []).filter((x) => x.id !== draft.id).map((x) => x.name);
     tb.append(
       el(
         'tr',
         {},
         el('td', {}, cb),
-        el('td', { class: 'note', text: s.sourceName || s.source }),
         el('td', { text: s.name || '-' }),
         delayCell(s, timeoutMs),
-        el('td', { class: 'note', text: others.length ? others.join(' / ') : '—' }),
+        el('td', { class: 'note', 'data-label': '别的模板', text: others.length ? others.join(' / ') : '—' }),
         el(
           'td',
-          {},
+          { 'data-label': '能力' },
           s.searchable ? el('span', { class: 'badge ok', title: '源申报它能搜（没标的也可能能搜）', text: '搜索' }) : null,
           s.filterable ? el('span', { class: 'badge', title: '源申报它支持二级筛选', text: '筛选' }) : null,
           s.indexs ? el('span', { class: 'badge', title: '源申报它是"点进条目后转去搜索"那种（豆瓣类）', text: '跳搜索' }) : null,
@@ -422,35 +574,42 @@ function paintSites(t) {
     );
   }
   table.append(tb);
-  host.append(el('div', { class: 'table-wrap' }, table));
-  host.append(
-    el('div', {
-      class: 'note',
-      text:
-        '勾选即存回当前这套模板。「延迟」= 服务端测速（每站一发 `POST /search`，片名随机取、非 200 换一个再测一发，单站 15 秒超时）；' +
-        '测速的开关与间隔在「面板设置」，测速结果是面板共享的一份、不跟模板走。标红 = 测速失败，或比这套模板的单站超时还慢。' +
-        '「能力」列是源自己申报的，仅供参考（源常漏报）。',
-    })
-  );
-  void initSpeedTestUi();
+  return el('div', { class: 'src-group' }, head, el('div', { class: 'table-wrap' }, table));
 }
 
-async function saveSites(t, sites) {
-  try {
-    const r = await saveTemplate(t, { sites });
-    S.aggTemplates = (S.aggTemplates || []).map((x) => (x.id === r.id ? r : x));
-    /* 站点表要重画：计数、以及"别的模板"那一列的归属可能变了 */
-    paintSites(r);
-    renderNav();
-  } catch (e) {
-    toast(e.message, true);
+/** 勾 / 不勾一条（站点身份 = (源, 站点 key)：多源下同名 key 是两条不同的站点） */
+function setChosen(s, on) {
+  const next = draft.sites.filter((x) => !(x.source === s.source && x.key === s.key));
+  if (on) next.push({ source: s.source, key: s.key });
+  draft.sites = next;
+  setDirty(true);
+}
+
+/** 整组动作：`mode` = 'on' 全勾 / 'invert' 翻转 —— 只动**传进来这些**（= 当前列出来的）站点 */
+function bulk(sites, mode) {
+  const keys = new Set(sites.map((s) => sid(s.source, s.key)));
+  const chosen = new Set(draft.sites.map((x) => sid(x.source, x.key)));
+  const next = draft.sites.filter((x) => !keys.has(sid(x.source, x.key)));
+  for (const s of sites) {
+    if (mode === 'on' || !chosen.has(sid(s.source, s.key))) next.push({ source: s.source, key: s.key });
   }
+  draft.sites = next;
+  setDirty(true);
+  paintSites();
 }
 
-async function clearSelection(t) {
-  if (!confirm(`把「${t.name}」这套模板里的站点全部取消勾选？`)) return;
-  await saveSites(t, []);
-  toast('已清空这套模板的站点');
+async function clearAll() {
+  if (!draft.sites.length) return toast('这一套本来就没勾站点');
+  const go = await confirmModal({
+    title: '清空勾选',
+    text: '把这一套模板的站点全部取消勾选？（点顶部的「保存这套模板」才真正写回）',
+    okLabel: '全部取消',
+    primary: false,
+  });
+  if (!go) return;
+  draft.sites = [];
+  setDirty(true);
+  paintSites();
 }
 
 /* ------------------------------------------------------------------ 站点表的小工具 */
@@ -618,7 +777,7 @@ function startPolling() {
     } catch {
       /* 拉不到就按内存里那份画 */
     }
-    paintSites(curTpl());
+    paintSites();
     toast('测速完成');
     clearInterval(pollTimer);
     pollTimer = null;
@@ -634,20 +793,18 @@ async function initSpeedTestUi() {
 }
 
 async function startSpeedTest() {
-  const t = curTpl();
-  if (!t) return;
-  const chosenSet = new Set((t.sites || []).map((x) => sid(x.source, x.key)));
+  if (!draft) return;
+  const chosenSet = new Set(draft.sites.map((x) => sid(x.source, x.key)));
   const list = (S.aggSites || []).filter((s) => siteVisible(s, chosenSet));
   if (!list.length) return toast('没有可测的站点（先调好筛选或视图）', true);
-  if (
-    !confirm(
-      `对当前列出来的 ${list.length} 个站点跑一轮测速？\n\n` +
-        '测速在服务端跑（关掉页面也会继续）：每站一发 /search，片名从常见影视名里随机取、' +
-        '非 200 换一个再测一发，单站最多 15 秒。随时可以点「停止测速」。'
-    )
-  ) {
-    return;
-  }
+  const go = await confirmModal({
+    title: '立即测速',
+    text:
+      `对当前列出来的 ${list.length} 个站点跑一轮测速？` +
+      '测速在服务端跑（关掉页面也会继续）：每站一发 /search，片名从常见影视名里随机取、非 200 换一个再测一发，单站最多 15 秒。随时可以点「停止测速」。',
+    okLabel: '开始测速',
+  });
+  if (!go) return;
   try {
     const r = await api('/api/agg/site-test/start', {
       method: 'POST',
