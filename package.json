@@ -2,7 +2,7 @@
   "name": "media-bridge-panel",
   "version": "1.5.0",
   "private": true,
-  "description": "媒体桥面板：托管数据源并聚合多站搜索结果，输出一份可供 Emby 兼容客户端直接使用的媒体源（当前支持猫爪 / CatPawOpen 源）",
+  "description": "媒体桥面板：聚合多个数据源的搜索结果，输出一份可供 Emby 兼容客户端直接使用的媒体源（源由插件托管）",
   "license": "MIT",
   "repository": {
     "type": "git",

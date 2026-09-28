@@ -139,12 +139,6 @@ export async function renderPluginLibrary(v) {
       list.append(el('div', { class: 'note', text: d.error ? '清单没取到，所以这里没有可装的插件。' : '这个仓库的清单里没有插件。' }));
     } else {
       for (const p of d.plugins) list.append(rowOf(p));
-      list.append(
-        el('div', {
-          class: 'note',
-          text: '装完默认是停用状态（除非勾了上面那个「装完就启用」）—— 装完由人明确打开，见「插件 → 管理」。',
-        })
-      );
     }
     if ((d.bad || []).length) {
       list.append(
