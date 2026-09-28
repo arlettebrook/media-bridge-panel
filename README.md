@@ -38,7 +38,7 @@ docker run -d --name media-bridge-panel --init --restart unless-stopped \
   -p 8088:8088 -p 8090-8100:8090-8100 \
   -v media_bridge-data:/data \
   -e TZ=Asia/Shanghai \
-  dlushu/media-bridge-panel:1.0
+  dlushu/media-bridge-panel:latest
 ```
 
 等价的 compose 文件：
@@ -46,7 +46,7 @@ docker run -d --name media-bridge-panel --init --restart unless-stopped \
 ```yaml
 services:
   media-bridge-panel:
-    image: dlushu/media-bridge-panel:1.0
+    image: dlushu/media-bridge-panel:latest
     container_name: media-bridge-panel
     restart: unless-stopped
     init: true
@@ -111,7 +111,7 @@ docker run -d --name media-bridge-panel --init --restart unless-stopped \
   -v media_bridge-data:/data \
   -e TZ=Asia/Shanghai \
   -e APP_SOURCE_URL=https://example.com/pkgs/media-bridge-panel-{version}.tar.gz \
-  dlushu/media-bridge-panel:1.0
+  dlushu/media-bridge-panel:latest
 ```
 
 ## 第一次使用
@@ -223,7 +223,7 @@ Emby
   （决策见 [ADR-0021](docs/adr/0021-update-replaces-app-dir.md)）。
 - **回退**：本地不留旧版本，所以回退 = 把 `APP_VERSION` 指向要回到的版本再重启容器 ——
   引导脚本发现该版本不在磁盘上会重新下载（前提是那个 Release 还在、且这台机器能访问到）。
-- 镜像只在"引导逻辑"变化时才需要更新：`docker pull dlushu/media-bridge-panel:1.0` 后重建容器。
+- 镜像只在"引导逻辑"变化时才需要更新：`docker pull dlushu/media-bridge-panel:latest` 后重建容器。
 
 **改名**
 
