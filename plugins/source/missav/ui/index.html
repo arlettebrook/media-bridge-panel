@@ -54,10 +54,6 @@
       </div>
     </div>
     <div class="hint" id="where"></div>
-    <div class="hint">
-      这一页是插件自己的设置：站点地址、封面地址与缓存都归它管，存在插件自己的数据目录里（面板不读也不写）。
-      要改面板那边的聚合口径（打分、超时、选哪些站点），去「聚合设置 → 模板」。
-    </div>
   </div>
 
   <div class="card">
@@ -93,7 +89,7 @@
   </div>
 
   <div class="card">
-    <h3>插件自己的缓存</h3>
+    <h3>缓存</h3>
     <div class="row">
       <label class="field" style="max-width:220px"><span>有效期（分钟；0 = 不缓存）</span>
         <input id="cacheTtl" type="number" min="0" />
@@ -110,8 +106,7 @@
       <button class="btn mini danger" id="cacheClear">清空</button>
     </div>
     <div class="hint">
-      这里存的是这个插件自己从站点取回来的页面原文（搜索页与影片页），命中就不打站点、秒回。
-      它和面板侧那份「线路结果」缓存不是一回事：那份由面板按天管。
+      这里存的是从站点取回来的页面原文（搜索页与影片页），命中就不打站点、秒回。
     </div>
   </div>
 

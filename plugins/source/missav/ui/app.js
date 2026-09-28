@@ -139,7 +139,7 @@ $('cacheReload').addEventListener('click', async () => {
 });
 
 $('cacheClear').addEventListener('click', async (e) => {
-  if (!window.confirm('清空插件自己的缓存？下次取数会重新打站点。')) return;
+  if (!window.confirm('清空缓存？下次取数会重新打站点。')) return;
   e.target.disabled = true;
   try {
     await call('/cache/clear', { method: 'POST' });
