@@ -26,6 +26,7 @@ const { sendJson, sendError, readBody } = require('../../core/http');
 const api = require('./api');
 const templates = require('./templates');
 const providers = require('../../core/providers');
+const registry = require('../../core/registry');
 const siteTest = require('./site-test');
 const { aggregateSearch, selectSites } = require('./service');
 
@@ -33,6 +34,17 @@ const { aggregateSearch, selectSites } = require('./service');
 function fail(res, out) {
   const e = out.error || {};
   return sendError(res, e.status || 400, e.message || '聚合层调用失败');
+}
+
+/**
+ * 域表（`providers`）由元数据插件申报、由 emby 层按插件清单重建（见 emby/meta.js）。
+ * 下面两条读它的端点（模板页 / 「域 → 模板」页）**读之前先顺手同步一次** ——
+ * 不然面板跑着的时候装/启用了元数据插件，要等重启或碰一次 `/api/emby/*` 才看得见新域。
+ * 与 server.js、emby/routes.js 同一口径：指纹短接，插件清单没变就什么都不做。
+ */
+function refreshDomains() {
+  const emby = registry.get('emby');
+  if (emby && typeof emby.ensureMetaProviders === 'function') emby.ensureMetaProviders();
 }
 
 module.exports = function routes(r) {
@@ -50,6 +62,7 @@ module.exports = function routes(r) {
   });
 
   r.add('GET', '/api/agg/sites', async (req, res) => {
+    refreshDomains();
     const { sources, sites } = await api.loadSites();
     const bad = sources.filter((s) => !s.ok);
     if (sources.length) {
@@ -81,13 +94,14 @@ module.exports = function routes(r) {
 
   /* ------------------------------- 模板：读 / 存 / 删 / 指给哪个域 */
 
-  r.add('GET', '/api/agg/templates', (req, res) =>
-    sendJson(res, 200, {
+  r.add('GET', '/api/agg/templates', (req, res) => {
+    refreshDomains();
+    return sendJson(res, 200, {
       templates: templates.list(),
       domains: templates.domains(),
       providers: providers.list().map((x) => ({ id: x.id, prefix: x.prefix, label: x.label, series: x.series })),
-    })
-  );
+    });
+  });
 
   r.add('POST', '/api/agg/templates', async (req, res) => {
     const body = (await readBody(req)) || {};
