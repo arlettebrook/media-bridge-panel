@@ -33,7 +33,7 @@ export async function renderEmbyAccounts(v) {
 
   const list = S.emby.instances || [];
   if (!list.length) {
-    v.append(el('div', { class: 'hint warn', text: '还没有 Emby 实例 —— 到「Emby → 实例」页看一眼（默认实例由后端首次启动时生成）。' }));
+    v.append(el('div', { class: 'hint warn', text: '还没有 Emby 实例 —— 先到「Emby → 实例」页新增一台。' }));
     return;
   }
   /* 选中的实例没了（被删了）就退回第一个 —— 免得整页对着一个不存在的 id 报 404 */

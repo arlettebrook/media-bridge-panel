@@ -1,9 +1,0 @@
-{
-  "id": "example",
-  "name": "首页示例（TMDB）",
-  "version": "1.0.0",
-  "type": "home",
-  "main": "index.js",
-  "webui": "ui/index.html",
-  "description": "内置首页示例：11 行 TMDB 榜单 / 趋势 / 分类 / 平台 / 公司 / 地区 / 随机推荐。token 与行参数都归它自己"
-}

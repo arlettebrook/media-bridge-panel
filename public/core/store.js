@@ -32,7 +32,8 @@ let aggInflight = null;
  */
 export async function ensureAggSites({ force = false } = {}) {
   const key = aggSourcesKey(S.aggSources);
-  if (!force && S.aggLoadedFor && S.aggLoadedFor === key && S.aggSites.length) return;
+  /* 空源清单的指纹是空串 —— 不能拿它当"还没拉过"（`null` 才是未拉过的标记，见 state.js） */
+  if (!force && S.aggLoadedFor !== null && S.aggLoadedFor === key && S.aggSites.length) return;
   if (aggInflight) return aggInflight;
   aggInflight = (async () => {
     const d = await api('/api/agg/sites');

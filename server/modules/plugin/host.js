@@ -9,8 +9,7 @@
  *      带**每次调用的超时**（超时**不杀进程**：插件慢不等于它坏了）；
  *   ③ 看护：进程自己退出时，**启用中的**插件按退避策略重启（最多 5 次 / 5 分钟），
  *      每次重启都在日志里点名 —— 不静默；
- *   ④ 观测：状态（在不在跑、pid、重启次数、最近一次错误）与**内存占用**（读 `/proc/<pid>/status`
- *      的 VmRSS；拿不到就如实给 null，不编数）。
+ *   ④ 观测：状态（在不在跑、pid、重启次数、最近一次错误）。
  *
  * ⚠️ "面板停、插件就停"由**宿主**保证：`stopAll()` 直接终止子进程，不依赖插件配合
  * （插件**自己**再起的实例，仍由它在收到停止指令时自行清理 —— 见契约里的 `shutdown` 义务）。
@@ -18,8 +17,7 @@
  * ⚠️ 不沙箱：插件能读写自己的目录、能联网、能起进程。权限前提与风险见 docs/adr/0028。
  */
 const path = require('path');
-const fs = require('fs');
-const { spawn, execFileSync } = require('child_process');
+const { spawn } = require('child_process');
 const store = require('./store');
 const contract = require('./contract');
 
@@ -41,29 +39,6 @@ const logTag = (type, id) => `[plugin:${type}/${id}]`;
 
 function log(line) {
   console.log('  ' + line);
-}
-
-/**
- * 读一个进程的内存（RSS）。**拿不到就 null —— 不编数**。
- *
- * 首选 `/proc/<pid>/status`（部署目标是 Linux 容器，最省）；没有 `/proc`（开发机是 macOS）
- * 就退回 `ps -o rss=` —— 拿不到值的那一侧如实显示"—"，不假装是 0。
- */
-function memoryOf(pid) {
-  try {
-    const s = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
-    const m = /VmRSS:\s+(\d+)\s+kB/.exec(s);
-    if (m) return Number(m[1]) * 1024;
-  } catch {
-    /* 没有 /proc：往下走 ps */
-  }
-  try {
-    const out = execFileSync('ps', ['-o', 'rss=', '-p', String(pid)], { stdio: 'pipe' }).toString().trim();
-    const n = Number(out);
-    return Number.isFinite(n) && n > 0 ? n * 1024 : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -342,7 +317,6 @@ function stateOf(type, id) {
     origin: (entry && entry.origin) || '',
     status: st ? st.status : 'stopped',
     pid: (st && st.pid) || null,
-    memoryBytes: st && st.pid ? memoryOf(st.pid) : null,
     actions: (st && st.actions) || [],
     restarts: (st && st.restarts) || 0,
     uptimeMs: st && st.startedAt && st.status === 'running' ? Date.now() - st.startedAt : 0,
@@ -366,5 +340,4 @@ module.exports = {
   call,
   stateOf,
   states,
-  memoryOf,
 };

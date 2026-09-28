@@ -114,8 +114,8 @@ body 里 `ItemId` **就是本面板发出去的 Id**（`tmdb_{id}_tv_s{n}_e{m}` 
   2. 真机的 `Progress` **不校验 token**（实测不带 token 也回 204）；本层三条都校验（写真实数据，按 ADR-0009）。
   3. 真机的 `Resume` 会带 `PlaybackPositionTicks: 0` 的"该接着看的下一集"；本层 `Resume` 只要"位置 > 0 且未看完"，
      那种语义由 `NextUp` 承担。
-- **进度不进备份**：面板的导出备份只有设置 + 源清单（见 [backup.js](../../server/modules/panel/backup.js)），
-  `emby.db` 里的账号、会话与进度都不在其中 —— 重装 / 换机即丢。
+- **进度进备份**：面板的数据备份是**整份数据卷**的 zip（见 [backup.js](../../server/modules/panel/backup.js)，
+  只排除缓存与应用代码），`emby.db` 里的账号、会话与进度都在其中 —— 换机 / 重装还原后仍在。
 - **`Filters=IsPlayed` 从"必然空"变成"真数据"**，所以 `itemsWillReturnData()` 的判据跟着翻
   （ADR-0009 的口径：真数据端点必须校验账号）。⚠️ 这一处若漏改，就是"未鉴权可读别人的观看记录"。
 - 剧（Series）条目仍然给空 `UserData`：客户端不会在剧上看到"已看 / 看到哪"，只有在集上能看到。

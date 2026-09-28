@@ -225,9 +225,9 @@ CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, u
 1. **多设备不区分**：真机按 session 存，同一账号两台设备看同一部片会互相覆盖位置。
    本方案的取舍是"尾写胜出"（`PRIMARY KEY (account_id, item_id)` 的 upsert 天然如此）。
 2. **账号没了进度也没了**：`removeAccount()` 时要顺手删该账号的行（`db.js:227-230` 加一句）。
-3. **备份不含这张表**：`server/modules/panel/backup.js` 写明只备份「配置」（`settings/<模块>.json` + 源清单），
-   所以 `data/emby/emby.db` 里的账号、会话与**播放进度都不进备份**，重装 / 换机即丢。
-   要不要把 `emby.db` 一起纳入备份，是一个独立取舍（见 §9）。
+3. **备份含这张表**：`server/modules/panel/backup.js` 打包的是**整份数据卷**（设置、模板、插件、
+   `emby/` …，不含缓存与应用代码），所以 `data/emby/emby.db` 里的账号、会话与**播放进度都进备份** ——
+   换机 / 重装还原后仍在（需重启面板生效）。代价是备份文件含密码哈希与观看记录，须当作私密文件保管。
 4. **库会长期长胖**：每账号每条最多一行，但仍要定保留策略（见 §9）。
 
 ## 8. 改动文件清单
@@ -251,8 +251,8 @@ CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, u
 5. **是否同时动 `PlaybackInfo`**：客户端重开时给"从上次位置继续"（`StartTimeTicks` / `MediaSources[].DefaultAudioStreamIndex` 等）
    需要把 `position_ticks` 回给客户端 —— 真机是在 `PlaybackInfo` 响应里给"续播位置"的。
    这属本方案的**自然延伸**，会再加一处改动（建议做完 `Resume` 看到效果后再定）。
-6. **`emby.db` 要不要纳入面板备份**：现状不在（`backup.js` 只导设置 + 源清单），账号 / 会话 / 进度重装即丢；
-   纳进去会让备份包含密码哈希与观看记录，需要权衡。
+6. **`emby.db` 要不要纳入面板备份**：**已定：纳入** —— 备份即整份数据卷的 zip，账号 / 会话 / 进度都在其中，
+   换机不用重登。随之而来的是备份文件会包含密码哈希与观看记录，按私密文件保管。
 
 ## 10. 验收清单（真机跑，逐条打勾）
 

@@ -6,17 +6,16 @@
   <meta name="theme-color" content="#0e1210" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <!-- ⚠️ 名字的**权威**在 core/branding.js（启动后 JS 会覆盖标题与顶栏）；这里这份只是首屏兜底 -->
+  <!-- ⚠️ 名字的**权威**在 core/branding.js（启动后 JS 会覆盖标题与侧栏品牌）；这里这份只是首屏兜底 -->
   <title>媒体桥面板</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <div class="app">
+    <!-- ⚠️ 宽屏这整条**不显示**（品牌在侧栏顶部，见下面的 .nav-brand）——
+         它只在窄屏出现，因为那时侧栏是盖在内容上的抽屉，需要栏外的一颗触发按钮。 -->
     <header class="appbar">
-      <button id="navToggle" class="nav-toggle" aria-label="展开/折叠导航" aria-expanded="true" title="展开/折叠导航">☰</button>
-      <div class="brand">
-        <b>媒体桥面板</b>
-      </div>
+      <button id="navToggle" class="nav-toggle" aria-label="展开导航" aria-expanded="false" title="展开导航">☰</button>
     </header>
 
     <div id="empty" class="empty">
@@ -29,11 +28,14 @@
 
     <div id="workspace" class="workspace hidden">
       <div class="body">
-        <!-- ⚠️ 侧栏**不写在这里**：由 core/shell.js 的 renderNavButtons() 照
-             core/registry.js 的 MODULES 现画成树（一栏一个父节点，栏里的页是子节点）——
-             加一栏只改 MODULES 一处；没有子项的栏目不画（三类插件栏里一个插件都没启用时，
-             侧栏不留空栏目）。 -->
-        <nav class="nav" id="nav"></nav>
+        <!-- 侧栏：顶上那行品牌是**写死的首屏兜底**（启动后由 core/branding.js 用 BRAND 覆盖）；
+             下面的分组由 core/shell.js 的 renderNavButtons() 照 core/registry.js 的 MODULES
+             现画成树（一栏一个父节点，栏里的页是子节点）—— 加一栏只改 MODULES 一处；
+             没有子项的栏目不画（三类插件栏里一个插件都没启用时，侧栏不留空栏目）。 -->
+        <nav class="nav" id="nav">
+          <div class="nav-brand"><b>媒体桥面板</b></div>
+          <div class="nav-groups" id="navGroups"></div>
+        </nav>
         <div class="content">
           <section id="view" class="view"></section>
         </div>

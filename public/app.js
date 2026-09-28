@@ -36,6 +36,7 @@ import { renderAggOther } from './modules/agg/other.js';
 import { renderEmbyInstances } from './modules/emby/instances.js';
 import { renderEmbyAccounts } from './modules/emby/accounts.js';
 import { renderPluginManage } from './modules/plugin/manage.js';
+import { renderPluginLibrary } from './modules/plugin/library.js';
 import { renderPanelOverview } from './modules/panel/overview.js';
 import { renderPanelSettings, renderPanelAbout } from './modules/panel/settings.js';
 import { renderPanelLogs } from './modules/panel/logs.js';
@@ -47,6 +48,7 @@ registerPages({
   'agg-other': renderAggOther,
   'emby-instances': renderEmbyInstances,
   'emby-accounts': renderEmbyAccounts,
+  'plugin-library': renderPluginLibrary,
   'plugin-manage': renderPluginManage,
   panel: renderPanelOverview,
   'panel-settings': renderPanelSettings,
@@ -58,7 +60,7 @@ registerPages({
  * 它们的页 id 是开页面时现算的，统一交给这一个渲染器（见 core/registry.js 的 rendererOf）。 */
 setPluginUiRenderer({ render: renderPluginUi, nopad: true });
 
-/* 顶栏品牌与网页标题（读 core/branding.js —— 改名只改那一处；index.html 里那份只是首屏兜底） */
+/* 侧栏品牌与网页标题（读 core/branding.js —— 改名只改那一处；index.html 里那份只是首屏兜底） */
 paintBrand();
 
 init();

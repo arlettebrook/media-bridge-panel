@@ -137,9 +137,9 @@ docker logs -t media-bridge-panel              # 带时间戳
 
 1. 启动面板（`npm start`）。
 2. 在 Emby 客户端里把服务器地址指向**某个 Emby 实例的端口**（面板「Emby → 实例」页每行给出的连接地址，
-   形如 `http://<面板地址>:8096`）：填主机即可，客户端会自己去打 `/emby/...`，实例监听把它归一成
-   `/api/emby/...`（也可以直接填 `http://<面板地址>:8096/api/emby`，两种都收）。
-   **面板端口（`8099`）不再提供客户端协议端点**，只有面板自用端点与 `System/Info/Public` 垫片。
+   新建实例端口留空时从 `8090` 起依次 +1，形如 `http://<面板地址>:8090`）：填主机即可，客户端会自己去打 `/emby/...`，实例监听把它归一成
+   `/api/emby/...`（也可以直接填 `http://<面板地址>:8090/api/emby`，两种都收）。
+   **面板端口（`8088`）不再提供客户端协议端点**，只有面板自用端点与 `System/Info/Public` 垫片。
 3. 在客户端里正常操作（登录、进媒体库、播放……）。
 4. **看日志**，把客户端要的端点与其参数记下来。
 5. 把「这次要补的端点」交给实现方 —— **一次一个**。
@@ -566,13 +566,13 @@ docker logs -t media-bridge-panel              # 带时间戳
   - **302 前改写地址**（`service.redirectUrl()`）：**本地部署的源**回的播放地址是**回环地址**
     （源按"谁访问它"回填 host —— 聚合层是用 `http://127.0.0.1:<端口>` 打它的，它就回 `127.0.0.1`），
     那个地址对客户端毫无意义（客户端上的 `127.0.0.1` 是客户端自己）。所以换成
-    **`http://<客户端访问面板用的域名>:<源端口>/…`**：用 192.168.1.100 进的 Emby 就回 `192.168.1.100:9988`，
-    用 192.168.1.10 进的就回 `192.168.1.10:9988`（docker-compose 已把 9988-9998 发布到宿主）。
+    **`http://<客户端访问面板用的域名>:<源端口>/…`**：用 192.168.1.100 进的 Emby 就回 `192.168.1.100:8090`，
+    用 192.168.1.10 进的就回 `192.168.1.10:8090`（docker-compose 已把 8090-8100 发布到宿主）。
     · 只在地址**确实是回环**时才改（真直链如 `drive.example.com` 一律不动）；
     · **自定义（外部）源一律原样**——那种源在别的机器上，它的地址面板管不着，也不该管；
     · 源只回相对地址（`/proxy/…`）时按同一个域名 + 源端口补全（否则客户端会拼到**面板**身上）；
     · 拿不到 `Host` 头 / 认不出的地址 → 原样回，并把原因写进日志那一行。
-    改写成功时日志会写全：`→ 302 地址改写 http://127.0.0.1:9988 → 客户端域名(192.168.1.100:9988)`。
+    改写成功时日志会写全：`→ 302 地址改写 http://127.0.0.1:8090 → 客户端域名(192.168.1.100:8090)`。
   - 老配置里残留的 `play.mode` **不再读、也不再校验**（`PLAY_MODE_VALUES` 已删）：盘上留着那个键不影响任何一张卡片保存。
   - **线路过滤（可在面板配：「聚合设置 → 聚合参数 → 线路过滤」）**：一个正则，**只匹配线路名**（`line.flag`）—— 写 `夸克` 只留夸克类线路，写 `百度|UC` 留这两类；留空 = 不过滤。
     **已从 emby 层搬到聚合层**（`agg.json` 的 `lineFilter`，理由是「放聚合设置里面更稳」）：
@@ -921,12 +921,12 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 | `server/core/logbus.js` | 日志总线：`install()` 包一层 `console.log/warn/error`（**先透传 stdout，再入内存环形缓冲**）、按行拆分、单条截断 1000 字符、固定条数（默认 500，`panel.logMax` 可调）；`list()`/`clear()`/`resize()`/`stats()`。**纯内存、不落盘**（长期留档交给 docker 的 json-file）。在 `server.js` 里**加载模块之前**装（见「二」） |
 | `server/modules/panel/routes.js` + `public/modules/panel/logs.js` | 日志页的数据口与页面：`GET /api/logs?since=&limit=`（增量）、`DELETE /api/logs`（清空）；页面「面板设置 → 日志」带暂停/清空/复制/级别过滤，增量轮询 + `isConnected` 守卫（见「二」） |
 | `server/modules/emby/index.js` | 模块清单：`upstream: 'agg'`、账号空壳设置（`serverName` / `serverId` / `imageKey` **已从设置里移出** —— 它们是**实例属性**，落在 `data/emby/instances.json`，见 `instance.js` 的 `identityOf`）。**`play.filter` 已搬到聚合层**（`agg.json` 的 `lineFilter`，UI 在「聚合设置 → 聚合参数」），那份校验也跟着走了；`play.mode`（随"面板代理"一起删）、`tmdb.*` 与 `cache.*` 都不在这里了；这里也不再需要"放行老值"的兼容校验 —— 校验里没有那个键，盘上留着也不挡保存 |
-| `server/modules/emby/instance.js` + `listener.js` | **多实例**：`instances.json` 是唯一真源（id / name / port / enabled / homePlugin / serverId / imageKey / dbFile）；`AsyncLocalStorage` 把"当前实例"贯穿到 `service.js` 与 `db.js`（不动那几千行）。`listener.js` 给每个启用实例在**它自己的端口**上挂一个 http 服务，与 8099 同一套路径归一化，但只放行客户端协议端点（面板自用端点由 `PANEL_ONLY_RE` 挡掉）。**面板端口反过来**：`server.js` 只放行面板自用端点 + `System/Info/Public` 垫片，其余客户端协议端点一律 404（两处名单互为对称） |
+| `server/modules/emby/instance.js` + `listener.js` | **多实例**：`instances.json` 是唯一真源（id / name / port / enabled / homePlugin / serverId / imageKey / dbFile）；`AsyncLocalStorage` 把"当前实例"贯穿到 `service.js` 与 `db.js`（不动那几千行）。`listener.js` 给每个启用实例在**它自己的端口**上挂一个 http 服务，与面板端口同一套路径归一化，但只放行客户端协议端点（面板自用端点由 `PANEL_ONLY_RE` 挡掉）。**面板端口反过来**：`server.js` 只放行面板自用端点 + `System/Info/Public` 垫片，其余客户端协议端点一律 404（两处名单互为对称） |
 | `server/modules/panel/index.js` | 面板层设置与钩子：`logMax`（改了就 `resize`）、**`cache.*`**（面板这边那两份缓存；`onSettingsChange` 里调 `cachedb.sweepAll()` 落实新上限）。⚠️ `tmdb.*` 已不在面板层（归元数据插件） |
 | `public/modules/emby/instances.js`（「Emby → 实例」页） | 实例列表：每行是名称 / 端口徽章 / **首页插件行内下拉**（点一下就 PATCH）/ 运行状态点（端口被占时红点 + 原因）/ 连接地址（一键复制）/ 编辑 / 删除（默认实例不给删）。编辑弹窗含名称、端口、首页插件、启用；**服务器名就是这个实例的 `name`** |
 | `public/modules/emby/accounts.js`（「Emby → 账号」页） | 顶部**实例选择器**，下方账号增删改只作用于所选实例（端点 `/api/emby/instances/{iid}/accounts`）；每行带上该实例的 `UserId`（`md5(serverId\|用户名)`，服务端现算），便于对着客户端日志排查 |
 | `public/modules/panel/settings.js`（「面板设置」页） | 备份还原 / **缓存设置**（用量 + 上限 + 清空，端点 `GET\|DELETE /api/panel/cache`）/ **站点测速**（开关与间隔）/ 面板密码。⚠️ **TMDB 设置已不在这一页**（归元数据插件自己的设置页：「插件」→ tmdb → 「设置」） |
 | `data/settings/emby.json` | `account`（**只剩空壳**，账号已搬到 sqlite）。（`serverId` / `imageKey` **已迁出**到 `data/emby/instances.json`，首次加载时从旧值搬一次；`tmdb.*` 与 `cache.*` 搬到 `panel.json`；`play.filter` 搬到 `agg.json` 的 `lineFilter`，盘上那几个老键既不读也不校验） |
 | `data/settings/panel.json` | 面板监听参数、`logMax`、`modules`、`speedTest*`、**`cache.{imageTtlDays,imageMaxMB,detailTtlMinutes,detailNeverExpire,detailMaxMB}`**。⚠️ `tmdb.*` 已不在这里（归元数据插件自己的 `data/settings.json`）；盘上留着老键也没人读 |
-| `data/emby/emby.db` | 客户端登录账号表（内置 sqlite；密码为 scrypt 哈希）。**「配置备份/还原」不包含它**（`backup.js` 只打包 `settings/`）—— 还原备份后账号要重建 |
+| `data/emby/emby.db` | 客户端登录账号表（内置 sqlite；密码为 scrypt 哈希）。**数据备份包含它**（`backup.js` 打包整份数据卷，`emby/` 在其中）—— 还原后账号跟着回来，但需重启面板才生效 |
 

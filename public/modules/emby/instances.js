@@ -11,8 +11,8 @@
  * 塞进弹窗等于每次都要"开窗→选→保存→关窗"；改名 / 改端口 / 启停则走弹窗
  * （那几样改错了客户端会连不上，值得多一步确认）。
  *
- * ⚠️ 端口不是随便填的：8099 是面板本体、9988-9998 归托管源，都被后端 `instance.validate` 挡掉；
- * 留空则由后端挑一个空闲的。被占用的端口**不会**让面板起不来 —— 只是这一行的状态变成红点 + 原因。
+ * ⚠️ 端口不是随便填的：面板本体端口被后端 `instance.validate` 挡掉；留空则由后端从 8090 起
+ * 挑一个空闲的（占用了就 +1）。被占用的端口**不会**让面板起不来 —— 只是这一行的状态变成红点 + 原因。
  */
 import { el, modal, toast, confirmModal } from '../../core/dom.js';
 import { api } from '../../core/api.js';
@@ -89,9 +89,7 @@ function introCard() {
     el('h3', { text: 'Emby 实例' }),
     el('p', {
       class: 'note',
-      text:
-        '每个实例有自己的端口、自己的账号与观看进度（各一个库文件，互不相通）、自己选的一套首页插件。' +
-        '给家人单独开一个干净的 Emby（自己的账号、自己的进度、自己的片源）就靠它。',
+      text: '每个实例有自己的端口、自己的账号与观看进度（各一个库文件，互不相通）、自己选的一套首页插件。',
     }),
     el('p', {
       class: 'note',
@@ -141,7 +139,7 @@ function listCard(pluginErr, domainErr) {
   if (domainErr) card.append(el('div', { class: 'hint warn', text: '读不到元数据域清单：' + domainErr + '（搜索域多选里只剩已保存的那些）' }));
 
   if (!list.length) {
-    card.append(el('div', { class: 'muted', text: '还没有实例 —— 这不该发生（默认实例由后端首次启动时生成），刷新看看。' }));
+    card.append(el('div', { class: 'muted', text: '还没有实例。' }));
     return card;
   }
   for (const inst of list) card.append(instanceRow(inst));
@@ -252,7 +250,7 @@ function metaDomainPicker(inst) {
 /** 新增（inst = null）与编辑共用一张窗：几样都是 `instance.patch` 认的字段 */
 function openEditor(inst) {
   const isNew = !inst;
-  const name = el('input', { type: 'text', spellcheck: 'false', maxlength: '40', placeholder: '例如「客厅」「给爸妈的」', value: isNew ? '' : inst.name });
+  const name = el('input', { type: 'text', spellcheck: 'false', maxlength: '40', placeholder: '实例名称', value: isNew ? '' : inst.name });
   const port = el('input', {
     type: 'number',
     class: 'w-md',
@@ -283,7 +281,7 @@ function openEditor(inst) {
       el('p', {
         class: 'note',
         text:
-          '端口留空就自动挑一个空闲的。8099 是面板本体、9988-9998 归托管源，不能占用；' +
+          '端口留空就从 8090 起自动挑一个空闲的（被占了就 +1），面板本体端口不能占用；' +
           '改端口之后客户端要用新地址重连一次。' + (isNew ? '新实例的账号是空的 —— 建完到「Emby → 账号」页里加。' : ''),
       }),
       tip,

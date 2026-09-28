@@ -16,8 +16,9 @@
  * 为什么不用普通全局变量：下游有 `await` 上游请求，并发请求之间会串味；
  * ALS 是"跟着这条异步调用链走"的，串不了。
  *
- * 没有上下文时（面板自用端点在 8099 上直接调 service/db）**回落默认实例** —— 那些端点
- * 本来就只伺候默认实例的账号。
+ * 没有上下文时（面板自用端点在面板端口上直接调 service/db）回落清单里的 `default`，
+ * 再退回第一条；**一条实例都没有时回 null** —— 全新安装不再自动建实例（见 `migrate`），
+ * 调用方按"没有可用实例"处理。
  */
 const fs = require('fs');
 const path = require('path');
@@ -32,14 +33,11 @@ const BRAND = require('../../core/branding');
 /** 实例清单文件（含 serverId / imageKey，不要外发） */
 const INSTANCES_FILE = path.join(EMBY_DIR, 'instances.json');
 
-/** 默认实例的 id —— 老数据（`data/emby/emby.db`）挂在它身上，永远存在、不可删 */
+/** 迁移出来的那个实例的 id —— 老数据（`data/emby/emby.db`）挂在它身上，只此一处会用到它 */
 const DEFAULT_ID = 'default';
 
-/** 默认实例的端口：Emby 官方的经典端口，避免与面板的 8099 撞车 */
-const DEFAULT_PORT = 8096;
-
-/** 新实例的端口从这个范围里挑（避开 8099 面板本体与 9988-9998 托管源） */
-const PORT_RANGE = { from: 8096, to: 8099 + 200 };
+/** 端口留空时从这个值起往上找第一个空闲的（被占了就 +1，不设上限） */
+const PORT_START = 8090;
 
 /** 一份实例清单最多这么多条 —— 端口与 sqlite 句柄都跟着涨，得有个头 */
 const MAX_INSTANCES = 8;
@@ -109,7 +107,13 @@ function save() {
 /* ------------------------------------------------------------------ 迁移 */
 
 /**
- * 从老的**单实例**设置（`settings/emby.json` 的 serverName / serverId / imageKey）生成默认实例。
+ * 把老的**单实例**数据接过来 —— **只有盘上确实留着老痕迹时才接**。
+ *
+ * 命中任一判据即迁移：
+ *   ① `settings/emby.json` 里留着老的单实例字段（serverName / serverId / imageKey / port）；
+ *   ② `data/emby/emby.db` 已经存在（老账号与观看进度都在里面）。
+ * 两条都不命中 = 全新安装，**一条实例都不建** —— 需要时在「Emby → 实例」页自己加，
+ * 端口留空就从 `PORT_START` 起自动挑一个。
  *
  * **数据原地不动**：`dbFile` 指向老的 `emby.db`，账号与进度一个都不搬。
  * `homePlugin` 取**第一个启用中的首页插件** —— 老版本是"所有启用插件的所有行全量叠加"，
@@ -123,11 +127,15 @@ function migrate() {
   if (s.instances.length) return s;
 
   const old = settings.read('emby') || {};
+  const oldPort = Number(old.port);
+  const hasOldSettings = !!(String(old.serverName || '').trim() || String(old.serverId || '').trim() || String(old.imageKey || '').trim() || oldPort > 0);
+  if (!hasOldSettings && !fs.existsSync(path.join(EMBY_DIR, 'emby.db'))) return s;
+
   const firstHome = firstEnabledHomePlugin();
   s.instances.push({
     id: DEFAULT_ID,
     name: String(old.serverName || '').trim() || BRAND.embyServerName,
-    port: Number(old.port) > 0 ? Number(old.port) : DEFAULT_PORT,
+    port: oldPort > 0 ? oldPort : PORT_START,
     enabled: true,
     homePlugin: firstHome,
     serverId: String(old.serverId || '').trim(),
@@ -156,7 +164,7 @@ function firstEnabledHomePlugin() {
 
 /* ------------------------------------------------------------------ 上下文 */
 
-/** 当前请求所属的实例；不在任何实例上下文里就回落默认实例 */
+/** 当前请求所属的实例；不在任何实例上下文里就回落清单里的第一条（老装法命中 `default`） */
 function current() {
   const inst = als.getStore();
   if (inst) return inst;
@@ -214,6 +222,17 @@ function normDomains(v) {
   return out;
 }
 
+/**
+ * 面板本体端口 —— 实例不能占用它（面板与实例挂在同一个进程里，占了就起不来）。
+ * 取值口径与 `server.js` 的 `WEB_PORT` 保持一致：环境变量 → 面板设置 → 默认值。
+ */
+function panelPort() {
+  const env = Number(process.env.WEB_PORT);
+  if (Number.isInteger(env) && env > 0) return env;
+  const p = Number(settings.read('panel').port);
+  return Number.isInteger(p) && p > 0 ? p : 8088;
+}
+
 /** 校验一份"要写进去的字段"；返回错误文案或 null */
 function validate(o, self) {
   if (!o || typeof o !== 'object') return '请求体必须是对象';
@@ -225,8 +244,7 @@ function validate(o, self) {
   if (o.port !== undefined) {
     const p = Number(o.port);
     if (!Number.isInteger(p) || p < 1 || p > 65535) return '端口必须是 1-65535 的整数';
-    if (p === 8099) return '8099 是面板本体端口，Emby 实例不能占用它';
-    if (p >= 9988 && p <= 9998) return '9988-9998 留给托管源实例，Emby 实例不要占用';
+    if (p === panelPort()) return `${p} 是面板本体端口，Emby 实例不能占用它`;
     const taken = load().instances.find((x) => x.port === p && (!self || x.id !== self.id));
     if (taken) return `端口 ${p} 已被实例「${taken.name}」占用`;
   }
@@ -261,9 +279,9 @@ function isFree(port) {
   });
 }
 
-async function findFreePort(from = PORT_RANGE.from, to = PORT_RANGE.to) {
+async function findFreePort(from = PORT_START) {
   const held = new Set(load().instances.map((x) => Number(x.port)));
-  for (let p = from; p <= to; p++) {
+  for (let p = from; p <= 65535; p++) {
     if (held.has(p)) continue;
     // eslint-disable-next-line no-await-in-loop
     if (await isFree(p)) return p;
@@ -447,7 +465,7 @@ process.on('exit', closeAll);
 
 module.exports = {
   DEFAULT_ID,
-  DEFAULT_PORT,
+  PORT_START,
   INSTANCES_FILE,
   MAX_INSTANCES,
   migrate,

@@ -10,7 +10,7 @@ export const S = {
    * 探好的那几项（ok/ms/siteCount/error）也在这一份里，所以界面上不会再出现"探测中…"。 */
   aggSources: null,
   aggSites: [],         // 各实例的站点（每项带 source/sourceName）
-  aggLoadedFor: null,   // 上面两个的缓存指纹（源集合变了才重拉）
+  aggLoadedFor: null,   // 上面两个的缓存指纹（源集合变了才重拉）；`null` = 还没拉过（空源清单的指纹是空串，别拿它当"没拉过"）
   siteFilter: '',
   siteSort: '',         // 站点表的显示顺序：'' = 原顺序 / 'fast' = 延迟快→慢 / 'slow' = 慢→快
   siteGroup: '',        // 站点表当前打开的那个来源（模板页把来源做成页签，一次只画一组）

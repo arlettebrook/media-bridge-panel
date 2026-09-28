@@ -17,7 +17,7 @@ const cachedb = require('../../core/cachedb');
 const cache = require('../agg/cache');
 const logbus = require('../../core/logbus');
 const auth = require('../../core/auth');
-const { sendJson, sendError, readBody } = require('../../core/http');
+const { sendJson, sendError, sendBuffer, readBody, readRawBody } = require('../../core/http');
 const { DATA_DIR, SETTINGS_DIR } = require('../../core/paths');
 const backup = require('./backup');
 const update = require('./update');
@@ -146,11 +146,37 @@ module.exports = function routes(r) {
     })
   );
 
-  r.add('GET', '/api/panel/backup', (req, res) => sendJson(res, 200, backup.exportAll()));
+  /* 备份：回一份 **zip 字节**（不是 JSON）。摘要放响应头，前端下载后凭它显示"含多少文件 / 多大"。
+   * 范围与排除项见 backup.js 顶部注释（全部数据、不含缓存与应用代码）。 */
+  r.add('GET', '/api/panel/backup', (req, res) => {
+    const out = backup.exportAll();
+    res.setHeader('Content-Disposition', 'attachment; filename="catpaw-panel-backup.zip"');
+    res.setHeader('X-Backup-Files', String(out.files));
+    res.setHeader('X-Backup-Bytes', String(out.bytes));
+    res.setHeader('X-Backup-Exported-At', out.exportedAt);
+    console.log(`  ↑ 面板数据备份：${out.files} 个文件 / ${Math.round(out.bytes / 1024)} KB（不含缓存与应用代码）`);
+    return sendBuffer(res, 200, out.buffer, 'application/zip');
+  });
 
+  /* 还原：请求体是备份 zip 的**原始二进制**（前端直接以 File 为 body），不做 JSON/base64 包装。
+   * 上限放宽到 256MB —— 全量数据（含插件包本体）可能到几十 MB，默认 8MB 不够。 */
   r.add('POST', '/api/panel/restore', async (req, res) => {
-    const body = await readBody(req);
-    return sendJson(res, 200, backup.restore(body));
+    let raw = null;
+    try {
+      raw = await readRawBody(req, 256 * 1024 * 1024);
+    } catch (e) {
+      return sendError(res, 400, '备份文件读取失败：' + ((e && e.message) || String(e)));
+    }
+    if (!raw || !raw.length) return sendError(res, 400, '请求体为空，没有收到备份文件');
+    try {
+      const out = backup.restore(raw);
+      console.log(`  ↻ 面板数据还原：${out.restored.join(' / ') || '(空)'}（重启后生效）`);
+      return sendJson(res, 200, out);
+    } catch (e) {
+      const msg = (e && e.message) || String(e);
+      console.log(`  ✘ 面板数据还原失败：${msg}`);
+      return sendError(res, 400, msg);
+    }
   });
 
   /**

@@ -19,7 +19,7 @@ module.exports = {
   settings: {
     defaults: () => ({
       host: '0.0.0.0',
-      port: 8099,
+      port: 8088,
       /* 面板「日志」页的内存缓冲条数（见 core/logbus.js）。**纯内存、不落盘**，
        * 所以这个数直接决定内存占用上限（500 条 ≈ 最多 0.5MB）。 */
       logMax: 500,

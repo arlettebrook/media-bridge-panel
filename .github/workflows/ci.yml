@@ -22,7 +22,7 @@ jobs:
           node server.js &
           pid=$!
           for i in $(seq 1 20); do
-            if curl -fsS http://127.0.0.1:8099/api/emby/System/Info/Public > /dev/null; then
+            if curl -fsS http://127.0.0.1:8088/api/emby/System/Info/Public > /dev/null; then
               echo "面板已就绪"
               kill $pid
               exit 0

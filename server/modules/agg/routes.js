@@ -130,7 +130,7 @@ module.exports = function routes(r) {
     if (dom.error) return fail(res, dom.error);
     const cfg = dom.params;
     const { sources, sites } = await api.loadSites();
-    if (!sources.length) return sendError(res, 400, '还没有可用的源：到「插件 → 管理 → 猫爪源 → 设置」里加一个实例（本地部署或外部地址）');
+    if (!sources.length) return sendError(res, 400, '还没有可用的源：先在「插件」里装一个源插件，再到它的设置页里加一个实例');
     const picked = selectSites(sites, dom.selection, body.keys);
     if (!picked.length) {
       if (!api.liveSources(sources).length) {

@@ -17,9 +17,31 @@ import { S } from './state.js';
  * 详见 core/plugin-ui.js（那一个通用渲染器把 webui 嵌进面板）。
  */
 const PLUGIN_UI_TYPES = [
-  { id: 'plugin-meta', label: '元数据', type: 'metadata' },
-  { id: 'plugin-source', label: '片源', type: 'source' },
-  { id: 'plugin-home', label: '首页', type: 'home' },
+  {
+    id: 'plugin-meta',
+    label: '元数据',
+    type: 'metadata',
+    icon: ico(
+      '<ellipse cx="8" cy="3.6" rx="5.4" ry="2"/>' +
+        '<path d="M2.6 3.6v8.8c0 1.1 2.42 2 5.4 2s5.4-.9 5.4-2V3.6"/>' +
+        '<path d="M2.6 8c0 1.1 2.42 2 5.4 2s5.4-.9 5.4-2"/>'
+    ),
+  },
+  {
+    id: 'plugin-source',
+    label: '片源',
+    type: 'source',
+    icon: ico(
+      '<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="1.6"/>' +
+        '<path d="M4.6 2.6v10.8M11.4 2.6v10.8M1.6 8h12.8"/>'
+    ),
+  },
+  {
+    id: 'plugin-home',
+    label: '首页',
+    type: 'home',
+    icon: ico('<path d="M2 7.1 8 2.3l6 4.8"/><path d="M3.7 6.2v7.5h8.6V6.2"/>'),
+  },
 ];
 
 /** 插件 UI 页的 id：`pui-<类型>-<插件id>`（hash 里不能带 `/`，所以拍平成一串） */
@@ -46,6 +68,22 @@ function pluginUiPages(type) {
 }
 
 /**
+ * 侧栏那一行的图标（内联 SVG）。
+ *
+ * 只写图形本身，外面那圈属性（`viewBox` / 线宽 / 圆角端点 / 颜色跟随文字）在这里统一给 ——
+ * 每个图标各写一遍必然粗细不齐。`fill="none"` + `stroke="currentColor"` 让图标跟着
+ * 当前行的文字色走（悬停 / 高亮时一起变色），不必再为状态各配一份颜色。
+ */
+function ico(body) {
+  return (
+    '<svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    body +
+    '</svg>'
+  );
+}
+
+/**
  * 导航结构。
  *
  * ⚠️ 原先这里还有一栏「源托管」（猫源地址 + 每个运行中的源一个「配置中心」），
@@ -56,24 +94,43 @@ export const MODULES = [
   {
     id: 'agg',
     label: '聚合设置',
+    icon: ico(
+      '<rect x="2.2" y="2.2" width="4.8" height="4.8" rx="1.2"/>' +
+        '<rect x="9" y="2.2" width="4.8" height="4.8" rx="1.2"/>' +
+        '<rect x="2.2" y="9" width="4.8" height="4.8" rx="1.2"/>' +
+        '<rect x="9" y="9" width="4.8" height="4.8" rx="1.2"/>'
+    ),
     pages: () => [
       ['agg-templates', '模板'],
       ['agg-search', '聚合搜索'],
-      ['agg-other', '其他设置'],
+      ['agg-other', '域 → 模板'],
     ],
   },
   /* Emby 层多实例：`实例` 是每台服务器一份（名 / 端口 / 首页插件），`账号` 按实例分。 */
   {
     id: 'emby',
     label: 'Emby',
+    icon: ico(
+      '<rect x="1.6" y="2.6" width="12.8" height="8.8" rx="1.4"/>' + '<path d="M6 13.6h4"/>'
+    ),
     pages: () => [
       ['emby-instances', '实例'],
       ['emby-accounts', '账号'],
     ],
   },
   /* 插件宿主：装 / 卸 / 启停 + 每插件一个常驻子进程（见 docs/adr/0028）；
-   * 「某个插件自己的设置页」按类型挂到下面那三栏里（见 docs/adr/0029 已定 18）。 */
-  { id: 'plugin', label: '插件', pages: () => [['plugin-manage', '管理']] },
+   * 「某个插件自己的设置页」按类型挂到下面那三栏里（见 docs/adr/0029 已定 18）。
+   * 「插件库」= 从独立插件仓库装（插件不随面板发行，见 docs/adr/0035）；
+   * 「管理」= 已装的装卸启停 + 手动上传包。 */
+  {
+    id: 'plugin',
+    label: '插件',
+    icon: ico('<rect x="2.2" y="2.2" width="11.6" height="11.6" rx="3.2"/><circle cx="8" cy="8" r="2.4"/>'),
+    pages: () => [
+      ['plugin-library', '插件库'],
+      ['plugin-manage', '管理'],
+    ],
+  },
   /* 三类插件栏：子项现算（`pages()` 每次都重新读 S.plugins），所以插件启停之后要调
    * shell.refreshNav() 把侧栏重画一遍；**一栏里一个子项都没有时整栏不显示**
    * （见 shell.renderNavButtons —— 侧栏不留空栏目）。
@@ -81,11 +138,16 @@ export const MODULES = [
   ...PLUGIN_UI_TYPES.map((t) => ({
     id: t.id,
     label: t.label,
+    icon: t.icon,
     pages: () => pluginUiPages(t.type),
   })),
   {
     id: 'panel',
     label: '面板设置',
+    icon: ico(
+      '<path d="M2 4.6h7.3M13.4 4.6H14M2 11.4h1.6M7.7 11.4H14"/>' +
+        '<circle cx="11.3" cy="4.6" r="1.7"/><circle cx="5.4" cy="11.4" r="1.7"/>'
+    ),
     pages: () => [['panel', '概览'], ['panel-settings', '设置'], ['panel-about', '关于'], ['panel-logs', '日志']],
   },
 ];

@@ -13,9 +13,6 @@ import { BRAND } from './branding.js'; // 登录页要显示面板名（名字�
 
 const $ = (sel) => document.querySelector(sel);
 
-/** 后端默认密码（只用于界面提示，不参与任何校验） */
-export const DEFAULT_PASSWORD = '123456';
-
 async function post(path, body) {
   const res = await fetch(path, {
     method: 'POST',
@@ -72,10 +69,6 @@ export function renderLogin(reason) {
   tip.className = 'note auth-tip';
   tip.textContent = reason || '';
 
-  const hint = document.createElement('div');
-  hint.className = 'note';
-  hint.textContent = `默认密码 ${DEFAULT_PASSWORD}（登录后请到「面板设置」改掉）`;
-
   const btn = document.createElement('button');
   btn.className = 'btn primary';
   btn.textContent = '登录';
@@ -88,7 +81,7 @@ export function renderLogin(reason) {
   card.className = 'auth-card';
   const h = document.createElement('h2');
   h.textContent = BRAND.panelName; // 名字读 core/branding.js（不摆图标）
-  card.append(h, form, tip, hint);
+  card.append(h, form, tip);
 
   const mask = document.createElement('div');
   mask.className = 'auth-mask';

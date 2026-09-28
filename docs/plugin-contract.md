@@ -2,7 +2,7 @@
 
 > **状态：已定稿，正在按批次落地。** 本文描述的是**目标形态**，实现进度以
 > [plugin-migration-plan.md](plugin-migration-plan.md) 与 `CHANGELOG.md` 为准。
-> 决策依据见 [adr/](adr/) 的 0028~0034；讨论过程的存档见 [plugin-arch-draft.md](plugin-arch-draft.md)。
+> 决策依据见 [adr/](adr/) 的 0028~0035；讨论过程的存档见 [plugin-arch-draft.md](plugin-arch-draft.md)。
 
 本文是插件契约的**唯一来源**：插件能做什么、面板会怎么调它、哪些必须遵守。代码里不放本文没写的字段或行为。
 
@@ -58,11 +58,35 @@
   | `depends` | — | 依赖的域 id 或 `类型:id`；**缺依赖如实失败并点名**，不半启动 |
   | `description` | — | 一句话说明 |
 
-- **内置插件随包发行**：仓库里 `plugins/<类型>/<id>/` 放的是随面板发行的内置插件源码，
-  面板**开机时按内容指纹同步**进数据目录（指纹一致就跳过；同"内置首页示例"的做法）。
-  ⚠️ 因此"卸载一个内置插件"只在**本次运行**内有效 —— 下次开机它会被重新同步进来。
+- **插件不随面板发行**：面板的 Release 包里**只有面板本体**，装完是**零插件** ——
+  插件从**插件仓库**（默认 `dlushu/media-bridge-plugins`，可用 `PLUGIN_REPO` 换）的「插件库」页安装，
+  或者在管理页上传一个 `.tar.gz` 手装（见下）。仓库里**只收打好的包与清单**，不收插件源码。
+- **卸载是真的卸掉**：进程停掉、目录删掉，重启之后面板**不会**把它装回来
+  （原先的开机同步内置插件已删除，见 [ADR-0035](adr/0035-plugin-library.md)）。
 - **插件的设置与缓存都由插件自己管**（都在它自己的 `data/` 下）。面板里的"清空插件数据"
   就是**删这个目录**。
+
+### 插件从哪来：插件库与手动安装
+
+两条来路，做的都是"解一个 `tar.gz` 装进 `plugins/<类型>/<id>/`"，区别只在包从哪来。
+
+| 来路 | 入口 | 包从哪来 | 记的 `origin` |
+|---|---|---|---|
+| **插件库** | 「插件」栏的「插件库」页 | 插件仓库的清单与包 | `library` |
+| **手动安装** | 「插件」栏的「管理」页 | 本地上传的 `.tar.gz` | `manual` |
+
+- **清单**：插件仓库根目录一个 `index.json`（`schema: 1`），逐条给出 `type` / `id` / `name` /
+  `version` / `description` / `domain` / `hasWebui` / `depends` / `bytes` / `md5` / `path`。
+  `path` 形如 `packages/<类型>/<id>/<id>-<版本>.tar.gz`。面板拉它是为了**列出来供挑**；
+  **拉不到就如实报错**（页面把原因写出来），不静默回退到内置列表。
+- **列表**：`GET /api/plugins/library`（带 `?refresh=1` 绕过 60 秒缓存重拉清单）。
+  每条会标出 `installed` / `installedVersion` / `installedOrigin` / `hasUpdate` / `sourceUrl`。
+- **安装**：`POST /api/plugins/library/install`，body `{ type, id, version?, enable? }` ——
+  按清单里的 `path` 取包，走**同一套两道校验**装进数据目录；`enable` 为真则装完就启用。
+- **包怎么来的**：由面板仓库的 `tools/plugin-pack.js` 产出 ——
+  它把 `plugins/<类型>/<id>/` 打成一个 `tar.gz`，**顺手把 `files`（逐文件 md5）注入包里的 `plugin.json`**
+  （手写的清单里没人声明 `files`，第二道校验原先形同虚设），随后写出 `index.json`。
+  ⇒ 插件源码留在面板仓库，插件仓库只收**产物**。
 
 ---
 

@@ -53,13 +53,15 @@ server/core/              基础设施，不认识任何业务
   auth.js                 面板门禁：单密码 + 会话签名
   cachedb.js              缓存通用设施：createStore（一库一句柄）+ TTL + 按字节 LRU + 统计/清空
 server/modules/
-  plugin/                 6 文件   /api/plugins/*
-    index.js              模块清单（含开机同步内置插件、拉起启用中的插件、退出停全部）
-    routes.js             管理面路由（装 / 卸 / 启停 / 重启 / 调用 / 日志 / 内存 / webui 托管与转发）
-    host.js               插件进程托管（启动 / 停止 / 重启 / 动作调用 / 内存 / 崩溃重启）
+  plugin/                 8 文件   /api/plugins/*
+    index.js              模块清单（拉起启用中的插件、退出停全部）
+    routes.js             管理面路由（装 / 卸 / 启停 / 重启 / 调用 / 日志 / webui 托管与转发）
+    library.js            插件库：从独立插件仓库取清单与包（见 ADR-0035）
+    bundle.js             解包与第一道 md5 校验（手动上传与插件库共用）
+    host.js               插件进程托管（启动 / 停止 / 重启 / 动作调用 / 崩溃重启）
     runner.js             子进程管理（起进程、管道消息、留尾部日志、停进程）
-    store.js              插件清单与包校验（tar.gz + 两道 md5、内置插件同步）
-    contract.js           契约常量（动作名、消息类型、超时）
+    store.js              插件清单与包落盘（解出来的目录 → plugins/<类型>/<id>/）
+    contract.js           契约常量（动作名、消息类型、超时、两道校验的清单读取）
   agg/                    10 文件  /api/agg/*
     index.js              模块清单（含测速任务的开机 / 设置变更两个钩子）
     routes.js             路由
@@ -71,12 +73,14 @@ server/modules/
     cache.js              线路结果缓存（独立 SQLite，按天）
     site-stats.js         站点统计：测速结果（speed）+ 顺手记账（call），每站每类只留最近一次
     site-test.js          站点测速任务：每 6 小时自动一轮 / 手动开一轮
-  emby/                   9 文件   /api/emby/**
+  emby/                   10 文件  /api/emby/**
     index.js              模块清单
     routes.js             端点注册（已实现端点与面板自用端点必须注册在 501 通配之前）
     service.js            各端点业务与公共函数；详情 / 播放走 agg/api.js
     meta.js               元数据域表的同步与转发（取数问元数据插件的动作）
-    tmdb.js               emby 专有的那层：条目 Id 派生与解析、图片基地址拼装
+    meta-bridge.js        面板中立的那层：条目 Id 派生与解析、图片基地址拼装、外部 id 反查
+    instance.js           Emby 实例注册表 + 请求级实例上下文（多实例的唯一真源）
+    listener.js           每个启用中的实例在自己端口上挂一个 http 服务
     cache.js              图片索引缓存（独立 SQLite）
     db.js                 Emby 客户端账号库（内置 sqlite）
     log.js                请求日志（每请求一行，带 query 摘要与客户端标记）
@@ -85,21 +89,20 @@ server/modules/
                           行清单快照；行清单与取数都问 `home` 类型插件的动作
   panel/                  4 文件   /api/meta /api/modules /api/modules/:id/settings /api/panel/*
     index.js  routes.js  backup.js  update.js
-plugins/                  随包发行的内置插件源码（开机按内容指纹同步进数据目录）
-  metadata/tmdb/          元数据插件：取元数据 / 取一季分集 / 搜索 / 注册 + 自带 webui
-  source/catpaw/          源插件：站点清单 / 候选 / 取播放项 / 解析地址 / 站点测速 + 自带 webui
-  source/echo/            源插件示例
-  home/example/           首页插件示例（11 行 TMDB 榜单等）+ 自带 webui 设置页
+plugins/                  插件源码（**不随面板发行、也不进版本库**，打包进独立插件仓库，见 ADR-0035）
+  metadata/<id>/          元数据插件：取元数据 / 取一季分集 / 搜索 / 注册 + 自带 webui
+  source/<id>/            源插件：站点清单 / 候选 / 取播放项 / 解析地址 / 站点测速 + 自带 webui
+  home/<id>/              首页插件：各榜单做成客户端媒体库行 + 自带 webui 设置页
 public/                   前端（原生 ES module，无构建步骤）
   index.html  app.js  style.css
   core/                   dom / api / auth / state / store / registry / shell / boot / branding / plugin-ui
-  modules/agg/            templates（模板）· search（聚合搜索）
+  modules/agg/            templates（模板）· search（聚合搜索）· other（域 → 模板）
   modules/emby/           setup（连接设置）
   modules/panel/          overview（概览）· settings（设置）· logs（日志）
-  modules/plugin/         manage（插件管理）
+  modules/plugin/         library（插件库）· manage（插件管理）
 docs/                     开发者文档（见 docs/index.md）
   adr/                    设计决策记录
-tools/                    check-syntax.js（语法检查）· check-style.js（文档与注释文风检查）
+tools/                    check-syntax.js（语法检查）· check-style.js（文风检查）· plugin-pack.js（打插件包 + 生成清单）
 data/                     运行时数据（已 .gitignore，含凭证与密码哈希）
 ```
 
@@ -110,7 +113,7 @@ data/                     运行时数据（已 .gitignore，含凭证与密码�
 | `plugin` | 插件宿主 | `/api/plugins` | — | 可用（装 / 卸 / 启停 / 重启 / 动作调用 / webui 托管与转发 / 安装确认） |
 | `agg` | 聚合层 | `/api/agg` | 源插件（经插件宿主） | 可用 |
 | `emby` | 消费层 | `/api/emby` | 聚合层（进程内直调）、元数据与首页插件（经插件宿主） | 握手、登录（多账号，存内置 sqlite）、媒体库、条目列表与详情、搜索、图片、相似推荐、播放与下载跳转已实现；未实现的端点按 [emby-compat.md](docs/emby-compat.md) 逐个补齐；首页插件（`home` 类型）经统一插件宿主运行，见 [emby-home-plugin.md](docs/emby-home-plugin.md) |
-| `panel` | 宿主层 | `/api/panel`、`/api/modules`、`/api/meta`、`/api/logs`、`/api/auth` | — | 可用（含配置备份与恢复、自更新） |
+| `panel` | 宿主层 | `/api/panel`、`/api/modules`、`/api/meta`、`/api/logs`、`/api/auth` | — | 可用（含数据备份与还原、自更新） |
 
 ## 配置与数据落点
 

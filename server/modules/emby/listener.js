@@ -4,16 +4,16 @@
  *
  * 每个**启用中**的实例在它自己的端口上挂一个 http 服务（与面板同一 Node 进程，理由见
  * `instance.js` 顶部那段）：客户端填 `http://<面板主机>:<实例端口>` 就能连上，
- * Emby 给客户端用的地址不再与面板本体的 8099 混用。
+ * Emby 给客户端用的地址不再与面板本体端口混用。
  *
- * 与 8099 上那一套的两点不同：
+ * 与面板端口上那一套的两点不同：
  *   ① **只伺候 Emby 客户端协议** —— 实例端口不放行面板自用端点
  *      （`/api/emby/accounts`、`/api/emby/instances`、`/api/emby/home-plugins`、`/api/emby/meta-domains`：
  *      那些要登面板，见 core/auth.js 的 needsAuth，客户端没有面板 cookie）；
  *   ② 每个请求都包在 `instance.runWith(inst, …)` 里 —— 下游（service.js / db.js / home）
  *      靠这份上下文认"这是哪个实例"，账号、会话、进度、首页插件全跟着它走。
  *
- * 路径归一化与 8099 一致（`/emby/xxx` 与 `/api/emby/emby/xxx` 都收成 `/api/emby/xxx`），
+ * 路径归一化与面板端口一致（`/emby/xxx` 与 `/api/emby/emby/xxx` 都收成 `/api/emby/xxx`），
  * 这样"只填主机"的客户端照旧能用。
  *
  * 端口被占**不拖垮面板**：记一行日志 + 在清单里标 `error`（面板「Emby → 实例」上红字提示），
@@ -26,7 +26,7 @@ const { sendError } = require('../../core/http');
 const instance = require('./instance');
 const meta = require('./meta');
 
-/** 面板自用端点：实例端口一律不提供（它们只在 8099 上、走面板门禁） */
+/** 面板自用端点：实例端口一律不提供（它们只在面板端口上、走面板门禁） */
 const PANEL_ONLY_RE = [
   /^\/api\/emby\/accounts\b/,
   /^\/api\/emby\/instances\b/,
@@ -56,7 +56,7 @@ async function handle(inst, req, res) {
     if (PANEL_ONLY_RE.some((re) => re.test(pathname))) {
       return sendError(res, 404, '这条是面板自用端点，只在面板端口上提供（要登录面板）');
     }
-    /* 与 8099 一致：装 / 启用元数据插件当场生效（读一次插件清单，没变就什么都不做） */
+    /* 与面板端口一致：装 / 启用元数据插件当场生效（读一次插件清单，没变就什么都不做） */
     meta.ensureProviders();
     return await instance.runWith(inst, () => router.handle(req, res, { pathname, searchParams: parsed.searchParams }));
   } catch (e) {

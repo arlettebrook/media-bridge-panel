@@ -9,11 +9,10 @@
  *   · 数据：`data/plugins/`（`registry.json` + `<类型>/<插件 id>/`）
  *   · 依赖：无（`upstream: null`）—— 插件自己联网、自己读写自己的目录，不经过别的模块
  *
- * 三个钩子给 server.js 用：开机同步内置插件、开机拉起**启用中**的插件、退出时**停掉所有插件**
+ * 三个钩子给 server.js 用：开机拉起**启用中**的插件、退出时**停掉所有插件**
  * （"面板停、插件就停"由宿主保证，不依赖插件配合 —— 见 docs/adr/0028）。
  */
 const routes = require('./routes');
-const store = require('./store');
 const host = require('./host');
 
 module.exports = {
@@ -37,25 +36,15 @@ module.exports = {
   routes,
 
   /**
-   * 开机：把**仓库里随包发行的内置插件**同步进数据目录（内容指纹变了才重装），
-   * 然后拉起所有**启用中**的插件。
+   * 开机：拉起所有**启用中**的插件。
    *
-   * ⚠️ 失败**不挡面板启动**：插件坏了不该连累整个面板（与内置首页示例同一口径）。
+   * ⚠️ **不再"同步内置插件"** —— 插件不随面板发行（见 docs/adr/0035）：
+   * 全新安装的插件目录就是空的，要装什么由人从「插件库」或手动上传决定。
+   * 这也是"卸载一定持久"的原因（旧版每次开机把它装回来）。
+   *
+   * ⚠️ 失败**不挡面板启动**：插件坏了不该连累整个面板。
    */
   autostart: async () => {
-    try {
-      const notes = store.syncBuiltins();
-      for (const n of notes) {
-        if (n.action === 'skip') continue;
-        const mark = n.action === 'failed' ? '✘' : n.action === 'updated' ? '↻' : '✔';
-        console.log(
-          `  ${mark} 内置插件 ${n.type}/${n.id}：` +
-            (n.action === 'failed' ? '同步失败（面板继续）' + (n.reason ? '：' + n.reason : '') : n.action === 'updated' ? `已更新到 v${n.version}` : `已装入 v${n.version}`)
-        );
-      }
-    } catch (e) {
-      console.log('  ✘ 内置插件同步失败（面板继续）：' + ((e && e.message) || e));
-    }
     const started = host.bootAll();
     for (const one of started) {
       if (one && one.ok === false) console.log(`  ✘ 插件没起来 ${one.type}/${one.id}：${one.error}`);

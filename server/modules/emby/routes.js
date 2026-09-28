@@ -637,7 +637,7 @@ module.exports = function routes(r) {
     const body = (await readBody(req)) || {};
     let inst;
     try {
-      /* 校验都在 instance.validate 里（名字长度 / 端口范围 / 不能占 8099 与托管源段 / 端口不能与别的实例重复） */
+      /* 校验都在 instance.validate 里（名字长度 / 端口范围 / 不能占面板端口 / 端口不能与别的实例重复） */
       inst = instance.patch(params.iid, body);
     } catch (e) {
       console.log(`  ✘ emby 改实例 → HTTP 400 ${(e && e.message) || e}`);

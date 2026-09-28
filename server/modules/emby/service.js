@@ -148,7 +148,7 @@ function serverName() {
 }
 
 function publicInfo(req) {
-  const host = req.headers.host || '127.0.0.1:8099';
+  const host = req.headers.host || '127.0.0.1:8088';
   return {
     LocalAddress: 'http://' + host,
     ServerName: serverName(),

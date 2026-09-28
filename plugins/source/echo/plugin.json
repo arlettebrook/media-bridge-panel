@@ -1,9 +1,0 @@
-{
-  "id": "echo",
-  "name": "自检 · 回声",
-  "version": "1.0.0",
-  "type": "source",
-  "description": "宿主自检用的最小插件：不申报任何站点、不打上游。用来验证装/卸、启停、管道调用、日志转发、内存显示与 webui 转发。",
-  "main": "index.js",
-  "webui": "ui/index.html"
-}

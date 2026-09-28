@@ -2,7 +2,8 @@
 /**
  * 面板模块 · 「设置」页：面板自己的设置（跟「概览」分开 —— 概览只看环境，这里动设置）。
  *
- *   · 配置备份与还原 导出直接下载 .json；还原选一个 .json 文件（GET /api/panel/backup · POST /api/panel/restore）
+ *   · 数据备份与还原 导出直接下载 .zip（全部数据、不含缓存）；还原选一个 .zip 覆盖回数据卷
+ *                    （GET /api/panel/backup · POST /api/panel/restore，范围见 panel/backup.js）
  *   · 站点测速       **开关与间隔**（`panel.json` 的 `speedTest*`，实现见 agg/site-test.js）——
  *                    测速是"这台机器与这条网络"的体检，与内容偏好无关，所以不跟模板走（见 ADR-0033）；
  *                    测速的结果（站点统计）也是面板级共享的一份。「立即测速」在「聚合 · 模板」页。
@@ -17,12 +18,11 @@
  * **版本与更新 / 关于 两张卡在「关于」页**（`renderPanelAbout`）—— 它们是"看看而已"，
  * 跟这一页"要动手改"的东西分开放（见 registry 里的页面声明）。
  */
-import { el, toast, fmtTime, codeBlock, modal } from '../../core/dom.js';
+import { el, toast, fmtTime, codeBlock, modal, confirmModal } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { BRAND } from '../../core/branding.js';
 import { authStatus, changePassword, logout } from '../../core/auth.js';
-import { loadAll } from '../../core/boot.js';
 import { renderPage } from '../../core/shell.js';
 
 /* -------------------------------------------------------------- 版本与更新 */
@@ -84,11 +84,47 @@ function updateCard() {
   };
 
   /**
+   * 安装某个版本：下载并安装 → 等面板重启到新版本 → 刷新页面。
+   * 进度显示在卡片里（弹窗在点下「更新」后即关闭，避免把几十行说明一直挡在屏幕上）。
+   * 与更新说明弹窗配合使用（见 showNotes）；这里只管把动作做完。
+   */
+  const doInstall = async (target) => {
+    const prev = (last && last.current) || '';
+    check.disabled = true;
+    install.disabled = true;
+    showResult('hint', [`正在安装 ${target}…`]);
+    try {
+      const r0 = await api('/api/panel/update', { method: 'POST', body: { version: target } });
+      const ver = r0.installed || target;
+      toast(`已安装 ${ver}，面板正在重启`);
+      showResult('hint', [`已安装 ${ver}，面板正在重启，页面会在几秒后自动恢复。`]);
+      const now = await waitRestart(prev);
+      if (now) {
+        toast(`已更新到 ${now}`);
+        showResult('hint', [`已更新到 ${now}，正在刷新页面…`]);
+        setTimeout(() => location.reload(), 1500); // 留出看提示的时间，再取新版本的前端资源
+        return;
+      }
+      const timeoutMsg = `面板未在 ${UPDATE_POLL_LIMIT_MS / 1000} 秒内恢复，请查看容器日志。`;
+      showResult('hint warn', [timeoutMsg]);
+      toast(timeoutMsg, true);
+    } catch (e) {
+      showResult('hint warn', ['更新失败：' + e.message]);
+      toast('更新失败：' + e.message, true);
+    }
+    check.disabled = false;
+    install.disabled = false;
+  };
+
+  /**
    * 更新内容弹窗。用弹窗而不是摊在卡片里：说明动辄几十行，摊开会把卡片撑得很长、
    * 还得往下滚才看得见「更新到 x」那个按钮。框里同时给 GitHub 上那个 Release 的链接。
    * 该版本没写说明时**如实说一句**，不留白 —— 否则看着像前端忘了显示。
+   *
+   * `confirm: true`（点「更新到 x」时）会在弹窗里给一颗确认按钮，且**先倒计时 3 秒**才允许点：
+   * 更新不可逆，这段等待留给"看更新内容"，不给"没看就点确定"的机会。
    */
-  const showNotes = (r) => {
+  const showNotes = (r, { confirm: needConfirm = false } = {}) => {
     if (!r) return;
     const title = `更新内容 · ${r.latest || ''}${r.publishedAt ? ` · 发布 ${fmtTime(r.publishedAt)}` : ''}`;
     const body = [];
@@ -105,7 +141,40 @@ function updateCard() {
         )
       );
     }
-    modal({ title, body, actions: [{ label: '知道了' }] });
+
+    if (!needConfirm) {
+      modal({ title, body, actions: [{ label: '知道了' }] });
+      return;
+    }
+
+    const target = r.latest || '';
+    let timer = null;
+    const m = modal({
+      title,
+      body,
+      actions: [
+        { label: '取消' },
+        /* onclick 不 await：弹窗立刻关掉，安装进度改在卡片里显示（见 doInstall） */
+        { label: `更新到 ${target}`, primary: true, onclick: () => { doInstall(target); } },
+      ],
+      onClose: () => clearInterval(timer),
+    });
+    const go = m.root.querySelector('.modal-actions .btn.primary');
+    if (!go) return;
+    let left = 3;
+    go.disabled = true; // 倒计时期间不可点
+    go.textContent = `更新（${left}）`;
+    timer = setInterval(() => {
+      left -= 1;
+      if (left > 0) {
+        go.textContent = `更新（${left}）`;
+        return;
+      }
+      clearInterval(timer);
+      timer = null;
+      go.disabled = false; // 倒计时结束，才允许点
+      go.textContent = `更新到 ${target}`;
+    }, 1000);
   };
 
   notes.addEventListener('click', () => showNotes(last));
@@ -169,43 +238,10 @@ function updateCard() {
 
   check.addEventListener('click', () => load(true));
 
-  install.addEventListener('click', async () => {
-    const target = (last && last.latest) || '';
-    if (!target) return;
-    if (
-      !confirm(
-        `更新到 ${target}？\n\n面板会下载并安装这个版本，然后重启应用进程（容器不停）。\n` +
-          `重启期间页面会短暂打不开，通常几秒内恢复。\n\n` +
-          `注意：更新即完整替换，新版本起来后旧版本目录会被清掉，本机不再保留可回退的旧版本。`
-      )
-    ) {
-      return;
-    }
-    const prev = (last && last.current) || '';
-    check.disabled = true;
-    install.disabled = true;
-    showResult('hint', [`正在安装 ${target}…`]);
-    try {
-      const r = await api('/api/panel/update', { method: 'POST', body: { version: target } });
-      const ver = r.installed || target;
-      toast(`已安装 ${ver}，面板正在重启`);
-      showResult('hint', [`已安装 ${ver}，面板正在重启，页面会在几秒后自动恢复。`]);
-      const now = await waitRestart(prev);
-      if (now) {
-        toast(`已更新到 ${now}`);
-        showResult('hint', [`已更新到 ${now}，正在刷新页面…`]);
-        setTimeout(() => location.reload(), 1500); // 留出看提示的时间，再取新版本的前端资源
-        return;
-      }
-      const timeoutMsg = `面板未在 ${UPDATE_POLL_LIMIT_MS / 1000} 秒内恢复，请查看容器日志。`;
-      showResult('hint warn', [timeoutMsg]);
-      toast(timeoutMsg, true);
-    } catch (e) {
-      showResult('hint warn', ['更新失败：' + e.message]);
-      toast('更新失败：' + e.message, true);
-    }
-    check.disabled = false;
-    install.disabled = false;
+  /* 点「更新到 x」先弹窗把更新内容摆出来，倒计时 3 秒后才允许点确认（见 showNotes） */
+  install.addEventListener('click', () => {
+    if (!(last && last.latest)) return;
+    showNotes(last, { confirm: true });
   });
 
   const card = el(
@@ -277,28 +313,42 @@ function backupCard() {
   const pickBtn = el('button', { class: 'btn', text: '选择文件还原' });
   const picked = el('span', { class: 'note' });
   /* 隐藏的 file input：点「选择文件还原」时打开系统选文件框 */
-  const fileInput = el('input', { type: 'file', accept: '.json,application/json', class: 'hidden' });
+  const fileInput = el('input', { type: 'file', accept: '.zip,application/zip', class: 'hidden' });
 
   function fileName(d) {
     const p = (n) => String(n).padStart(2, '0');
-    return `catpaw-panel-backup-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.json`;
+    return `catpaw-panel-backup-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.zip`;
   }
 
+  /* 导出的是 zip 字节，不走 api()（那条封装一律按 JSON 解析）—— 直接 fetch 取 blob 下载。
+     摘要（多少文件 / 多大）由后端放在响应头里：压缩包本身不便在前端解开一遍来数。 */
   exportBtn.addEventListener('click', async () => {
     exportBtn.disabled = true;
     try {
-      const b = await api('/api/panel/backup');
-      const text = JSON.stringify(b, null, 2);
+      const res = await fetch('/api/panel/backup');
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try {
+          const j = await res.json();
+          if (j && j.error) msg = j.error;
+        } catch {
+          /* 响应体不是 JSON 时保留 HTTP 码作为提示 */
+        }
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
       const name = fileName(new Date());
-      const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+      const url = URL.createObjectURL(blob);
       const a = el('a', { href: url, download: name });
       document.body.append(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      const mods = Object.keys(b.settings || {});
+      const files = Number(res.headers.get('X-Backup-Files')) || 0;
+      const bytes = Number(res.headers.get('X-Backup-Bytes')) || 0;
+      const at = res.headers.get('X-Backup-Exported-At');
       out.className = 'note';
-      out.textContent = `已导出 ${name}（${mods.length} 个模块设置）· ${fmtTime(b.exportedAt)}`;
+      out.textContent = `已导出 ${name}（${files} 个文件 / ${fmtBytes(bytes)}，不含缓存）${at ? ' · ' + fmtTime(at) : ''}`;
       toast('已导出 ' + name);
     } catch (e) {
       out.className = 'note err-note';
@@ -316,29 +366,38 @@ function backupCard() {
     if (!file) return;
     picked.textContent = '已选择：' + file.name;
 
-    let parsed = null;
-    try {
-      parsed = JSON.parse(await file.text());
-    } catch (e) {
-      out.className = 'note err-note';
-      out.textContent = '这个文件不是备份 JSON：' + e.message;
-      return;
-    }
-    const mods = Object.keys((parsed && parsed.settings) || {});
-    if (!mods.length) {
-      out.className = 'note err-note';
-      out.textContent = '这个文件里没有面板设置';
-      return;
-    }
-    /* 覆盖当前设置、不可撤销 —— 先把"覆盖哪些"说清楚再确认 */
-    if (!confirm(`用「${file.name}」覆盖当前设置？\n\n会被覆盖：${mods.join(' / ')}\n（源列表不受影响）`)) return;
+    /* 覆盖现有数据、不可撤销 —— 先把后果说清楚再确认（用页内确认框，不用原生 confirm） */
+    const yes = await confirmModal({
+      title: '用备份覆盖当前数据？',
+      text:
+        `会用「${file.name}」里的全部数据覆盖当前面板：设置、模板、插件（含插件数据）、` +
+        `Emby 账号与播放进度都会被替换，缓存与应用代码不受影响。当前数据不会自动留档，` +
+        `建议先「导出备份」存一份。覆盖后需重启面板才生效。`,
+      okLabel: '覆盖还原',
+    });
+    if (!yes) return;
 
     pickBtn.disabled = true;
+    out.className = 'note';
+    out.textContent = '正在上传并还原…';
     try {
-      await api('/api/panel/restore', { method: 'POST', body: parsed });
-      /* loadAll 会重画这一页（把当前 DOM 换掉），所以结果用 toast 说 —— 写在页面里会被冲掉 */
-      toast('已还原：' + mods.join(' / '));
-      await loadAll(); // 让界面上的设置立刻跟上（不然显示的还是旧值）
+      /* 直接把 File 当请求体（原始二进制），不做 base64 —— 全量备份可能有几十 MB */
+      const res = await fetch('/api/panel/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/zip' },
+        body: file,
+      });
+      let data = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+      if (!res.ok) throw new Error((data && data.error) || 'HTTP ' + res.status);
+      const restored = (data && data.restored) || [];
+      toast('已还原：' + (restored.join(' / ') || '备份里没有数据'));
+      out.className = 'note';
+      out.textContent = `已还原 ${restored.length} 项（${restored.join(' / ') || '为空'}）：${(data && data.note) || '请重启面板使其生效。'}`;
     } catch (e) {
       out.className = 'note err-note';
       out.textContent = '还原失败：' + e.message;
@@ -350,8 +409,15 @@ function backupCard() {
   return el(
     'div',
     { class: 'card' },
-    el('h3', { text: '配置备份与还原' }),
-    el('p', { class: 'note', text: '备份包含你在面板里改过的全部设置。还原会用备份里的值覆盖当前设置，建议先导出一份放着。' }),
+    el('h3', { text: '数据备份与还原' }),
+    el('p', {
+      class: 'note',
+      text:
+        '备份会打成一个 zip 包，包含数据卷里的全部数据：设置、模板、插件（含插件包与插件自己的数据）、' +
+        'Emby 账号与播放进度。不含缓存（可随时重建）与应用代码（可从 Release 重新取得）。' +
+        '还原会用 zip 里的数据整项覆盖当前数据卷，请先导出当前备份留档；覆盖后需重启面板才生效。',
+    }),
+    el('div', { class: 'note err-note', text: '备份含账号与插件凭证（如网盘 cookie/token），请妥善保管这份文件。' }),
     el('div', { class: 'toolbar' }, exportBtn, pickBtn, picked, fileInput),
     out
   );

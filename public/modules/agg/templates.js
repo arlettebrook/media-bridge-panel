@@ -4,7 +4,7 @@
  *
  * 一份模板 = 名字 + 选中的站点 + 打分过滤参数 + 超时与并发（见 docs/adr/0033）。
  * 左边挑一套（或新建 / 删除），右边编辑这一套，改完按**一个**「保存」整份写回
- * （`POST /api/agg/templates`）。「哪个域用哪套模板」不在这里 —— 见「聚合设置 → 其他设置」。
+ * （`POST /api/agg/templates`）。「哪个域用哪套模板」不在这里 —— 见「聚合设置 → 域 → 模板」。
  * 「保存」跟在左边那张卡的「新建 / 删除」后面 —— 三者都是"对模板集本身"的动作，归一处；
  * 草稿动过时按钮下面亮一个「未保存」，换模板前先拦一句。
  * 页面里的问一句（新建 / 删除 / 切模板 / 全不选 / 测速）一律走 `modal()` —— 原生 `confirm`
@@ -105,7 +105,7 @@ export async function renderTemplates(v) {
 
   /* 站点清单归源插件：它要挨个问自己那些实例的 `/config`（连不上的要等超时），先画别的卡片。 */
   paintSites();
-  if (S.aggLoadedFor) return;
+  if (S.aggLoadedFor !== null) return;
   try {
     await ensureAggSites();
   } catch (e) {
@@ -466,12 +466,12 @@ function paintSites() {
   if (!host || !draft) return;
   host.textContent = '';
 
-  if (!S.aggLoadedFor) {
-    host.append(el('div', { class: 'hint', text: '正在取站点清单…（连不上的实例要等超时；模板与参数可以先改）' }));
+  if (S.aggLoadedFor === null) {
+    host.append(el('div', { class: 'hint', text: '正在取站点清单…' }));
     return;
   }
   if (!(S.aggSources || []).length) {
-    host.append(el('div', { class: 'hint warn' }, '还没有源 —— 到「插件 → 管理」找到源插件（猫爪源），在它自己的设置页里加一个实例。'));
+    host.append(el('div', { class: 'hint warn' }, '还没有源 —— 先在「插件 → 插件库」装一个源插件，再到它自己的设置页里加一个实例。'));
     return;
   }
   if (!(S.aggSites || []).length) {

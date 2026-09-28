@@ -1,22 +1,23 @@
 'use strict';
 /**
- * 插件模块 · 「管理」页：装 / 卸 / 启停 / 重启，看状态、内存与动作，打开插件自己的设置页。
+ * 插件模块 · 「管理」页：已装插件的装 / 卸 / 启停 / 重启，看状态与动作。
  *
- * 这一页是面板侧唯一动插件的地方；**它不解释插件的内容** ——
- * 装的是包（tar.gz + 两道 md5 校验），调的是"动作"，插件自己的设置页是它自己的静态文件
- * （面板只负责托管与转发，见 docs/adr/0029 的已定 21）。
+ * 「**装**」有两条路，分别在两页（ADR-0035 去掉了"随包发行"，所以全新安装这里是空的）：
+ *   · 「插件库」页 —— 从插件仓库的清单里挑一个装（`plugin-library`）
+ *   · 这一页 —— 手动上传一个 `.tar.gz`
+ * 两页都只是把包交给面板：**面板不解释插件的内容** —— 装的是包（两道 md5 校验），
+ * 调的是"动作"，插件自己的设置页是它自己的静态文件（面板只托管与转发，见 docs/adr/0029）。
  *
- * 状态每 2 秒拉一次（只在这一页活着）：**状态、内存、重启次数**都在上面，
+ * 状态每 2 秒拉一次（只在这一页活着）：**状态、重启次数**都在上面，
  * 「插件崩了会自动重启」这件事得看得见（见 docs/adr/0028）。
  */
-import { $, el, toast, modal } from '../../core/dom.js';
+import { $, el, toast } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { refreshNav } from '../../core/shell.js';
 
 /* 三个类型名与侧栏那三栏一致（元数据 / 片源 / 首页，见 core/registry.js） */
 const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页' };
-const fmtBytes = (n) => (n == null ? '—' : n >= 1048576 ? (n / 1048576).toFixed(0) + 'MB' : Math.round(n / 1024) + 'KB');
 const fmtDuration = (ms) => {
   if (!ms) return '—';
   const s = Math.round(ms / 1000);
@@ -47,83 +48,70 @@ export async function renderPluginManage(v) {
   function paint() {
     const box = $('#pluginListHost');
     if (!box) return;
-    const d = S.plugins || { plugins: [], builtins: [] };
+    const d = S.plugins || { plugins: [] };
     box.textContent = '';
 
-    if (!(d.plugins || []).length && !(d.builtins || []).length) {
+    if (!(d.plugins || []).length) {
       box.append(
-        el('div', { class: 'card' }, el('h3', { text: '插件' }), el('div', { class: 'hint', text: '还没有装任何插件。上面那个「装一个插件」选一个 .tar.gz 包就能装上。' }))
+        el(
+          'div',
+          { class: 'card' },
+          el('h3', { text: '插件' }),
+          el('div', {
+            class: 'hint',
+            /* 插件不随面板发行：全新安装这里就是空的，所以空态得指路（见 docs/adr/0035） */
+            text: '还没有装任何插件。插件不随面板发行 —— 到「插件库」页从插件仓库里挑一个装，或者在下面选一个 .tar.gz 手动装。',
+          })
+        )
       );
       return;
     }
 
     /* ---- 已装的 ---- */
     const card = el('div', { class: 'card' }, el('h3', { text: '已装插件' }));
-    if (!(d.plugins || []).length) card.append(el('div', { class: 'note', text: '还没有装任何插件。' }));
     for (const p of d.plugins || []) {
       card.append(pluginRow(p));
     }
-    const anyRunning = (d.plugins || []).some((p) => p.status === 'running');
     card.append(
       el('div', {
         class: 'note',
         text:
-          '状态每 2 秒刷新一次。「启用」会立刻把它的进程拉起来；它自己崩了或被杀掉，宿主会自动重启它（最多 5 次 / 5 分钟，每次都在日志里点名）。' +
-          (anyRunning ? '' : '') +
-          '「内存」读的是它那个进程的 RSS；读不到会显示「—」（不编数）。',
+          '状态每 2 秒刷新一次。「启用」会立刻把它的进程拉起来；它自己崩了或被杀掉，宿主会自动重启它（最多 5 次 / 5 分钟，每次都在日志里点名）。',
       })
     );
     box.append(card);
-
-    /* ---- 仓库里随包发行的、还没装的 ---- */
-    if ((d.builtins || []).length) {
-      const b = el('div', { class: 'card' }, el('h3', { text: '随包发行的内置插件（还没装）' }), el('div', { class: 'note', text: '它们跟着面板一起发行，开机时同步进插件目录 —— 这里列出来只是为了让你知道有它们。' }));
-      for (const x of d.builtins) {
-        b.append(
-          el(
-            'div',
-            { class: 'plugin-row' },
-            el(
-              'div',
-              { class: 'plugin-head' },
-              el('span', { class: 'plugin-name', text: x.name }),
-              el('span', { class: 'badge', text: TYPE_LABEL[x.type] || x.type }),
-              el('span', { class: 'badge', text: 'v' + x.version })
-            ),
-            el('div', { class: 'note', text: x.description || '' })
-          )
-        );
-      }
-      box.append(b);
-    }
   }
+
+  /** 装卸启停都走这里：出错弹提示、成功重拉列表，再刷新侧栏
+   *  （三类插件栏的子项是照插件清单现算的，见 core/registry.js）。
+   *  必须放在这一层：`pluginRow()` 与 `uninstall()` 都要用它。 */
+  const act = async (fn) => {
+    try {
+      await fn();
+    } catch (e) {
+      toast(e.message, true);
+    }
+    await load();
+    refreshNav();
+  };
 
   function pluginRow(p) {
     const statusText =
       p.status === 'running' ? '运行中' : p.status === 'starting' ? '启动中…' : p.status === 'broken' ? '起不来' : p.enabled ? '已启用（没在跑）' : '已停用';
     const statusCls = p.status === 'running' ? ' ok' : p.status === 'broken' ? ' err' : p.status === 'starting' ? ' warn' : '';
-    /* 状态明细单独一行：跟名称、五颗按钮挤在一条线上时，它会被折成两三截，一屏看下来对不上号 */
+    /* 状态明细单独一行：跟名称、几颗按钮挤在一条线上时，它会被折成两三截，一屏看下来对不上号 */
     const bits = [
       `${TYPE_LABEL[p.type] || p.type} · ${p.id}`,
       `v${p.version}`,
       p.domain ? `域 ${p.domain}` : '',
-      `内存 ${fmtBytes(p.memoryBytes)}`,
       p.status === 'running' ? `已跑 ${fmtDuration(p.uptimeMs)}` : '',
       p.restarts ? `重启过 ${p.restarts} 次` : '',
-      p.origin === 'builtin' ? '随包发行' : '手动安装',
+      /* 只有两条来路（见 docs/adr/0035）：插件库装的 / 手动上传的。
+         历史条目里写过的 `builtin` / `upload` 按同一口径归并显示，不做数据迁移。 */
+      p.origin === 'manual' || p.origin === 'upload' ? '手动安装' : '插件库',
     ].filter(Boolean);
 
     const btn = (text, title, fn, cls = 'btn mini') => el('button', { class: cls, title, text, onclick: fn });
-    const act = async (fn) => {
-      try {
-        await fn();
-      } catch (e) {
-        toast(e.message, true);
-      }
-      await load();
-      /* 启停 / 装卸会影响侧栏：三类插件栏的子项是照插件清单现算的（见 core/registry.js） */
-      refreshNav();
-    };
 
     return el(
       'div',
@@ -141,8 +129,6 @@ export async function renderPluginManage(v) {
             ? btn('停用', '停掉它的进程（它自己起的东西由它自己清理）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/disable`, { method: 'POST' })))
             : btn('启用', '起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/enable`, { method: 'POST' })), 'btn mini primary'),
           btn('重启', '重起它的进程（手动重启会把自动重启的退避计数清零）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/restart`, { method: 'POST' }))),
-          p.hasWebui ? btn('设置', '打开插件自己的设置页', () => window.open(p.webuiPath, '_blank'), 'btn mini primary') : null,
-          btn('调试', '手发一条动作给它（面板不解释动作与参数，原样转过去）', () => callDialog(p)),
           btn('卸载', '卸载它 —— 它的 data/ 目录也会一起删掉', () => uninstall(p))
         )
       ),
@@ -150,41 +136,6 @@ export async function renderPluginManage(v) {
       p.lastError ? el('div', { class: 'note err-note', text: '最近一次错误：' + p.lastError }) : null,
       (p.actions || []).length ? el('div', { class: 'note', text: '实现了这些动作：' + p.actions.join(' / ') }) : null
     );
-  }
-
-  /** 调试台：手发一条动作（插件作者最需要的那个小工具） */
-  function callDialog(p) {
-    const action = el('input', { type: 'text', class: 'w-md', value: (p.actions || [])[0] || '', placeholder: '动作名' });
-    const timeout = el('input', { type: 'number', class: 'w-sm', value: '20000', min: '1000', title: '这次调用的超时（毫秒）' });
-    const out = el('pre', { class: 'json', text: '（点「发一条」看结果）' });
-    const send = el('button', {
-      class: 'btn primary',
-      text: '发一条',
-      onclick: async () => {
-        send.disabled = true;
-        try {
-          const r = await api(`/api/plugins/${p.type}/${p.id}/call`, {
-            method: 'POST',
-            body: { action: action.value.trim(), args: argsEl.value.trim() ? JSON.parse(argsEl.value) : {}, timeoutMs: Number(timeout.value) },
-          });
-          out.textContent = JSON.stringify(r, null, 2);
-        } catch (e) {
-          out.textContent = '失败：' + e.message;
-        } finally {
-          send.disabled = false;
-        }
-      },
-    });
-    const argsEl = el('input', { type: 'text', class: 'w-lg', value: '{}', placeholder: '参数（JSON，面板原样转给插件）' });
-    modal({
-      title: `调试 · ${p.name || p.id}`,
-      body: [
-        el('div', { class: 'row' }, el('span', { class: 'muted', text: '动作' }), action, el('span', { class: 'muted', text: '参数' }), argsEl, timeout, el('span', { class: 'muted', text: '毫秒' })),
-        el('div', { class: 'row' }, send),
-        out,
-        el('div', { class: 'note', text: '面板不解释动作与参数 —— 原样转给插件，插件的回答也原样显示在这里。' }),
-      ],
-    });
   }
 
   async function uninstall(p) {

@@ -31,15 +31,12 @@ html, body {
 .muted { color: var(--fg-dim); }
 
 .app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
-.appbar {
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 20px; border-bottom: 1px solid var(--line);
-  background: rgba(14, 18, 16, .92); backdrop-filter: blur(8px);
-  flex: none;
-}
 
-/* ---------------- 顶栏 ---------------- */
-.brand { display: flex; gap: 8px; align-items: center; font-size: 15px; letter-spacing: .3px; white-space: nowrap; }
+/* ---------------- 顶栏 ----------------
+ * ⚠️ 宽屏**没有顶栏**（品牌在侧栏顶部，见 `.nav-brand`）—— 这一条此刻只剩窄屏那颗 ☰：
+ * 窄屏的侧栏是盖在内容上的抽屉，栏外得留一颗触发按钮，所以只在文件末尾的媒体查询里
+ * 把它恢复成 `display: flex`。 */
+.appbar { display: none; }
 .spacer { flex: 1; }
 
 .add-form { padding: 0 16px 14px; display: flex; flex-direction: column; gap: 8px; }
@@ -317,37 +314,49 @@ input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor:
 .nav-toggle:hover { background: var(--bg-2); color: var(--fg); }
 
 .nav {
-  width: 198px; flex: none; min-width: 0; /* min-width:0 才能折到 0 —— flex 子项默认 min-width:auto，会被内容(nowrap 的按钮)顶住 */
+  width: 220px; flex: none;
   border-right: 1px solid var(--line);
-  padding: 10px 8px 20px;
+  padding: 0 10px 20px;
   overflow-y: auto; overflow-x: hidden;
-  background: linear-gradient(180deg, rgba(20, 26, 22, .55), transparent 240px);
-  transition: width .18s ease;
+  background: var(--bg-2);
 }
-/* 折叠（宽屏）：侧栏收起、内容区顺势变宽 */
-.app.nav-collapsed .nav { width: 0; padding-left: 0; padding-right: 0; border-right-width: 0; }
-/* 折叠动画期间别让按钮文字重排 */
-.nav button { white-space: nowrap; }
+/* 品牌行：侧栏顶上那行名字，下面一条分隔线把品牌与栏目分开（对齐 OpenList 那种
+ * "品牌 → 分隔线 → 扁平行"）。⚠️ 名字的**权威**在 core/branding.js（启动后覆盖这里那份兜底文本）。 */
+.nav-brand {
+  padding: 16px 12px 13px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 15px; letter-spacing: .3px; white-space: nowrap;
+}
+.nav-brand b { font-weight: 700; }
 
 /* 遮罩：只有窄屏、且侧栏展开（抽屉开着）时才出现 */
 .nav-scrim { display: none; }
 .nav button {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: 10px;
   width: 100%; text-align: left;
   background: none; border: 1px solid transparent; color: var(--fg-dim);
   padding: 9px 12px; border-radius: 9px; cursor: pointer;
   font: inherit; transition: .15s;
+  /* 一行一行排（长插件名不折行、由 `.nav-label` / 按钮自身裁掉）—— 侧栏是扁平行，不该有高矮不一的两行项 */
+  white-space: nowrap; overflow: hidden;
 }
 .nav button:hover { background: var(--bg-3); color: var(--fg); }
 .nav button.active { background: rgba(140, 218, 96, .10); border-color: var(--accent-dim); color: var(--accent); font-weight: 600; }
-/* 树：父节点是**文件夹**（点一下收起 / 展开这一栏），子节点缩进一级 */
-.nav-group { margin-bottom: 6px; }
-.nav button.nav-head { color: var(--fg-dim-2); font-size: 11.5px; letter-spacing: .4px; padding: 8px 12px 3px; gap: 4px; }
+/* 树：父节点是**文件夹**（点一下收起 / 展开这一栏），子节点缩进一级。
+ * ⚠️ 父节点按**常规行**画（图标 + 常规字号 + 右侧折叠箭头），不是小灰标题 ——
+ * 小灰标题 + 缩进子项那套一眼就像"页签底下的次级列表"，而侧栏该是扁平行（对齐 OpenList）。 */
+.nav-group { margin-bottom: 2px; }
+.nav-ico-wrap { flex: none; width: 16px; height: 16px; display: inline-flex; }
+.nav-ico { width: 16px; height: 16px; display: block; }
+.nav button.nav-head { font-size: 13.5px; }
 .nav button.nav-head:hover { color: var(--fg); }
-.nav .nav-caret { flex: none; width: 10px; text-align: center; font-size: 9px; line-height: 1; }
+.nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.nav .nav-caret { flex: none; margin-left: auto; font-size: 9px; line-height: 1; color: var(--fg-dim-2); }
 .nav-group.collapsed .nav-kids { display: none; }
-.nav-kids { display: flex; flex-direction: column; gap: 2px; }
-.nav button.nav-child { padding: 7px 12px 7px 20px; font-size: 12.5px; }
+.nav-kids { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+/* 子项文字与父节点文字**左对齐**：父节点文字起点 = padding 12 + 图标 16 + 间距 10 = 38px */
+.nav button.nav-child { padding: 7px 12px 7px 38px; font-size: 13px; }
 .nav-badge { margin-left: auto; font-size: 10.5px; color: var(--fg-dim-2); font-weight: 400; }
 .nav button.active .nav-badge { color: var(--accent); }
 .soon {
@@ -494,12 +503,15 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
 @media (max-width: 860px) {
   html, body { height: 100%; }
 
+  /* 宽屏那条 `.appbar { display: none }` 在这里恢复：窄屏侧栏是抽屉，栏外得留一颗 ☰ */
   .appbar {
+    display: flex; align-items: center; gap: 8px;
     padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
-    gap: 8px; position: sticky; top: 0; z-index: 20;
+    position: sticky; top: 0; z-index: 20;
+    border-bottom: 1px solid var(--line);
+    background: rgba(14, 18, 16, .92); backdrop-filter: blur(8px);
+    flex: none;
   }
-  .appbar .brand b { font-size: 13.5px; }
-  /* 顶栏那只爪子图标已撤掉 */
 
   /* 窄屏：侧栏是同一个元素、同一套状态，只是从「占位的栏」变成「盖在内容上的抽屉」——
      收起时整个移出屏幕（transform），展开时盖在内容上并配一层遮罩。 */
@@ -513,6 +525,8 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
     transform: translateX(-100%);
     transition: transform .18s ease;
   }
+  /* 抽屉顶部自带安全区内边距，品牌行就不再叠一层上留白 */
+  .nav-brand { padding-top: 4px; }
   .app:not(.nav-collapsed) .nav { transform: none; box-shadow: 0 0 44px rgba(0, 0, 0, .55); }
   .app:not(.nav-collapsed) .nav-scrim {
     display: block; position: fixed; inset: 0; z-index: 25; background: rgba(0, 0, 0, .5);

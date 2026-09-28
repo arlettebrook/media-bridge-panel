@@ -7,73 +7,53 @@ import { $, el } from './dom.js';
 import { S } from './state.js';
 import { MODULES, moduleOf, rendererOf } from './registry.js';
 
-/* ------------------------------------------------------------ 侧边栏折叠 */
+/* ------------------------------------------------------------ 侧栏形态 */
 
-const NAV_KEY = 'catpaw-panel.nav-collapsed';
 const NAV_NARROW = 860; // 与 style.css 里的断点一致
 
-function readSaved() {
-  try {
-    return localStorage.getItem(NAV_KEY) === '1';
-  } catch {
-    return false; // 隐私模式等读不了 localStorage：当没存过
-  }
-}
-
-function setNavCollapsed(collapsed) {
+/* 宽屏侧栏**常驻**（占一个栏位，不缩宽度、不记偏好）—— 只有窄屏才是盖在内容上的抽屉，
+ * 所以"收着"这个状态只在窄屏有意义（见 style.css 的 `@media (max-width: 860px)`）。 */
+function setNavOpen(open) {
   const app = $('.app');
   if (!app) return;
-  app.classList.toggle('nav-collapsed', collapsed);
+  app.classList.toggle('nav-collapsed', !open);
   const btn = $('#navToggle');
-  if (btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
-/**
- * 进页面时恢复侧栏状态。
- * 宽屏：用记住的偏好（默认展开，侧栏常驻）。
- * 窄屏：一律先收起 —— 这时侧栏是盖在内容上的抽屉，一进来就挡着内容不合理。
- */
+/** 进页面时定侧栏形态：宽屏常驻展开；窄屏一律先收起（抽屉一进来就挡着内容不合理） */
 export function applyNavState() {
-  setNavCollapsed(window.innerWidth <= NAV_NARROW ? true : readSaved());
+  setNavOpen(window.innerWidth > NAV_NARROW);
 }
 
-/** 顶栏 ☰：展开/收起。只有宽屏记偏好 —— 免得在手机上开一次抽屉，桌面端下次打开发现侧栏不见了 */
+/** 顶栏 ☰（只在窄屏出现）：开 / 关抽屉 */
 export function toggleNav() {
   const app = $('.app');
   if (!app) return;
-  const collapsed = !app.classList.contains('nav-collapsed');
-  setNavCollapsed(collapsed);
-  if (window.innerWidth > NAV_NARROW) {
-    try {
-      localStorage.setItem(NAV_KEY, collapsed ? '1' : '0');
-    } catch {
-      /* 写不了就算了，下次按默认来 */
-    }
-  }
+  setNavOpen(app.classList.contains('nav-collapsed'));
 }
 
 /** 收起侧栏（窄屏点遮罩用） */
 export function collapseNav() {
-  setNavCollapsed(true);
+  setNavOpen(false);
 }
 
 /** 窄屏下点完模块就把抽屉收起来；宽屏不动它 */
 export function closeNavIfNarrow() {
   if (window.innerWidth > NAV_NARROW) return;
   const app = $('.app');
-  if (app && !app.classList.contains('nav-collapsed')) setNavCollapsed(true);
+  if (app && !app.classList.contains('nav-collapsed')) setNavOpen(false);
 }
 
 export function switchPage(page) {
   S.page = page;
   renderPage();
-  revealGroupOf(page);
 }
 
 /* ------------------------------------------------------------ 侧栏树的折叠 */
 
-/** 收起来的父节点（模块 id）。只在内存里 —— 刷新回到默认（全展开）。 */
-const foldedGroups = new Set();
+/** 收起来的父节点（模块 id）。只在内存里 —— 刷新回到默认（**全折叠**，见下面的初始化）。 */
+const foldedGroups = new Set(MODULES.map((m) => m.id));
 
 /** 收 / 开一个父节点：换箭头，并记住状态（重建侧栏时照它恢复） */
 function setGroupFolded(group, folded) {
@@ -151,13 +131,17 @@ export function renderNav() {
  *
  * 父节点是**文件夹**：点一下收起 / 展开这一栏（`foldedGroups` 记着收起来的那几个），
  * 不是"跳到这一栏的某一页" —— 一栏里哪一页当前亮着由子节点上的高亮说话。
+ * 每行 = 图标 + 文字 + 右侧折叠箭头（箭头靠 `margin-left:auto` 顶到行尾）。
+ *
+ * ⚠️ 往 `#navGroups` 里画，**不是整条 `#nav`** —— 侧栏顶上那行品牌（`.nav-brand`）是
+ * `index.html` 里的静态节点，往 `#nav` 里 `textContent=''` 会把它一起清掉。
  *
  * ⚠️ 原先这几颗按钮**写死在 index.html 里**，加一栏要改两处；现在只有 MODULES 一处。
  * 没有子项的栏目**不画** —— 三类插件栏里一个插件都没启用时，侧栏不留空栏目。
  * （`.workspace` 本来就要等接口回来才显示，所以这里晚一点画不会闪。）
  */
 export function renderNavButtons() {
-  const host = $('#nav');
+  const host = $('#navGroups');
   if (!host) return;
   host.textContent = '';
   for (const m of MODULES) {
@@ -173,8 +157,9 @@ export function renderNavButtons() {
       el(
         'button',
         { class: 'nav-head', title: `${m.label}：点一下收起 / 展开这一栏`, 'data-module': m.id },
-        el('span', { class: 'nav-caret', text: '▾' }),
-        m.label
+        el('span', { class: 'nav-ico-wrap', html: m.icon || '' }),
+        el('span', { class: 'nav-label', text: m.label }),
+        el('span', { class: 'nav-caret', text: '▾' })
       ),
       kids
     );
@@ -211,5 +196,9 @@ export function renderPage() {
   v.className = 'view' + (spec && spec.nopad ? ' nopad' : '');
   if (spec) spec.render(v);
   renderNav();
+  /* 栏目默认是**收起来**的（见上面的 `foldedGroups` 初始化）—— 当前页所在那一栏得自动展开，
+   * 否则高亮落在一个看不见的子节点上。放在这里而不是 `switchPage`：首次进页面是 boot 直接
+   * 调的 `renderPage`，不走 `switchPage`，只挂在那儿首次进来就不展开。 */
+  revealGroupOf(S.page);
   syncHash();
 }

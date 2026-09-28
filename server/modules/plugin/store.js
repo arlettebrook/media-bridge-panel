@@ -13,6 +13,10 @@
  * ⚠️ **"清空插件数据"就是删 `<目录>/data`** —— 声明与存储在插件自己那边，面板不碰内容
  * （见 docs/adr/0033 与 0028）。
  *
+ * ⚠️ **插件不随面板发行**（见 docs/adr/0035）—— 这里没有任何"内置插件同步"：
+ * 装进来的两条路都是外部的（面板「插件库」从插件仓库装、或手动上传 .tar.gz），
+ * 所以**全新安装的插件目录是空的**，卸载也一定持久（卸掉就是卸掉了）。
+ *
  * 清单为什么不放进 `settings/`：启用/卸载是**单插件操作**，而 settings 的数组是整体替换 ——
  * 多个插件并发保存会互相覆盖（首页插件那边踩过，同样的取舍）。
  */
@@ -112,7 +116,7 @@ function remove(type, id, { keepData = false } = {}) {
   return { kept };
 }
 
-/** 递归复制（用于把内置插件从仓库同步进数据目录） */
+/** 递归复制（`installDir` 用：把解开的包复制进暂存目录） */
 function copyDir(from, to) {
   fs.mkdirSync(to, { recursive: true });
   for (const ent of fs.readdirSync(from, { withFileTypes: true })) {
@@ -127,10 +131,11 @@ function copyDir(from, to) {
 /**
  * 安装 / 覆盖一个插件：把 `srcDir`（已经解包好的目录）放到 `<类型>/<id>/` 下。
  *
- * `origin` = 'builtin'（随包发行）/ 'upload'（用户装的）—— 只影响显示与"能不能删"的提示。
+ * `origin` = 'library'（面板「插件库」从插件仓库装的）/ 'manual'（手动上传的）——
+ * 只影响显示（见 docs/adr/0035：没有"随包发行"这一类了）。
  * 覆盖时**保留 `data/`**（插件的设置与缓存不该因为换版本被清掉）。
  */
-function installDir(srcDir, { origin = 'upload', md5 = '', enabled } = {}) {
+function installDir(srcDir, { origin = 'manual', md5 = '', enabled } = {}) {
   ensureRoot();
   const m = contract.readManifest(srcDir); // 第二道校验在这里（files 逐文件核对）
   const dir = dirOf(m.type, m.id);
@@ -190,58 +195,6 @@ function installDir(srcDir, { origin = 'upload', md5 = '', enabled } = {}) {
   return upsert(entry);
 }
 
-/** 仓库里随包发行的内置插件目录（`<repo>/plugins/<类型>/<id>`） */
-function builtinRoot() {
-  return path.join(__dirname, '..', '..', '..', 'plugins');
-}
-
-/** 列出内置插件（按仓库目录扫，不依赖数据目录） */
-function listBuiltins() {
-  const root = builtinRoot();
-  const out = [];
-  if (!fs.existsSync(root)) return out;
-  for (const type of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!type.isDirectory() || !contract.TYPES.includes(type.name)) continue;
-    const typeDir = path.join(root, type.name);
-    for (const one of fs.readdirSync(typeDir, { withFileTypes: true })) {
-      if (!one.isDirectory()) continue;
-      const dir = path.join(typeDir, one.name);
-      if (!fs.existsSync(path.join(dir, 'plugin.json'))) continue;
-      out.push({ type: type.name, id: one.name, dir });
-    }
-  }
-  return out;
-}
-
-/**
- * 把内置插件同步进数据目录：**内容指纹变了才重装**（同"内置首页示例"的做法）。
- * 覆盖时保留启用状态与 `data/`；已经装过的、且内容一致的直接跳过。
- */
-function syncBuiltins() {
-  const notes = [];
-  for (const b of listBuiltins()) {
-    let digest = '';
-    try {
-      digest = contract.dirDigest(b.dir).digest;
-    } catch (e) {
-      notes.push({ id: b.id, type: b.type, action: 'skip', reason: (e && e.message) || String(e) });
-      continue;
-    }
-    const cur = get(b.type, b.id);
-    if (cur && cur.digest === digest) continue; // 一致 → 跳过
-    try {
-      /* 内置插件**首次同步即启用**（"装完即用"，见 plugin-migration-plan 挂账 #2）：
-       * 全新安装后元数据 / 源插件要能直接跑，否则面板是空的。
-       * 已装过的沿用原状态（人停用过就别给它开回来）；手动上传的仍默认停用（routes.js 那边）。 */
-      const entry = installDir(b.dir, { origin: 'builtin', enabled: cur ? cur.enabled : true });
-      notes.push({ id: entry.id, type: entry.type, action: cur ? 'updated' : 'installed', version: entry.version });
-    } catch (e) {
-      notes.push({ id: b.id, type: b.type, action: 'failed', reason: (e && e.message) || String(e) });
-    }
-  }
-  return notes;
-}
-
 module.exports = {
   ROOT,
   REGISTRY,
@@ -249,9 +202,6 @@ module.exports = {
   splitSid,
   dirOf,
   dataDirOf,
-  builtinRoot,
-  listBuiltins,
-  syncBuiltins,
   list,
   get,
   getBySid,

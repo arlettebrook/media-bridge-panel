@@ -39,7 +39,7 @@ for (const m of MODULES) {
 const migrated = settings.migrateLegacy();
 
 const panel = settings.read('panel');
-const WEB_PORT = Number(process.env.WEB_PORT || panel.port || 8099);
+const WEB_PORT = Number(process.env.WEB_PORT || panel.port || 8088);
 const WEB_HOST = process.env.WEB_HOST || panel.host || '0.0.0.0';
 
 /* 面板端口上**只放行**两类 `/api/emby/*`：
@@ -72,7 +72,7 @@ const server = http.createServer(async (req, res) => {
    *
    * 真机 Emby 把 API 挂在 `/emby/` 下，而本面板挂在 `/api/emby`。客户端的行为是
    * **给的主机没带 `/emby` 就自己补一层**（文档里那条真机样例：给的是裸域名，它打的是 `/emby/Shows/…`），
-   * 所以只填 `http://<面板地址>:8099` 时它来的是 `/emby/...` —— 以前这里没路由，直接 404。
+   * 所以只填 `http://<面板地址>:8088` 时它来的是 `/emby/...` —— 以前这里没路由，直接 404。
    * 这里统一成规范形态（`/api/emby/...`），三种填法于是都通：
    *
    *   `/emby/xxx`            → `/api/emby/xxx`    （只填主机，或填了 `…/emby`）
@@ -90,7 +90,7 @@ const server = http.createServer(async (req, res) => {
     /* 面板自有健康检查：**永远 200、不属任何模块、不进门禁**。容器的 HEALTHCHECK 打它。
      *
      * 为什么要单开一条：Emby 兼容端点在多实例之后归**实例端口**（见 emby/listener.js），
-     * 面板端口 8099 上那些端点是"面板自己的页面在用"，不能拿来做存活探针
+     * 面板端口 8088 上那些端点是"面板自己的页面在用"，不能拿来做存活探针
      * （实例没起来 / 首页没选都会影响它）。这条只回答"这个进程还活着吗"。
      * ⚠️ 必须放在下面那道门禁**之前**：探针不带面板 cookie，被拦成 401 就是假告警。 */
     if (pathname === '/api/health') return sendJson(res, 200, { ok: true });

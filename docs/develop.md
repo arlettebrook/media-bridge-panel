@@ -38,8 +38,8 @@
 | GET | `/api/modules` | 模块总览：每个模块的 `apiPrefix`、`upstream` 与当前 `upstreamUrl` |
 | GET/PUT/DELETE | `/api/modules/:id/settings` | 读写/重置某模块的设置（新增模块不需要改动此端点） |
 | GET | `/api/panel/info` | 版本、Node、数据目录、模块列表，以及**仓库地址**（`repo` / `repoUrl` —— 面板「设置 → 关于」与 Release 链接用它，唯一来源是 `panel/update.js` 的 `REPO`，`APP_REPO` 可覆盖） |
-| GET | `/api/panel/backup` | 导出**面板自己的配置**：`{service, exportedAt, settingsDir, settings:{<模块>:…}}`。**不含**模板、插件自己的数据与 `auth.json` |
-| POST | `/api/panel/restore` | 恢复配置（只写模块设置，写完逐个跑一遍各模块的 `onSettingsChange`） |
+| GET | `/api/panel/backup` | 导出**数据备份**：回一份 zip 字节（`Content-Type: application/zip`），含设置、模板、插件（包本体 + 插件数据）、Emby 账号与播放进度；**不含**缓存与应用代码 `app/`。摘要（文件数 / 字节 / 导出时间）放在 `X-Backup-*` 响应头 |
+| POST | `/api/panel/restore` | 用备份 zip 还原：请求体是**原始二进制**（`Content-Type: application/zip`）。解包校验 `manifest.json` 后把顶层项逐个覆盖回 `DATA_DIR`，还原后需重启面板生效 |
 | GET/DELETE | `/api/panel/cache` | 看面板侧两份缓存的用量 / 清空（线路结果与图片索引） |
 | GET | `/api/panel/update` | 版本与更新状态：`{managed, current, latest, hasUpdate, repo, source, appRoot, runningDir, installed[], previous, error}`。查最新 Release 有 60 秒缓存，失败把原因写进 `error` 而不抛 |
 | POST | `/api/panel/update` | 安装某个版本并请求重启：`{version?}`（省略则装最新）。装完写 `<DATA_DIR>/app/.restart` 并向自身发 `SIGTERM` 走正常关闭流程，由容器引导脚本拉起新版本。`managed:false`（非引导脚本托管）时返回 400 |
@@ -49,8 +49,10 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/plugins` | 插件清单：每个插件的类型 / id / 版本 / 域 / 启用状态 / 运行状态 / pid / 内存 / 动作 / 重启次数 / 已跑时长 / 来源（`builtin` 随包发行，`manual` 手动安装），外加**仓库里还没装的**内置插件（`builtins[]`） |
-| POST | `/api/plugins/install` | 装一个包（`tar.gz` + 可选的包 md5；清单里声明了 `files` 就逐文件核对）。任一道对不上 → **400** |
+| GET | `/api/plugins` | 插件清单：每个插件的类型 / id / 版本 / 域 / 启用状态 / 运行状态 / pid / 动作 / 重启次数 / 已跑时长 / 来源（`library` 从插件库装的，`manual` 手动上传的），另带 `types`。**不含**任何"随包发行"的内置插件 |
+| GET | `/api/plugins/library` | **插件库**：从插件仓库拉清单（`?refresh=1` 绕过 60 秒缓存），逐条标出 `installed` / `installedVersion` / `installedOrigin` / `hasUpdate` / `sourceUrl`。拉不到不抛，把原因写进 `error` |
+| POST | `/api/plugins/library/install` | **从插件库装**：`{type, id, version?, enable?}` —— 按清单取包，走下面同一套两道校验 |
+| POST | `/api/plugins/install` | 装一个本地包（`tar.gz` 的 base64 + 可选的包 md5；包里 `plugin.json` 声明了 `files` 就逐文件核对）。任一道对不上 → **400** |
 | DELETE | `/api/plugins/:type/:id` | 卸载：停进程、删插件目录（含它自己的 `data/`） |
 | POST | `/api/plugins/:type/:id/enable` / `disable` | 启用（立刻起进程）/ 停用 |
 | POST | `/api/plugins/:type/:id/restart` | 重启（手动重启会把自动重启的退避计数清零） |
@@ -62,7 +64,12 @@
   崩溃重启（最多 5 次 / 5 分钟）。契约见 [plugin-contract.md](plugin-contract.md)，
   决策见 [ADR-0028](adr/0028-plugin-system.md) 与 [ADR-0029](adr/0029-plugin-channel-and-actions.md)。
 - `/ui/*` 与 `/api/*` 两条都在 `/api/` 下 ⇒ **天然受面板门禁**。
-- 内置插件随包发行：仓库里 `plugins/<类型>/<id>/` 是源码，开机按内容指纹同步进数据目录。
+- **插件不随面板发行**（见 [ADR-0035](adr/0035-plugin-library.md)）：Release 包里没有 `plugins/`，
+  装完零插件；插件由「插件库」页从 `dlushu/media-bridge-plugins`（`PLUGIN_REPO` 可换）
+  取包安装，或在管理页上传 `.tar.gz`。两条入口只差 `origin`（`library` / `manual`），
+  卸载都**只在本机生效、重启不会装回来**（原先的开机同步内置插件已删除）。
+- 仓库里的包与 `index.json` 由 `node tools/plugin-pack.js --out <插件仓库工作目录>` 产出
+  （打包时给包里的 `plugin.json` 注入 `files` 逐文件 md5）。
 
 ### 聚合层（agg）
 
@@ -225,8 +232,9 @@ emby 层直接 `require` 该模块而**不经过 HTTP**（原因见 [ARCHITECTUR
 面板默认是 **http 明文**（密码在链路上是明文，除非在前方套了 https 反向代理），没有多用户、没有权限分级 ——
 **不要把面板直接暴露到公网**。
 
-凭证落在 `data/auth.json`（**不在 `settings/` 下**：该目录会被「配置备份」原样导出，密码哈希与会话密钥
-不应走那条路）。删除该文件即回到默认密码 `123456`。
+凭证落在 `data/auth.json`（**不在 `settings/` 下**：那是模块设置的地盘，鉴权不属于任何一个模块）。
+它**会被数据备份一并打走**（备份含全部数据，见「数据目录」），备份文件本身要妥善保管。
+删除该文件即回到默认密码 `123456`。
 
 ## 数据目录
 
@@ -245,13 +253,16 @@ data/
   emby/cache.db            图片索引（独立 SQLite）
   cache/lines.db           线路结果缓存（面板侧的聚合详情）
   cache/sitestat.db        站点统计与测速（可按"插件 + 站点"记账）
-  plugins/<类型>/<id>/       插件包本体（内置插件开机按内容指纹从仓库同步）
+  plugins/<类型>/<id>/       插件包本体（从插件库装的或手动上传的，见 ADR-0035）
   plugins/<类型>/<id>/data/  插件自己的数据（设置与其缓存，如源插件存实例清单、元数据插件缓存响应）
 ```
 
-- `data/app/` 不进入配置备份（可以从 Release 重新取得）；备份对象是 `settings/<模块>.json`。
-- 模板与插件数据**都不在备份里**：模板按域组织、与内容偏好绑在一起，插件数据是插件自己的东西 ——
-  迁移时在目标机上重建（或从插件自己的设置页导出）。
+- **数据备份**（`GET /api/panel/backup`，一个 zip）覆盖数据卷里的全部数据：设置、模板、插件（包本体 +
+  插件数据）、Emby 账号库与播放进度、以及 `auth.json` 这类顶层文件。
+  - **不含**应用代码 `data/app/`（可以从 Release 重新取得）与**缓存**（`cache/`、`emby/cache.db`、
+    各插件的 `data/cache/`）—— 缓存随时可删掉重建。
+  - ⚠️ 备份**含敏感内容**（插件数据里的网盘 cookie/token、账号库的密码哈希），备份文件本身要妥善保管。
+  - 还原（`POST /api/panel/restore`）是**整项覆盖**：把 zip 里的顶层项逐个替换回数据卷，还原后要**重启面板**才生效。
 - `data/` 已在 `.gitignore` 里（**含凭证**，不要提交）。
 - 想完全清空：停掉面板后 `rm -rf data`。
 - 想只清某个插件的数据：删 `data/plugins/<类型>/<id>/data/`（也就是面板里的「清空插件数据」）。
@@ -298,7 +309,7 @@ module.exports = {
   ① 包本身的 md5（发布方给的那个，可省）；② 清单里 `files` 声明的**逐个文件** md5。
   任一道对不上就**当场拒绝**（400），不"先装上再说"、也不拿实际值去覆写清单假装成功。
 - 关闭面板时会一并停止所有插件子进程（含源插件**自己**起的源实例）—— "面板停、插件就停"由宿主保证。
-- 配置备份**不含**插件数据与模板（见「数据目录」）。
+- 数据备份**含**插件数据与模板（见「数据目录」）；只有应用代码 `app/` 与缓存不在其中。
 - Emby 兼容开发：
   - 端点的补齐顺序按实际客户端需求确定，规则与流程见 [emby-compat.md](emby-compat.md)；
     最新端点清单以 `server/modules/emby/routes.js` 为准。
@@ -325,7 +336,7 @@ module.exports = {
 - Emby 账号（**多个**客户端登录账号）：存 `data/emby/emby.db`（Node 内置 sqlite，文件权限 600），
   密码只存 **scrypt 哈希**，遗忘后只能删除重建。
   - `UserId` 由「serverId + 用户名」派生，因此**改用户名或删账号 = 该账号的客户端需要重新登录**。
-  - 「配置备份/还原」只覆盖 `settings/`，不含该库。
+  - 「数据备份/还原」覆盖整份数据卷（**含**该账号库），还原后需重启面板生效。
 - Emby **拉流（302 之前）**：构建版本列表时会把"这一集在这一线路里的播放 id"记进服务端备忘
   （`(条目 Id, 域, 站, 线路, vod) → 集 id`，TTL 30 分钟），拉流时先查它 —— 命中就直接调插件的 `/play`，
   省掉一次源详情（实测那一次约 2 秒，命中后整跳 0.1 秒上下）；未命中（重启/过期/换源）照旧取详情。

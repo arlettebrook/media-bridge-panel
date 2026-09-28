@@ -125,7 +125,7 @@ export async function renderAgg(v) {
         return toast('拿源清单失败：' + e.message, true);
       }
     }
-    if (!(S.aggSources || []).length) return toast('还没有源：到「插件 → 管理 → 猫爪源 → 设置」里加一个实例', true);
+    if (!(S.aggSources || []).length) return toast('还没有源：先在「插件」里装一个源插件，再在它的设置页里加一个实例', true);
     if (S.aggUseAll) await ensureAggSites();
     const keys = S.aggUseAll ? S.aggSites.filter((s) => s.searchable).map((s) => ({ source: s.source, key: s.key })) : null;
     if (!S.aggUseAll && !tplSites.length) {

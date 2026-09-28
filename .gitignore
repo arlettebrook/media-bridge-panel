@@ -2,6 +2,9 @@
 node_modules/
 .DS_Store
 
+# macOS 在非 HFS / 网络卷上为每个文件生成的 AppleDouble 影子文件（本仓库经 WebDAV 挂载）
+._*
+
 # 日志（含「清空请求」轮转出来的 .bak）
 *.log
 emby.log.bak
@@ -14,6 +17,9 @@ emby.log.bak
 
 # 运行时数据：源 bundle、缓存 db、以及可能含网盘 cookie/token 的源 profile
 data/
+
+# 插件源码：由独立插件仓库分发（见 ADR-0035），不进本版本库；本地留一份供 plugin-pack.js 打包
+plugins/
 
 # 容器与部署：不属于项目源码，只在本机保留
 #   Dockerfile / docker-compose*.yml / bundle.sh / publish.sh / compose 部署记录 / 构建产物
