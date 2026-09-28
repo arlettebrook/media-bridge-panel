@@ -85,6 +85,7 @@ export async function renderPluginLibrary(v) {
       `${TYPE_LABEL[p.type] || p.type} · ${p.id}`,
       fmtKB(p.bytes),
       p.domain ? `域 ${p.domain}` : '',
+      p.author ? `作者 ${p.author}` : '',
       (p.depends || []).length ? `依赖 ${p.depends.join(' / ')}` : '',
     ].filter(Boolean);
     return el(

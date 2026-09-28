@@ -176,6 +176,7 @@ function installDir(srcDir, { origin = 'manual', md5 = '', enabled } = {}) {
     type: m.type,
     id: m.id,
     name: m.name,
+    author: m.author,
     version: m.version,
     description: m.description,
     domain: m.domain,

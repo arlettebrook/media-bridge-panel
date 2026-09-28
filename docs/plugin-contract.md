@@ -57,6 +57,7 @@
   | `files` | — | `{ 相对路径: md5 }` —— 给了就逐文件核对（第二道校验） |
   | `depends` | — | 依赖的域 id 或 `类型:id`；**缺依赖如实失败并点名**，不半启动 |
   | `description` | — | 一句话说明 |
+  | `author` | — | 作者署名（插件库与管理页里显示；不写就不显示这一行） |
 
 - **插件不随面板发行**：面板的 Release 包里**只有面板本体**，装完是**零插件** ——
   插件从**插件仓库**（默认 `dlushu/media-bridge-plugins`，可用 `PLUGIN_REPO` 换）的「插件库」页安装，
@@ -76,7 +77,7 @@
 | **手动安装** | 「插件」栏的「管理」页 | 本地上传的 `.tar.gz` | `manual` |
 
 - **清单**：插件仓库根目录一个 `index.json`（`schema: 1`），逐条给出 `type` / `id` / `name` /
-  `version` / `description` / `domain` / `hasWebui` / `depends` / `bytes` / `md5` / `path`。
+  `author` / `version` / `description` / `domain` / `hasWebui` / `depends` / `bytes` / `md5` / `path`。
   `path` 形如 `packages/<类型>/<id>/<id>-<版本>.tar.gz`。面板拉它是为了**列出来供挑**；
   **拉不到就如实报错**（页面把原因写出来），不静默回退到内置列表。
 - **列表**：`GET /api/plugins/library`（带 `?refresh=1` 绕过 60 秒缓存重拉清单）。

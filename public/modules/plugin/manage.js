@@ -104,6 +104,7 @@ export async function renderPluginManage(v) {
       `${TYPE_LABEL[p.type] || p.type} · ${p.id}`,
       `v${p.version}`,
       p.domain ? `域 ${p.domain}` : '',
+      p.author ? `作者 ${p.author}` : '',
       p.status === 'running' ? `已跑 ${fmtDuration(p.uptimeMs)}` : '',
       p.restarts ? `重启过 ${p.restarts} 次` : '',
       /* 只有两条来路（见 docs/adr/0035）：插件库装的 / 手动上传的。

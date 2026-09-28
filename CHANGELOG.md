@@ -3,7 +3,7 @@
 本文件记录值得用户注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [1.5.0] - 2026-09-28
 
 ### 变更
 
@@ -82,6 +82,8 @@
   「自检 · 回声」（`plugins/source/echo/`）。**插件源码不再纳入本版本库**（`.gitignore` 增加 `plugins/`）：
   插件由独立插件仓库分发（[ADR-0035](docs/adr/0035-plugin-library.md)），源码留本地供
   `node tools/plugin-pack.js` 打包。
+- 插件声明新增可选的 `author` 字段：插件库与管理页各显示一行「作者」，插件仓库清单也带上它。
+  不写这个字段照装，只是不显示（见 [插件契约](docs/plugin-contract.md)第一节）。
 
 ### 升级须知
 

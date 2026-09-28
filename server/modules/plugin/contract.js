@@ -13,6 +13,7 @@
  * `plugin.json`：
  *   id       必填，反向域名风格，**同一类型内唯一**（身份 = `(类型, id)`）
  *   name     必填，显示名
+ *   author   可选，作者署名（插件库与管理页里显示；不写就不显示这一行）
  *   version  必填
  *   type     必填，metadata / source / home
  *   main     可选，入口文件名（默认 index.js）
@@ -114,6 +115,7 @@ function readManifest(dir) {
   return {
     id,
     name,
+    author: String(raw.author || '').trim(),
     version,
     type,
     main,
