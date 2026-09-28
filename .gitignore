@@ -9,6 +9,9 @@ emby.log.bak
 # 本地工具/会话目录（编辑器、agent 临时脚本）
 .codebuddy/
 
+# 本地计划与设计文档（只在本机保留，不进版本库）
+.trae/
+
 # 运行时数据：源 bundle、缓存 db、以及可能含网盘 cookie/token 的源 profile
 data/
 
