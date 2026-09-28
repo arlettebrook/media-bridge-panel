@@ -482,7 +482,9 @@ const actions = {
    *
    * `ref` 里没有网盘文件 id（种子来的播放项）时，**到这一刻才**提交离线下载：
    * 保存目录已有同一份就直接用，没有才提交、等完成、按文件名定位，再取地址。
-   * 地址**每次现取**（带签名、有时效），并附上播放请求头。
+   * 地址走**短窗口缓存**（见 `lib/pikpak.js` 的 `PLAY_URL_TTL_MS`）：一次播放里连番的拉流
+   * 复用同一条地址，不再每次都重新解析、每次都换 CDN 节点；窗口过了才现取。
+   * 并附上播放请求头。
    */
   async play(args, ctx) {
     useCtx(ctx);
@@ -500,7 +502,7 @@ const actions = {
         e.code = 'NO_PLAY_URL';
         throw e;
       }
-      if (ctx) ctx.log(`解析地址：${o.n || fileId} → ${one.url.slice(0, 80)}…`);
+      if (ctx) ctx.log(`解析地址${one.cached ? '（缓存命中）' : ''}：${o.n || fileId} → ${one.url.slice(0, 80)}…`);
       return {
         ok: true,
         status: 200,

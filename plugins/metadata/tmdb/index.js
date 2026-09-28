@@ -105,7 +105,7 @@ const actions = {
   /** 搜索：按名字给候选（面板的搜索端点与首页插件都用它） */
   async search(args = {}) {
     try {
-      const rows = await meta.search(args.type === 'movie' ? 'movie' : 'tv', args.wd);
+      const rows = await meta.search(args.type === 'movie' ? 'movie' : 'tv', args.wd, args.page);
       return { ok: true, rows };
     } catch (e) {
       return { ok: false, error: failFrom(e) };

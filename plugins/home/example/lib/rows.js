@@ -13,7 +13,7 @@
  *   · 条目 id 用 TMDB 坐标 `tmdb_{id}_{movie|tv}` —— 客户端点进去时，面板靠它去找详情与播放资源；
  *   · `poster` / `backdrop` 要给完整 http(s) URL，不写就没图。
  *
- * 翻页：客户端把 StartIndex / Limit 原样透传进 `ctx`，由插件自己换算（见 `windowOf`）；
+ * 翻页：客户端把 StartIndex / Limit 原样透传进 `ctx`，由插件自己换算（见 `tmdbPage`）；
  * 想知道客户端语言，得自己声明一个 enumeration 参数让用户选（地区行就是这么做的）。
  */
 
@@ -267,24 +267,8 @@ function toItems(list, type, names) {
   return out;
 }
 
-/** 上游页码（客户端窗口 → 上游第几页） */
-function pageOf(ctx) {
-  return Math.floor((ctx.startIndex || 0) / TMDB_PAGE) + 1;
-}
-
-/**
- * 客户端窗口（`startIndex`/`limit`）在上游**一页**里怎么切 —— 换算都在这儿，各行不必各写一遍。
- *
- * ⚠️ 只取上游一页：窗口跨页时可能凑不满 `limit`（例：`StartIndex=38&Limit=5` 只能给上游第 2 页
- * 剩下的 2 条）。`total` 是准的，客户端按**实际拿到的条数**往后推进，所以不影响翻页。
- * 想凑满就自己连着取几页 —— 那是插件自己的取舍（代价是多打上游）。
- */
-function windowOf(items, ctx, total, fallbackSize) {
-  const start = ctx.startIndex || 0;
-  const size = ctx.limit > 0 ? ctx.limit : fallbackSize || TMDB_PAGE;
-  const offset = start % TMDB_PAGE;
-  return { items: items.slice(offset, offset + size), total: Number(total) || 0 };
-}
+/** 一次请求**最多**连取几页上游来填窗口 —— 防呆，别让 `Limit=1000` 把上游打穿 */
+const MAX_UPSTREAM_PAGES = 10;
 
 /** 上游没有 `results` 时**照实抛**：面板记日志、客户端拿到失败 —— 不编空数据冒充"库里没内容" */
 function resultsOf(body, api) {
@@ -307,14 +291,44 @@ function daysAgo(n) {
  * 「打一个 TMDB 列表接口 → 给客户端要的那一页」—— 下面七行只差四样东西：
  * 打哪个 api、条目算影还是剧、额外的筛选参数、日志里叫什么。
  * `names` 传 `'movie'` / `'tv'` / `['movie','tv']`（影剧混合的那档要两份名单拼起来）。
+ *
+ * ⚠️ **窗口必须填满**：只取上游一页的话，`Limit` 大于一页（20 条）时回给客户端的条目数会**少于
+ * `Limit`**，而 `total` 又如实写着"上游还有一大堆" —— Emby 客户端见到 `Items.Count < Limit`
+ * 就把这一页当成最后一页，**再也不请求翻页**。实测：SenPlayer 6.2.1 卡在 20 条不动，
+ * Rex 因为按"实际拿到的条数"推进才没暴露。
+ *
+ * 所以这里**连续取上游页、边取边按 id 去重**，直到（去重后）攒够窗口或上游到底：
+ *   · 去重是必须的 —— `trending/*` 跨页会给重复条目（实测 5 页 100 条里 8 条重复），
+ *     面板侧归一化还会按 id 再丢一次，留着重复就凑不满 `Limit`；
+ *   · `offset = start % 20` 是窗口在**本批未去重页里**的落点（`first` 页第 1 条 ≈ 全局第
+ *     `(first-1)*20` 条），上游条目与去重后条目的次序基本一致，够用。
  */
 async function tmdbPage(ctx, one) {
-  const page = pageOf(ctx);
-  const body = await tmdb.get(one.api, { params: Object.assign({}, one.params || {}, { page: page }) });
-  const list = resultsOf(body, one.api);
-  say(one.label + ' ' + one.api + ' 第 ' + page + ' 页 → ' + list.length + ' 条 / 共 ' + body.total_results);
   const names = await genreNamesFor(one.names || one.type);
-  return windowOf(toItems(list, one.type, names), ctx, body.total_results, one.fallbackSize);
+  const start = Math.max(0, ctx.startIndex || 0);
+  const size = ctx.limit > 0 ? ctx.limit : one.fallbackSize || TMDB_PAGE;
+  const offset = start % TMDB_PAGE;
+  const first = Math.floor(start / TMDB_PAGE) + 1;
+  const want = offset + size; // 去重后攒够这些才够切出这一页
+  const all = [];
+  const seen = new Set();
+  let total = 0;
+  for (let page = first; page < first + MAX_UPSTREAM_PAGES; page++) {
+    // eslint-disable-next-line no-await-in-loop
+    const body = await tmdb.get(one.api, { params: Object.assign({}, one.params || {}, { page: page }) });
+    const list = resultsOf(body, one.api);
+    total = Number(body.total_results) || total;
+    say(one.label + ' ' + one.api + ' 第 ' + page + ' 页 → ' + list.length + ' 条 / 共 ' + body.total_results);
+    for (const it of toItems(list, one.type, names)) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      all.push(it);
+    }
+    /* 上游这一页没满 ⇒ 到底了，再往下取也是空 */
+    if (list.length < TMDB_PAGE) break;
+    if (all.length >= want) break;
+  }
+  return { items: all.slice(offset, offset + size), total: total };
 }
 
 /* ────────────── genre 名单（`storage` 缓存，所有行共用）────────────── */

@@ -57,7 +57,7 @@ const { sendJson, readBody, readRawBody } = require('../../core/http');
 const { UA } = require('../../core/upstream');
 const service = require('./service');
 const log = require('./log');
-const tmdb = require('./tmdb');
+const metaBridge = require('./meta-bridge');
 const db = require('./db');
 const home = require('./home');
 const instance = require('./instance');
@@ -72,7 +72,7 @@ const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
  *
  * 通配路由 与「路径形状被已实现端点占住、但 Id 不归它管」的请求共用 ——
  * 后者指 `Users/{UserId}/Items/{ItemId}` 这条：`Items/Resume` / `Items/Latest`（继续观看 / 最新）
- * 路径形状一样，但这里只认本面板发出去的 tmdb Id，认不出的仍按「未实现」记一行 + 501，不静默吞掉。
+ * 路径形状一样，但这里只认本面板发出去的条目 Id（前缀归元数据域），认不出的仍按「未实现」记一行 + 501，不静默吞掉。
  *
  * `body` 可选（通配路由读下来的原始体）：只用来打一行摘要（掩码 + 压平 + 限长，见 `log.bodyBrief`）。
  * POST 端点没有 query，不看 body 就无从知道客户端报了什么。
@@ -318,7 +318,7 @@ module.exports = function routes(r) {
     return sendJson(res, out.status, out.body);
   });
 
-  /* 单条详情：只认本面板发出去的 tmdb Id；认不出的（如 Items/Resume）走 501 */
+  /* 单条详情：只认本面板发出去的条目 Id（前缀归元数据域）；认不出的（如 Items/Resume）走 501 */
   r.add('GET', '/api/emby/Users/:userId/Items/:itemId', async (req, res, { params, query, pathname }) => {
     const q = log.queryBrief(query);
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
@@ -328,7 +328,7 @@ module.exports = function routes(r) {
       return sendJson(res, denied.status, denied.body);
     }
 
-    if (!tmdb.parseItemId(params.itemId)) return notImplemented(req, res, { pathname, query });
+    if (!metaBridge.parseItemId(params.itemId)) return notImplemented(req, res, { pathname, query });
 
     /* `host` 传进去是为了让 `MediaSources[].Path` / 条目级 `Path` 是**绝对 URL**
      * （真机的 Path 也从来不是相对路径）。用请求自己的 Host —— 那正是客户端能连到的地址。 */

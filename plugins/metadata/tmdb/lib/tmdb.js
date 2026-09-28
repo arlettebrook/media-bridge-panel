@@ -182,12 +182,13 @@ async function get(api, { params = {}, cfg, timeoutMs, noCache } = {}) {
  * TMDB 的搜索是**模糊**的：`斗破苍穹年番` 会回 `斗破苍穹`，但判据不能只看"有没有结果"
  * （调用方要自己核对 id 与类型）。
  */
-async function search(kind, name, { timeoutMs } = {}) {
+async function search(kind, name, { page, timeoutMs } = {}) {
   const k = kind === 'movie' ? 'movie' : 'tv';
   const q = String(name || '').trim();
   if (!q) return [];
+  const p = Math.max(1, Number(page) || 1);
   const c = settings.read();
-  const key = `${k}|${c.language}|${q}`;
+  const key = `${k}|${c.language}|${q}|p${p}`;
   const hit = cache.get('names', key);
   if (hit) {
     try {
@@ -198,7 +199,7 @@ async function search(kind, name, { timeoutMs } = {}) {
     }
   }
 
-  const body = await get(`search/${k}`, { params: { query: q, include_adult: 'false' }, cfg: c, timeoutMs });
+  const body = await get(`search/${k}`, { params: { query: q, include_adult: 'false', page: p }, cfg: c, timeoutMs });
   const rows = (body && body.results) || [];
   if (rows.length) cache.put('names', key, JSON.stringify(rows), cache.NAME_TTL_MS);
   return rows;

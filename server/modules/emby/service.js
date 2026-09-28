@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Emby 层服务：服务器标识、登录校验、用户资料、条目（均基于 TMDB 元数据）
+ * Emby 层服务：服务器标识、登录校验、用户资料、条目（元数据一律走插件，本层不认识具体域）
  *
  * 只做已实现端点所需的事：
  *   GET  /api/emby/System/Info/Public        握手：告诉客户端这是个 Emby 服务器
@@ -8,11 +8,13 @@
  *   GET  /api/emby/Users/{UserId}            取用户资料（客户端登录后紧接着就会要）
  *   GET  /api/emby/Users/{UserId}/Views      媒体库列表（每个启用的插件行 = 一个库，见 getViews）
  *   GET  /api/emby/Users/{UserId}/Items      条目列表（**列表数据由首页模块决定**：认 ParentId=<库Id>；其余如实空，见 getItems）
- *   GET  /api/emby/Shows/{Id}/Seasons        剧的季列表（**占位**：TMDB 的 seasons[]，见 getSeasons）
- *   GET  /api/emby/Shows/{Id}/Episodes       某一季的分集列表（**占位**：TMDB season 接口，见 getEpisodes）
+ *   GET  /api/emby/Shows/{Id}/Seasons        剧的季列表（**占位**：元数据插件的 seasons[]，见 getSeasons）
+ *   GET  /api/emby/Shows/{Id}/Episodes       某一季的分集列表（**占位**：元数据插件 season 接口，见 getEpisodes）
  *
- * 条目 Id 由 tmdb 坐标派生（`tmdb_{id}_{tv|movie}[_s{n}]`），派生与解析是一对：tmdb.itemId / tmdb.parseItemId。
- * TMDB 失败一律**照实回失败**（状态码与上游一致，网络层由 tmdb.httpStatusOf 归类）—— 不编占位数据。
+ * 条目 Id 由「域坐标」派生（`{域}_{编号}_{tv|movie}[_s{n}]`，形状由 core/providers.js 统一规定），
+ * 派生与解析是一对：metaBridge.itemId / metaBridge.parseItemId。域来自已装元数据插件的声明
+ * （没有"默认域"，装哪个域就用哪个域）。
+ * 元数据取数失败一律**照实回失败**（状态码与上游一致，网络层由 metaBridge.httpStatusOf 归类）—— 不编占位数据。
  *
  * 账号（**多账号**）：存 `data/emby/emby.db`（内置 sqlite，见 db.js），密码只存 scrypt 哈希；
  * 老的单账号（设置文件里的 `account.{username,password}` 明文）会在首次用到库时自动迁移并清明文。
@@ -23,7 +25,7 @@
  * 改密或删账号会作废该账号的所有 token。豁免：握手、登录、面板自用端点、501 通配（图片端点将来也要豁免）。
  */
 const crypto = require('crypto');
-const tmdb = require('./tmdb');
+const metaBridge = require('./meta-bridge');
 const agg = require('../agg/api'); // 聚合层的进程内调用面（原来是打自己的 /api/agg/*，会撞面板门禁 → 见那个文件顶部）
 const BRAND = require('../../core/branding'); // 默认服务器名（客户端「服务器列表」里显示的那个）
 const home = require('./home');
@@ -406,7 +408,7 @@ function applyUserData(out, requestedUserId, req) {
  * 三条上报端点的共同入口：`Sessions/Playing`（开始）/ `/Playing/Progress`（心跳）/ `/Playing/Stopped`（结束）。
  *
  * 客户端实测（SenPlayer 6.2.1，见 docs/playback-progress.md §11）：
- *   · `ItemId` 就是**本面板发出去的 Id**（`tmdb_{id}_tv_s{n}_e{m}` / `tmdb_{id}_movie`）—— 原样回传，不做解析；
+ *   · `ItemId` 就是**本面板发出去的 Id**（`{域}_{编号}_tv_s{n}_e{m}` / `{域}_{编号}_movie`）—— 原样回传，不做解析；
  *   · 心跳每 10 秒一次，带 `PositionTicks`，**部分**心跳才带 `RunTimeTicks`；
  *   · **没有 `Played` 字段** ⇒ "看完"只能按位置/时长比例判（真机同样如此）；
  *   · 一律**不报 `UserId`** ⇒ 账号从 token 认。
@@ -486,11 +488,11 @@ function recordPlayback(req, kind, body) {
  * 客户端只是想让状态变一下，回 4xx/501 只会让它弹一个错误框。
  */
 function playableOf(rawItemId) {
-  const p = tmdb.parseItemId(String(rawItemId || '').trim());
+  const p = metaBridge.parseItemId(String(rawItemId || '').trim());
   if (!p || !isPlayableId(p)) return null;
   return {
-    itemId: tmdb.itemId(p.domain, p.type, p.tmdbId, p.season, p.episode),
-    seriesId: p.season !== null ? tmdb.itemId(p.domain, 'tv', p.tmdbId) : null,
+    itemId: metaBridge.itemId(p.domain, p.type, p.entryId, p.season, p.episode),
+    seriesId: p.season !== null ? metaBridge.itemId(p.domain, 'tv', p.entryId) : null,
     season: p.season,
     episode: p.episode,
   };
@@ -597,18 +599,18 @@ function setPlayed(req, requestedUserId, rawItemId, played) {
  * 集的拼装与 `getEpisodes()` 保持一致（同样是剧照当 Primary、`IsFolder=false`、带季集号）。
  */
 async function progressItem(r, accountId) {
-  const p = tmdb.parseItemId(r.item_id);
+  const p = metaBridge.parseItemId(r.item_id);
   if (!p) return null;
   const domain = p.domain;
   const prog = progressOf(accountId, r.item_id);
 
   if (p.type === 'movie') {
-    const look = await tmdb.lookup({ type: 'movie', tmdbId: p.tmdbId, domain });
+    const look = await metaBridge.lookup({ type: 'movie', entryId: p.entryId, domain });
     if (!look.ok) return null;
     const item = leanItemDto({
       type: 'movie',
       domain,
-      tmdbId: p.tmdbId,
+      entryId: p.entryId,
       parentId: defaultLibraryId(),
       title: look.item.title,
       year: look.item.year,
@@ -623,14 +625,14 @@ async function progressItem(r, accountId) {
   }
 
   if (p.season === null || p.episode === null) return null; // 剧（`_tv`）本身没有进度，见 applyUserData 的说明
-  const seasonLook = await tmdb.lookupSeason({ tmdbId: p.tmdbId, season: p.season, domain });
+  const seasonLook = await metaBridge.lookupSeason({ entryId: p.entryId, season: p.season, domain });
   if (!seasonLook.ok) return null;
   const e = (seasonLook.item.episodes || []).find((x) => Number(x.episodeNumber) === Number(p.episode));
   if (!e) return null; // 这一季里没有这一集（源与 TMDB 对不上）→ 不列，不编
 
-  const showLook = await tmdb.lookup({ type: 'tv', tmdbId: p.tmdbId, domain }); // 只为剧名（缓存里通常已有）
+  const showLook = await metaBridge.lookup({ type: 'tv', entryId: p.entryId, domain }); // 只为剧名（缓存里通常已有）
   const item = baseItem({
-    id: tmdb.itemId(domain, 'tv', p.tmdbId, p.season, p.episode),
+    id: metaBridge.itemId(domain, 'tv', p.entryId, p.season, p.episode),
     parentId: defaultLibraryId(),
     name: e.name || `第 ${p.episode} 集`,
     type: 'Episode',
@@ -638,15 +640,15 @@ async function progressItem(r, accountId) {
     premiereDate: e.premiereDate,
     overview: e.overview,
     communityRating: e.rating,
-    providerIds: { [tmdb.providerIdKey(domain)]: String(p.tmdbId) },
-    posterUrl: tmdb.imageUrlOf(domain, 'w300', e.stillPath),
+    providerIds: { [metaBridge.providerIdKey(domain)]: String(p.entryId) },
+    posterUrl: metaBridge.imageUrlOf(domain, 'w300', e.stillPath),
   });
   item.IsFolder = false;
   item.IndexNumber = e.episodeNumber;
   item.ParentIndexNumber = p.season;
-  item.SeriesId = tmdb.itemId(domain, 'tv', p.tmdbId);
+  item.SeriesId = metaBridge.itemId(domain, 'tv', p.entryId);
   if (showLook.ok) item.SeriesName = showLook.item.title || '';
-  item.SeasonId = tmdb.itemId(domain, 'tv', p.tmdbId, p.season);
+  item.SeasonId = metaBridge.itemId(domain, 'tv', p.entryId, p.season);
   item.SeasonName = seasonLook.item.name || `第 ${p.season} 季`;
   if (e.runtimeMinutes) item.RunTimeTicks = e.runtimeMinutes * 600000000;
   if (e.stillPath) item.PrimaryImageAspectRatio = 1.7777778;
@@ -878,15 +880,24 @@ function itemsWillReturnData(query) {
 }
 
 /**
- * 客户端在按**外部 id** 找一条吗？`AnyProviderIdEquals=tmdb.{数字}` → 回那个 tmdb id，否则回 0。
+ * 客户端在按**外部 id** 找一条吗？`AnyProviderIdEquals={域}.{编号}` → 回 `{domain, entryId}`，否则回 null。
+ *
+ * **前缀按注册表认域，不写死某个域**：客户端手里那串前缀（Emby 惯例是提供者名）交给
+ * `metaBridge.domainOfRef()` 找已注册的元数据域；认不出就回 null（如实当"没这条查询"处理，
+ * 不猜、不回退到别的域）。编号**不要求是数字** —— TMDB 是数字（`550`），MissAV 是 slug
+ * （`dldss-559`），面板只透传（见 core/providers.js）。形状与条目 Id 里的编号段同一套：只允许
+ * `[A-Za-z0-9._-]`。
  *
  * **判据只此一处**：`getItems` 的搜索分支与 `itemsWillReturnData`（决定要不要校验账号）都用它，
  * 别各写一份正则（两处一旦漂移，就会出现"出数据却没校验"）。
  */
+const PROVIDER_REF_RE = /^([A-Za-z][A-Za-z0-9]*)\.([A-Za-z0-9][A-Za-z0-9._-]*)$/;
 function searchProviderId(query) {
   const val = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
-  const m = /^tmdb\.(\d+)$/i.exec(val('AnyProviderIdEquals'));
-  return m ? Number(m[1]) : 0;
+  const m = PROVIDER_REF_RE.exec(String(val('AnyProviderIdEquals')).trim());
+  if (!m) return null;
+  const domain = metaBridge.domainOfRef(m[1]);
+  return domain ? { domain, entryId: m[2] } : null;
 }
 
 /**
@@ -910,6 +921,11 @@ function searchTermOf(query) {
 /** 搜索每类型默认取多少条（`Limit` 缺省时）与硬上限（防客户端要 999 条把上游打爆） */
 const SEARCH_DEFAULT_LIMIT = 20;
 const SEARCH_MAX_LIMIT = 40;
+
+/** 上游搜索**一页**的条数（TMDB 与 missav 都是 20）—— 把客户端窗口换算成"要取几页"用 */
+const SEARCH_UPSTREAM_PAGE = 20;
+/** 一次搜索**最多**连取几页上游 —— 防呆，别让大 `Limit` 把上游打穿 */
+const SEARCH_MAX_UPSTREAM_PAGES = 3;
 
 /**
  * `IncludeItemTypes` → 要搜哪几种：`Series`→tv、`Movie`→movie；**两个都没给 = 都搜**。
@@ -938,10 +954,10 @@ function searchTypesOf(include) {
 function searchRowDto(row, type) {
   return leanItemDto({
     type,
-    /* 行里带的是**它属于哪个域**（`tmdb.js` 的 `search()` 逐域遍历时打上的）——
+    /* 行里带的是**它属于哪个域**（`meta-bridge.js` 的 `search()` 逐域遍历时打上的）——
      * 条目 Id 与 `ProviderIds` 的键都按它取（见 `leanItemDto`）。 */
     domain: row.domain,
-    tmdbId: row.entryId,
+    entryId: row.entryId,
     parentId: defaultLibraryId(),
     title: row.title || '',
     year: row.year || '',
@@ -1030,7 +1046,7 @@ async function getNextUp(requestedId, req, query) {
  * （这样带出来的是**那一集自己**的位置与已看状态，而不是"最近那条"的）。
  */
 async function nextEpisodeItem(row, accountId) {
-  const p = tmdb.parseItemId(row.item_id);
+  const p = metaBridge.parseItemId(row.item_id);
   if (!p || p.season === null || p.episode === null) return null;
   const domain = p.domain;
 
@@ -1046,13 +1062,13 @@ async function nextEpisodeItem(row, accountId) {
     let fellBack = false;
     let found = null;
     for (let i = 0; i < 50 && !found; i += 1) {
-      if (!(await episodeExists(domain, p.tmdbId, cur.season, cur.episode))) {
+      if (!(await episodeExists(domain, p.entryId, cur.season, cur.episode))) {
         if (fellBack) break; // 下一季第 1 集也不存在 → 放弃
         fellBack = true;
         cur = { season: p.season + 1, episode: 1 };
         continue;
       }
-      const id = tmdb.itemId(domain, 'tv', p.tmdbId, cur.season, cur.episode);
+      const id = metaBridge.itemId(domain, 'tv', p.entryId, cur.season, cur.episode);
       if (Number((db.getPlayback(accountId, id) || {}).hidden) === 1) cur = { season: cur.season, episode: cur.episode + 1 };
       else found = cur;
     }
@@ -1061,7 +1077,7 @@ async function nextEpisodeItem(row, accountId) {
     episode = found.episode;
   }
 
-  const nextId = tmdb.itemId(domain, 'tv', p.tmdbId, season, episode);
+  const nextId = metaBridge.itemId(domain, 'tv', p.entryId, season, episode);
   const next = db.getPlayback(accountId, nextId);
   if (next) return progressItem(next, accountId);
   /* 下一集还没看过 → 库里没有它的行。造一条**只用于组装、不写库**的临时行，
@@ -1073,8 +1089,8 @@ async function nextEpisodeItem(row, accountId) {
 }
 
 /** TMDB 的季数据里有没有这一集（`NextUp` 只回真实存在的下一集） */
-async function episodeExists(domain, tmdbId, season, episode) {
-  const look = await tmdb.lookupSeason({ tmdbId, season, domain });
+async function episodeExists(domain, entryId, season, episode) {
+  const look = await metaBridge.lookupSeason({ entryId, season, domain });
   if (!look.ok) return false;
   return (look.item.episodes || []).some((e) => Number(e.episodeNumber) === Number(episode));
 }
@@ -1127,8 +1143,8 @@ function getItemCounts() {
  *
  * **列表数据由首页模块决定，emby 层只做端点映射与 DTO 转换**（见
  * docs/emby-home-plugin.md）。分支共五条：
- *   - `SearchTerm=<词>` → **按名字搜**（TMDB 搜索；SenPlayer 的搜索框走这条）
- *   - `AnyProviderIdEquals=tmdb.{id}` → **按外部 id 搜一条**（回一条带本面板 Id 的条目，客户端接着进详情）
+ *   - `SearchTerm=<词>` → **按名字搜**（元数据插件搜索；SenPlayer 的搜索框走这条）
+ *   - `AnyProviderIdEquals={域}.{编号}` → **按外部 id 搜一条**（回一条带本面板 Id 的条目，客户端接着进详情）
  *   - `ParentId=<catpawhome_…>`（本面板发给客户端的媒体库 Id，见 getViews）→ `home.listByQuery` 跑对应插件行
  *   - 无 `ParentId` 的「推荐」查询（`SortBy` 含 `IsFavoriteOrLiked`）→ 路由到插件声明了 `feed` 的行
  *   - `Filters=IsPlayed` → 读 `playback` 表（**已看的条目，真数据**）；`Filters=IsFavorite` → 仍如实回空
@@ -1154,7 +1170,7 @@ async function getItems(requestedId, query) {
     const want = val('IncludeItemTypes');
     const rows = db.listPlayed(acc.id, limitOf(query, 50)).filter((r) => {
       if (!want) return true;
-      const p = tmdb.parseItemId(r.item_id);
+      const p = metaBridge.parseItemId(r.item_id);
       if (!p) return false;
       return p.type === 'movie' ? /movie/i.test(want) : /episode|series/i.test(want);
     });
@@ -1165,35 +1181,36 @@ async function getItems(requestedId, query) {
    * SenPlayer 的搜索框打的就是这条；早期落到"没有可识别的查询参数 → 空"。 */
   if (searchTermOf(query)) return getSearchItems(requestedId, query);
 
-  /* ---- 搜索/定位：`AnyProviderIdEquals=tmdb.{id}` —— 按**外部 id** 找那一条 ----
+  /* ---- 搜索/定位：`AnyProviderIdEquals={域}.{编号}` —— 按**外部 id** 找那一条 ----
    *
-   * 链路：客户端手里只有一个 tmdb 号（外部链接 / 书签 / 它自己记着的），**拼不出本面板的 Id**，
-   * 于是来问一句"这条在本面板的 Id 是多少"；这里回**一条带 Id 的条目**（`tmdb_{id}_{movie|tv}`），
-   * 它拿到就接着打详情 → 详情那条同样是"按 tmdb 坐标反查"，两条路同源。
+   * 链路：客户端手里只有一个上游编号（外部链接 / 书签 / 它自己记着的），**拼不出本面板的 Id**，
+   * 于是来问一句"这条在本面板的 Id 是多少"；这里回**一条带 Id 的条目**（`{域}_{编号}_{movie|tv}`），
+   * 它拿到就接着打详情 → 详情那条同样是"按域坐标反查"，两条路同源。前缀认哪个域由
+   * `searchProviderId`（走注册表）定，**不写死 tmdb**。
    *
    * ⚠️ 该分支曾以「列表数据由首页模块决定」为由**删掉过**，后来又**恢复**：
    *   · 模块管的是**首页渲染**（给客户端什么样的行列、每个条目的 Id），
    *     **详情 / 搜索 / 播放本来就归 emby 层** —— 这是既定的分层；
-   *   · 而且**详情端点在删它之后一直还在做同一件事**（`tmdbItemDto()` 按坐标反查），
+   *   · 而且**详情端点在删它之后一直还在做同一件事**（`richItemDto()` 按坐标反查），
    *     删检索这条只会让两条路不自洽；
    *   · 当时删它的依据是"实测客户端 0 次使用"—— **已被 Rex/0.1.0 推翻**
    *     （它连打两条 `AnyProviderIdEquals=tmdb.1339713`，回空之后就拿不到 Id、链路断在那里）。
    *   结论同 `Items/Latest`：某条查询"没人要"只对**当时那批客户端**成立。
    *
    * 类型从 `IncludeItemTypes` 推（`Series`→tv / `Movie`→movie；都没给 → tv，照旧例）；
-   * 取不到 → **照实回失败码**（`tmdbFailure`，不编占位条目）。
+   * 取不到 → **照实回失败码**（`metaFailure`，不编占位条目）。
    */
-  const searchId = searchProviderId(query);
-  if (searchId) {
+  const ref = searchProviderId(query);
+  if (ref) {
     const include = val('IncludeItemTypes');
     const type = /series/i.test(include) ? 'tv' : /movie/i.test(include) ? 'movie' : 'tv';
-    const look = await tmdb.lookup({ type, tmdbId: searchId });
-    if (!look.ok) return tmdbFailure(look.error, `${type}/${searchId}`);
+    const look = await metaBridge.lookup({ type, entryId: ref.entryId, domain: ref.domain });
+    if (!look.ok) return metaFailure(look.error, `${ref.domain}/${type}/${ref.entryId}`);
     const item = leanItemDto(Object.assign({}, look.item, { type, parentId: defaultLibraryId() }));
     return {
       status: 200,
       body: { Items: [item], TotalRecordCount: 1 },
-      log: `AnyProviderIdEquals=tmdb.${searchId} → ${type}「${item.Name}」id=${item.Id}（搜索结果，可进详情）`,
+      log: `AnyProviderIdEquals=${ref.domain}.${ref.entryId} → ${type}「${item.Name}」id=${item.Id}（搜索结果，可进详情）`,
     };
   }
 
@@ -1231,7 +1248,7 @@ async function getItems(requestedId, query) {
     const provider = val('AnyProviderIdEquals');
     return empty(
       provider
-        ? `AnyProviderIdEquals=${provider} → 空（只认 tmdb.{数字}；列表本身由首页模块决定）`
+        ? `AnyProviderIdEquals=${provider} → 空（只认「{已注册域}.{编号}」；列表本身由首页模块决定）`
         : '没有可识别的查询参数 → 空'
     );
   }
@@ -1259,9 +1276,11 @@ const LATEST_DEFAULT_LIMIT = 20;
  * 三条口径，都不猜：
  *   ① **不为结果再打 `lookup()`**：搜索行里的字段够画卡片，详情才需要 rich（见 `searchRowDto`）。
  *      代价是**每类型 1 次上游**（`Limit` 由 TMDB 自己的分页决定），不是"结果数 × 1 次"。
- *   ② **只取上游第 1 页**（每类型 20 条）：翻页要再打上游，而客户端的搜索框极少翻到第 2 页；
+ *   ② **按客户端窗口取上游页**（每类型 1 页起、至多 `SEARCH_MAX_UPSTREAM_PAGES` 页）：上游一页
+ *      只有 20 条，只取第 1 页就**填不满 `Limit`**（客户端常要 30/40）；而 Emby 客户端见到
+ *      `Items.Count < Limit` 就把这页当成最后一页、**再也不翻页**（SenPlayer 6.2.1 实测如此）。
  *      `StartIndex`/`Limit` 在这**一堆结果里切片**，`TotalRecordCount` 如实 = 本地手里的条数
- *      （**不是"TMDB 里有多少条"** —— 那个数本层不知道，不能编）。
+ *      （**不是"TMDB 里有多少条"** —— 那个数本层不知道，不能编）。见 `docs/plugin-contract.md`「分页」。
  *   ③ **跨类型怎么排 = 按名次轮流**（tv#1, movie#1, tv#2, movie#2…）：TMDB 的 tv / movie 是两份
  *      **独立的相关度排序**，谁也不能替谁排序 —— 轮流合并让两份次序都原样保留，不引入跨类型的人造指标。
  *      ⚠️ 曾经按行的 `popularity` 降序合并，**实测是错的**：搜「斗破苍穹」时它把一个叫 `111` 的剧
@@ -1281,10 +1300,29 @@ async function getSearchItems(requestedId, query) {
   const types = searchTypesOf(val('IncludeItemTypes'));
   const limit = Math.min(Math.max(1, Number(val('Limit')) || SEARCH_DEFAULT_LIMIT), SEARCH_MAX_LIMIT);
   const startIndex = Math.max(0, Number(val('StartIndex')) || 0);
+  /* 要取几页上游才够填客户端窗口（见注释 ②）：上游一页 `SEARCH_UPSTREAM_PAGE` 条，
+   * `StartIndex + Limit` 越大要的页越多；封顶 `SEARCH_MAX_UPSTREAM_PAGES` 页 */
+  const upstreamPages = Math.min(
+    Math.max(1, Math.ceil((startIndex + limit) / SEARCH_UPSTREAM_PAGE)),
+    SEARCH_MAX_UPSTREAM_PAGES
+  );
 
-  /* 按名字去**元数据插件**搜（`tmdb.search` 是转发层：哪个域、走哪个插件的「搜索」动作都在那里；
-   * 名字搜索的缓存也在插件自己那边 —— 见 plugins/metadata/tmdb/lib/tmdb.js） */
-  const settled = await Promise.allSettled(types.map((t) => tmdb.search(t, term)));
+  /* 按名字去**元数据插件**搜（`metaBridge.search` 是转发层：哪个域、走哪个插件的「搜索」动作都在那里；
+   * 名字搜索的缓存也在插件自己那边 —— 见 plugins/metadata/tmdb/lib/tmdb.js）。
+   * **逐页取到"够填窗口"或"上游给空"为止** —— 只取第 1 页会因 `Items.Count < Limit` 让客户端
+   * 误判成末页（见注释 ②），所以每页取 `SEARCH_UPSTREAM_PAGE` 条、不足即停。 */
+  const settled = await Promise.allSettled(
+    types.map(async (t) => {
+      const all = [];
+      for (let page = 1; page <= upstreamPages; page++) {
+        // eslint-disable-next-line no-await-in-loop
+        const rows = (await metaBridge.search(t, term, page)) || [];
+        for (const r of rows) all.push(r);
+        if (rows.length < SEARCH_UPSTREAM_PAGE) break;
+      }
+      return all;
+    })
+  );
   const failures = [];
   const buckets = [];
   settled.forEach((r, i) => {
@@ -1296,7 +1334,7 @@ async function getSearchItems(requestedId, query) {
   });
 
   /* 全失败 → 照实回失败码（一个字都不编） */
-  if (failures.length === types.length) return tmdbFailure(failures[0].error, `search/${types.join('+')}`);
+  if (failures.length === types.length) return metaFailure(failures[0].error, `search/${types.join('+')}`);
 
   /* 客户端有没有把搜索限制在某个库？（真机会按媒体库过滤）
    * 本层**做不到**：库是插件行**请求时现跑**的，没有"成员索引"可查 ⇒ 一律全局搜，
@@ -1322,7 +1360,7 @@ async function getSearchItems(requestedId, query) {
     status: 200,
     body: { Items: page.map((x) => searchRowDto(x.row, x.type)), TotalRecordCount: rows.length },
     log:
-      `搜索「${term}」→ ${rows.length} 条（${types.join('/')}，各取上游第 1 页）` +
+      `搜索「${term}」→ ${rows.length} 条（${types.join('/')}，各取上游至多 ${upstreamPages} 页）` +
       `本页 ${page.length} 条（StartIndex=${startIndex} Limit=${limit}）${warn}${scopedTo}`,
   };
 }
@@ -1392,7 +1430,7 @@ async function getLatest(requestedId, query) {
 /**
  * 首页插件条目（HomeItem）→ Emby `BaseItemDto`。
  *
- * - **Id 原样带过去**：插件规范**建议**它就是 `tmdb_{id}_{tv|movie}` —— 客户端点这一条时会去打
+ * - **Id 原样带过去**：插件规范**约定**它就是 `{域}_{编号}_{tv|movie}` —— 客户端点这一条时会去打
  *   `/Users/{id}/Items/{这个Id}`，那条走 **TMDB 反查 + 聚合资源**（见指南「五」）。
  *   插件自己编的 Id 照样显示，只是点进去没有资源（模块自己的事，这边不兜底）。
  * - **图片**：插件的 `poster` / `backdrop` 是**完整 URL**，直接编成签名 tag 交给客户端
@@ -1454,9 +1492,9 @@ function defaultLibraryId() {
   }
 }
 
-/** 首页模块取数失败 → 照实回失败（与 tmdbFailure 同一取向；状态码归类共用 tmdb.httpStatusOf） */
+/** 首页模块取数失败 → 照实回失败（与 metaFailure 同一取向；状态码归类共用 metaBridge.httpStatusOf） */
 function homeFailure(error, what) {
-  const status = tmdb.httpStatusOf(error);
+  const status = metaBridge.httpStatusOf(error);
   return {
     status,
     body: { error: error.message, code: error.code, home: what },
@@ -1464,13 +1502,13 @@ function homeFailure(error, what) {
   };
 }
 
-/** TMDB 失败 → 照实回失败（状态码与上游一致；网络层由 tmdb.httpStatusOf 归类） */
-function tmdbFailure(error, what) {
-  const status = tmdb.httpStatusOf(error);
+/** 元数据取数失败 → 照实回失败（状态码与上游一致；网络层由 metaBridge.httpStatusOf 归类） */
+function metaFailure(error, what) {
+  const status = metaBridge.httpStatusOf(error);
   return {
     status,
-    body: { error: error.message, code: error.code, tmdb: what },
-    log: `tmdb ${what} 取不到（${error.code}）→ HTTP ${status}`,
+    body: { error: error.message, code: error.code, meta: what },
+    log: `元数据 ${what} 取不到（${error.code}）→ HTTP ${status}`,
   };
 }
 
@@ -1489,31 +1527,31 @@ async function getSeasons(showId, requestedId) {
   const denied = assertUser(requestedId);
   if (denied) return denied;
 
-  const parsed = tmdb.parseItemId(showId);
+  const parsed = metaBridge.parseItemId(showId);
   if (!parsed || parsed.type !== 'tv' || parsed.season !== null) {
     return { status: 404, body: { error: '没有这个剧' }, log: `Id 不是剧 → 404：${showId}` };
   }
-  const tmdbId = parsed.tmdbId;
+  const entryId = parsed.entryId;
   const domain = parsed.domain;
-  const showKey = tmdb.itemId(domain, 'tv', tmdbId);
+  const showKey = metaBridge.itemId(domain, 'tv', entryId);
 
-  const look = await tmdb.lookup({ type: 'tv', tmdbId, withSeasons: true, domain });
-  if (!look.ok) return tmdbFailure(look.error, `tv/${tmdbId}`);
+  const look = await metaBridge.lookup({ type: 'tv', entryId, withSeasons: true, domain });
+  if (!look.ok) return metaFailure(look.error, `tv/${entryId}`);
 
   const show = look.item;
   const items = (show.seasons || [])
     .filter((s) => Number.isFinite(s.seasonNumber) && s.seasonNumber > 0)
     .map((s) => {
       const item = baseItem({
-        id: tmdb.itemId(domain, 'tv', tmdbId, s.seasonNumber),
+        id: metaBridge.itemId(domain, 'tv', entryId, s.seasonNumber),
         name: s.name || `第 ${s.seasonNumber} 季`,
         type: 'Season',
         year: s.year,
         premiereDate: s.premiereDate,
         overview: s.overview,
         communityRating: s.rating,
-        providerIds: { [tmdb.providerIdKey(domain)]: String(tmdbId) },
-        posterUrl: tmdb.imageUrlOf(domain, 'w500', s.posterPath || show.posterPath), // 季海报缺失时退回剧海报，免得客户端出白块
+        providerIds: { [metaBridge.providerIdKey(domain)]: String(entryId) },
+        posterUrl: metaBridge.imageUrlOf(domain, 'w500', s.posterPath || show.posterPath), // 季海报缺失时退回剧海报，免得客户端出白块
       });
       item.Genres = []; // TMDB 的季没有 genres，空是如实，不套剧的
       item.ChildCount = s.episodeCount;
@@ -1537,18 +1575,18 @@ async function getSeasons(showId, requestedId) {
  * 入参形态（实测）：路径 `Id` 是剧 Id（`tmdb_95350_tv`），`UserId` 与 `SeasonId` 都在 query，
  * 另有 `EnableTotalRecordCount` / 一长串 `Fields`（忽略 —— 只回手里有的）。
  *
- * 季必须能唯一确定：`SeasonId` 取自上一步 Seasons 发出去的季 Id（`tmdb_{id}_tv_s{n}`），
- * 且 tmdbId 要与路径里的剧一致。定不下来就**回空 + 日志写明原因** —— 与 Items 同类处理：
+ * 季必须能唯一确定：`SeasonId` 取自上一步 Seasons 发出去的季 Id（`{域}_{编号}_tv_s{n}`），
+ * 且条目编号要与路径里的剧一致。定不下来就**回空 + 日志写明原因** —— 与 Items 同类处理：
  * 先把客户端的真实调用逼出来，不为没见过的形态现编数据。
  *
- * 分集 Id = `tmdb_{id}_tv_s{n}_e{m}`（与 itemId/parseItemId 互逆）。
- * 分集数据必须走 season 接口（剧接口只有 seasons[] 汇总，没有 episodes[]），见 tmdb.lookupSeason。
+ * 分集 Id = `{域}_{编号}_tv_s{n}_e{m}`（与 itemId/parseItemId 互逆）。
+ * 分集数据必须走 season 接口（剧接口只有 seasons[] 汇总，没有 episodes[]），见 metaBridge.lookupSeason。
  */
 async function getEpisodes(showId, requestedId, seasonId) {
   const denied = assertUser(requestedId);
   if (denied) return denied;
 
-  const show = tmdb.parseItemId(showId);
+  const show = metaBridge.parseItemId(showId);
   /* ⚠️ **路径里给「季 Id」也算数**（真机实测容错）：
    * 官方文档写的是 `Shows/{Id}/Episodes` 里 Id = **剧**，但真机（`emby.example.com`）实测
    * `Shows/{季Id}/Episodes?SeasonId={季Id}` **同样回 200**（212 条，与剧 Id 那条一模一样）——
@@ -1560,7 +1598,7 @@ async function getEpisodes(showId, requestedId, seasonId) {
   const pathSeason = show.season; // 路径给的是季 → 剧号与季号都从它来
 
   const empty = (log) => ({ status: 200, body: { Items: [], TotalRecordCount: 0 }, log });
-  const season = tmdb.parseItemId(seasonId);
+  const season = metaBridge.parseItemId(seasonId);
 
   let n = null;
   let seasonNote = '';
@@ -1568,21 +1606,21 @@ async function getEpisodes(showId, requestedId, seasonId) {
     n = pathSeason;
     /* 路径与 query 都给了季、且两边不一致时**以路径为准**（它就在请求路径上，更具体）——
      * 不一致这件事本身值得记一笔：说明客户端与本层的 Id 认知可能已经漂了。 */
-    if (season && season.season !== null && season.tmdbId === show.tmdbId && season.season !== pathSeason) {
+    if (season && season.season !== null && season.entryId === show.entryId && season.season !== pathSeason) {
       seasonNote = `（路径季 S${pathSeason} 与 SeasonId 的 S${season.season} 不一致，以路径为准）`;
     }
   } else {
     if (!season || season.season === null) {
       return empty(seasonId ? `SeasonId 认不出 → 空：${seasonId}` : '没有 SeasonId → 空');
     }
-    if (season.tmdbId !== show.tmdbId) return empty(`SeasonId 不是这个剧的季 → 空：${seasonId}`);
+    if (season.entryId !== show.entryId) return empty(`SeasonId 不是这个剧的季 → 空：${seasonId}`);
     n = season.season;
   }
-  const look = await tmdb.lookupSeason({ tmdbId: show.tmdbId, season: n, domain: show.domain });
-  if (!look.ok) return tmdbFailure(look.error, `tv/${show.tmdbId} S${n}`);
+  const look = await metaBridge.lookupSeason({ entryId: show.entryId, season: n, domain: show.domain });
+  if (!look.ok) return metaFailure(look.error, `tv/${show.entryId} S${n}`);
 
-  const showKey = tmdb.itemId(show.domain, 'tv', show.tmdbId);
-  const seasonKey = tmdb.itemId(show.domain, 'tv', show.tmdbId, n);
+  const showKey = metaBridge.itemId(show.domain, 'tv', show.entryId);
+  const seasonKey = metaBridge.itemId(show.domain, 'tv', show.entryId, n);
   const seasonName = look.item.name || `第 ${n} 季`;
 
   /* 不填 SeriesName：那要再打一次剧接口，而客户端是在剧/季页里发的这条请求，本来就知道剧名 */
@@ -1590,15 +1628,15 @@ async function getEpisodes(showId, requestedId, seasonId) {
     .filter((e) => Number.isFinite(e.episodeNumber))
     .map((e) => {
       const item = baseItem({
-        id: tmdb.itemId(show.domain, 'tv', show.tmdbId, n, e.episodeNumber),
+        id: metaBridge.itemId(show.domain, 'tv', show.entryId, n, e.episodeNumber),
         name: e.name || `第 ${e.episodeNumber} 集`,
         type: 'Episode',
         year: e.year,
         premiereDate: e.premiereDate,
         overview: e.overview,
         communityRating: e.rating,
-        providerIds: { [tmdb.providerIdKey(show.domain)]: String(show.tmdbId) },
-        posterUrl: tmdb.imageUrlOf(show.domain, 'w300', e.stillPath), // 集的 Primary 图是剧照（still_path），不是海报
+        providerIds: { [metaBridge.providerIdKey(show.domain)]: String(show.entryId) },
+        posterUrl: metaBridge.imageUrlOf(show.domain, 'w300', e.stillPath), // 集的 Primary 图是剧照（still_path），不是海报
       });
       item.IsFolder = false; // 集不是容器（baseItem 默认 true，这里必须改掉）
       item.IndexNumber = e.episodeNumber;
@@ -1672,20 +1710,24 @@ function applyRich(item, got, domain) {
    *
    * `Id` **必须给**：曾经刻意不给（"人物不是本层的条目，给了 Id 客户端就会去点、
    * 去要人物图片"），但真机**每条都带 Id**，缺它会让客户端的解码器**整条响应失败** ——
-   * 代价远大于收益。Id 用 TMDB 的人物 id（是**真 id**，不是编的）。
+   * 代价远大于收益。这条是**无条件的**：SenPlayer 只认"键在不在"，缺一条就整条详情报
+   * 「网络错误 / 当前媒体库不存在该项目」（Rex 容错所以看不出问题）—— 所以**插件没给
+   * `personId` 时也要补一个稳定派生 id**，不能把 `Id` 键整个省掉。
+   *   有插件给的人物 id（TMDB 域是 TMDB 人物号）就用它；没有（如 MissAV 的导演常没给）
+   *   就用 `p-<md5(域|名字)>` 派生，前缀 `p-` 与纯数字 id 不会撞，且同一人物稳定不变。
    *
-   * **顺带把人物头像也做通**：有 `profile_path` 的就给
+   * **顺带把人物头像也做通**：有 `profilePath` 的就给
    * `PrimaryImageTag`，走的还是**已有的图片端点** —— `tagAndRemember` 会把
    * 「人物id|Primary|0 → 图床地址」记进索引，客户端带不带 tag 都取得到（见 routes.js 的图片端点）。
-   * 没有头像的（`profile_path` 为空）就**不给** `PrimaryImageTag`，客户端因此不会去要（不承诺）。 */
+   * 没有头像的（`profilePath` 为空）就**不给** `PrimaryImageTag`，客户端因此不会去要（不承诺）。 */
   const people = [];
   const pushPerson = (p, extra) => {
     const one = Object.assign({ Name: p.name }, extra);
-    if (p.tmdbPersonId) {
-      one.Id = String(p.tmdbPersonId);
-      const avatar = p.profilePath ? tagAndRemember(one.Id, 'Primary', 0, tmdb.imageUrlOf(domain, 'w185', p.profilePath)) : '';
-      if (avatar) one.PrimaryImageTag = avatar;
-    }
+    one.Id = p.personId
+      ? String(p.personId)
+      : 'p-' + crypto.createHash('md5').update(String(domain || '') + '|' + String(p.name || '')).digest('hex').slice(0, 16);
+    const avatar = p.profilePath ? tagAndRemember(one.Id, 'Primary', 0, metaBridge.imageUrlOf(domain, 'w185', p.profilePath)) : '';
+    if (avatar) one.PrimaryImageTag = avatar;
     people.push(one);
   };
   for (const p of got.cast || []) pushPerson(p, { Role: p.role, Type: 'Actor' });
@@ -1707,14 +1749,14 @@ function applyRich(item, got, domain) {
    * 那就**不给**：发一条必 404 的死链比不发更糟（同"不知道就空字段"的口径）。
    * 哪天 Trakt 又支持了、或者能拿到它的 id，再加回来。 */
   const urls = [];
-  const isMovie = got.mediaType === 'movie';
+  const isMovie = got.type === 'movie';
   if (got.externalIds && got.externalIds.imdb) {
     urls.push({ Name: 'IMDb', Url: `https://www.imdb.com/title/${got.externalIds.imdb}` });
   }
-  /* 只给默认域（tmdb）的条目拼这一条：别的域（如 MissAV）的 `got.tmdbId` 装的是**它自己的编号**
-   * （如 `ssis-001`），拿它去拼 themoviedb.org 的链接是一条必 404 的假链。 */
-  if (got.tmdbId && domain === tmdb.DEFAULT_DOMAIN) {
-    urls.push({ Name: 'TheMovieDb', Url: `https://www.themoviedb.org/${isMovie ? 'movie' : 'tv'}/${got.tmdbId}` });
+  /* 只有 **tmdb 这条链**的条目才拼这一条外链（别的域如 MissAV 的 `got.entryId` 装的是
+   * **它自己的编号**，如 `ssis-001`，拿它去拼 themoviedb.org 的链接是一条必 404 的假链）。 */
+  if (got.entryId && domain === metaBridge.TMDB_DOMAIN) {
+    urls.push({ Name: 'TheMovieDb', Url: `https://www.themoviedb.org/${isMovie ? 'movie' : 'tv'}/${got.entryId}` });
   }
   if (!isMovie && got.externalIds && got.externalIds.tvdb) {
     urls.push({ Name: 'TheTVDB', Url: `https://thetvdb.com/?tab=series&id=${got.externalIds.tvdb}` });
@@ -1733,16 +1775,17 @@ function applyRich(item, got, domain) {
  *
  * 三处用它，形状必须一致（客户端都靠 `Id` 点进详情）：
  *   · `Items/{id}/Similar` 的相似推荐条目；
- *   · `Items?AnyProviderIdEquals=tmdb.{id}` 搜到的那一条（见 `getItems` 的搜索分支）；
+ *   · `Items?AnyProviderIdEquals={域}.{编号}` 搜到的那一条（见 `getItems` 的搜索分支）；
  *   · 首页模块给的列表项走 `homeItemDto()`（同样形状，只是数据来自插件）。
  */
 function leanItemDto(r) {
   /* 域决定三样：条目 Id 的前缀、`ProviderIds` 的键、图片基地址。
-   * 不给就用默认域（tmdb 那条老路：相似推荐、按外部 id 搜到的条目都走它）。 */
-  const domain = r.domain || tmdb.DEFAULT_DOMAIN;
-  const entryId = r.entryId === undefined || r.entryId === null ? r.tmdbId : r.entryId;
+   * 调用方都该显式给域（搜索行、相似推荐、播放项都带 `domain`）；真没给时再现算一个兜底域
+   * （见 `metaBridge.defaultDomain` —— 按实例配置/已启用插件现算，不是写死 tmdb）。 */
+  const domain = r.domain || metaBridge.defaultDomain();
+  const entryId = r.entryId;
   const item = baseItem({
-    id: tmdb.itemId(domain, r.type, entryId),
+    id: metaBridge.itemId(domain, r.type, entryId),
     /* 搜索命中的那一条没有库上下文 → 由调用方给兜底库（`defaultLibraryId()`）；相似推荐不给 */
     parentId: r.parentId,
     name: r.title,
@@ -1750,9 +1793,9 @@ function leanItemDto(r) {
     year: r.year,
     overview: r.overview,
     communityRating: r.communityRating,
-    providerIds: { [tmdb.providerIdKey(domain)]: String(entryId) },
-    posterUrl: tmdb.imageUrlOf(domain, 'w500', r.posterPath),
-    backdropUrl: tmdb.imageUrlOf(domain, 'w780', r.backdropPath),
+    providerIds: { [metaBridge.providerIdKey(domain)]: String(entryId) },
+    posterUrl: metaBridge.imageUrlOf(domain, 'w500', r.posterPath),
+    backdropUrl: metaBridge.imageUrlOf(domain, 'w780', r.backdropPath),
   });
   item.IsFolder = r.type === 'tv';
   /* 有就带上（相似推荐那份没有这几个键 → 不填，输出与以前一致） */
@@ -1763,23 +1806,24 @@ function leanItemDto(r) {
 }
 
 /**
- * 按 tmdb 坐标组装一条「剧 / 影」的 BaseItemDto —— **详情（`Items/{Id}`）用**。
+ * 按条目坐标组装一条「剧 / 影」的 BaseItemDto —— **详情（`Items/{Id}`）用**。
  *
- * 为什么单独放一份：客户端点进某一条时打的是 `/Users/{Id}/Items/{ItemId}`，那条**必须**能按 tmdb
- * 坐标把元数据反查回来（否则点进去就是 404）。这就是「点击条目 → TMDB 反查显示资源」里的"反查"那一环。
+ * 为什么单独放一份：客户端点进某一条时打的是 `/Users/{Id}/Items/{ItemId}`，那条**必须**能按
+ * 坐标把元数据反查回来（否则点进去就是 404）。这就是「点击条目 → 反查显示资源」里的"反查"那一环。
  *
  * ⚠️ 它比 `leanItemDto()` **重**（`rich: true`，一次带回分级/时长/演职/图集/相似）—— **只在详情用**；
  * 搜索/相似那些「列表项」用 `leanItemDto()`，别拿这个去凑数。
  *
- * `rich: true` —— 详情页要的那一批（分级/时长/标语/演职/公司/关键词/预告/图集/相似）**一次拿回**。
+ * 入参是面板中立坐标（域 + 该域的条目编号 + 类型）；翻译成 Emby 字段（`Id` / `Type` / `ProviderIds`…）
+ * 全在这一层做。
  */
-async function tmdbItemDto(type, tmdbId, domain = tmdb.DEFAULT_DOMAIN) {
-  const look = await tmdb.lookup({ type, tmdbId, rich: true, domain });
+async function richItemDto(type, entryId, domain = metaBridge.defaultDomain()) {
+  const look = await metaBridge.lookup({ type, entryId, rich: true, domain });
   if (!look.ok) return { ok: false, error: look.error };
 
   const got = look.item;
   const item = baseItem({
-    id: tmdb.itemId(domain, type, tmdbId),
+    id: metaBridge.itemId(domain, type, entryId),
     /* 详情/相似没有库上下文 → 用兜底库（见 defaultLibraryId）。列表项另有准确值。 */
     parentId: defaultLibraryId(),
     name: got.title,
@@ -1788,11 +1832,11 @@ async function tmdbItemDto(type, tmdbId, domain = tmdb.DEFAULT_DOMAIN) {
     premiereDate: got.premiereDate,
     overview: got.overview,
     communityRating: got.communityRating,
-    providerIds: { [tmdb.providerIdKey(domain)]: String(tmdbId) },
-    posterUrl: tmdb.imageUrlOf(domain, 'w500', got.posterPath),
-    backdropUrl: tmdb.imageUrlOf(domain, 'w780', got.backdropPath),
-    backdropUrls: (got.backdropPaths || []).map((p) => tmdb.imageUrlOf(domain, 'w780', p)),
-    logoUrl: tmdb.imageUrlOf(domain, 'w500', got.logoPath),
+    providerIds: { [metaBridge.providerIdKey(domain)]: String(entryId) },
+    posterUrl: metaBridge.imageUrlOf(domain, 'w500', got.posterPath),
+    backdropUrl: metaBridge.imageUrlOf(domain, 'w780', got.backdropPath),
+    backdropUrls: (got.backdropPaths || []).map((p) => metaBridge.imageUrlOf(domain, 'w780', p)),
+    logoUrl: metaBridge.imageUrlOf(domain, 'w500', got.logoPath),
   });
   item.OriginalTitle = got.originalTitle;
   item.Genres = got.genres;
@@ -1801,7 +1845,7 @@ async function tmdbItemDto(type, tmdbId, domain = tmdb.DEFAULT_DOMAIN) {
    * 电影必须显式改掉，否则客户端可能当目录去浏览而不是打开详情。 */
   item.IsFolder = type === 'tv';
   applyRich(item, got, domain);
-  /* 交给调用方的"搜源用名字"：主标题没中文时已在 lookup 里回退成中文别名（见 emby/tmdb.js） */
+  /* 交给调用方的"搜源用名字"：主标题没中文时已在 lookup 里回退成中文别名（见 emby/meta-bridge.js） */
   return { ok: true, item, searchTitle: got.searchTitle || got.title };
 }
 
@@ -1819,11 +1863,11 @@ async function getSimilar(itemId, requestedId, limit) {
   const denied = assertUser(requestedId);
   if (denied) return denied;
 
-  const p = tmdb.parseItemId(itemId);
+  const p = metaBridge.parseItemId(itemId);
   if (!p) return { status: 404, body: { error: '没有这个条目' }, log: `Id 认不出 → 404：${itemId}` };
 
-  const look = await tmdb.lookup({ type: p.type, tmdbId: p.tmdbId, rich: true, domain: p.domain });
-  if (!look.ok) return tmdbFailure(look.error, `${p.type}/${p.tmdbId}`);
+  const look = await metaBridge.lookup({ type: p.type, entryId: p.entryId, rich: true, domain: p.domain });
+  if (!look.ok) return metaFailure(look.error, `${p.type}/${p.entryId}`);
 
   /* 相似推荐是**同一个域**里的条目 → 把域带进每一行（推荐项自己没有域字段）。 */
   const all = (look.item.recommendations || []).map((r) => leanItemDto(Object.assign({}, r, { domain: p.domain })));
@@ -1832,7 +1876,7 @@ async function getSimilar(itemId, requestedId, limit) {
   return {
     status: 200,
     body: { Items: items, TotalRecordCount: items.length },
-    log: `${p.type}/${p.tmdbId} → ${items.length} 条相似${n !== all.length ? `（Limit=${n}，上游给了 ${all.length}）` : ''}`,
+    log: `${p.type}/${p.entryId} → ${items.length} 条相似${n !== all.length ? `（Limit=${n}，上游给了 ${all.length}）` : ''}`,
   };
 }
 
@@ -1847,7 +1891,7 @@ async function getSimilar(itemId, requestedId, limit) {
  *      挑同名条目，命中结果落到日志与 `ProviderIds.Catpaw` / `CatpawSource`。
  *
  * 实现上尽量不重复组装逻辑：季/集**复用列表实现**（`getSeasons` / `getEpisodes`）再挑出那一条；
- * 剧/影走 `tmdbItemDto()`（rich 版反查）—— 它是详情专用，别和列表项那套混。
+ * 剧/影走 `richItemDto()`（rich 版反查）—— 它是详情专用，别和列表项那套混。
  * 聚合只做补充：连不上 / 没配 → 元数据照常返回（日志写明原因），详情页不至于打不开。
  * 粒度说明：站源只有「剧」级条目（`vod_id` 是剧），**集的定位要等聚合层给 detail 契约**。
  */
@@ -1855,7 +1899,7 @@ async function getItem(itemId, requestedId, host = '') {
   const denied = assertUser(requestedId);
   if (denied) return denied;
 
-  const p = tmdb.parseItemId(itemId);
+  const p = metaBridge.parseItemId(itemId);
   if (!p) return { status: 404, body: { error: '没有这个条目' }, log: `Id 认不出 → 404：${itemId}` };
 
   /* ---- ① 元数据：按层级复用列表实现，再挑出这一条 ---- */
@@ -1864,9 +1908,9 @@ async function getItem(itemId, requestedId, host = '') {
   let year = '';
 
   if (p.season !== null) {
-    const showKey = tmdb.itemId(p.domain, 'tv', p.tmdbId);
+    const showKey = metaBridge.itemId(p.domain, 'tv', p.entryId);
     if (p.episode !== null) {
-      const out = await getEpisodes(showKey, requestedId, tmdb.itemId(p.domain, 'tv', p.tmdbId, p.season));
+      const out = await getEpisodes(showKey, requestedId, metaBridge.itemId(p.domain, 'tv', p.entryId, p.season));
       if (out.status !== 200) return out;
       found = (out.body.Items || []).find((i) => i.Id === itemId);
     } else {
@@ -1877,19 +1921,19 @@ async function getItem(itemId, requestedId, host = '') {
     /* 集/季两条列表都不含剧名，而搜索关键词要的就是剧名 → 这里必须问一次剧。
      * ⚠️ 搜源用的是 `searchTitle`（主标题没中文时回退中文别名），**不是** `title`：
      * 客户端看到的仍是被 TMDB 标成主标题的那个名字，但拿它去源里搜会一条都对不上
-     * （见 emby/tmdb.js 的 searchTitleOf）。 */
-    const show = await tmdb.lookup({ type: 'tv', tmdbId: p.tmdbId, domain: p.domain });
-    if (!show.ok) return tmdbFailure(show.error, `tv/${p.tmdbId}`);
+     * （见 emby/meta-bridge.js 的 searchTitleOf）。 */
+    const show = await metaBridge.lookup({ type: 'tv', entryId: p.entryId, domain: p.domain });
+    if (!show.ok) return metaFailure(show.error, `tv/${p.entryId}`);
     name = show.item.searchTitle || show.item.title;
     year = show.item.year;
   } else {
-    /* 剧 / 影：**直接按 tmdb 坐标反查**（rich 版）——
-     * 走到这里时客户端给的是本面板发出去的 Id（`tmdb_{id}_{movie|tv}`），坐标已在手里，不必再借列表绕一圈。
-     * 这一环就是「客户端点条目 → TMDB 反查显示资源」里的"反查"（见指南「五」）。
-     * ⚠️ 与检索那条的关系：`Items?AnyProviderIdEquals=tmdb.{id}` 是**反向**的一步
-     * （客户端只有 tmdb 号 → 问本面板要 Id），最终都会走到这里。 */
-    const look = await tmdbItemDto(p.type, p.tmdbId, p.domain);
-    if (!look.ok) return tmdbFailure(look.error, `${p.type}/${p.tmdbId}`);
+    /* 剧 / 影：**直接按域坐标反查**（rich 版）——
+     * 走到这里时客户端给的是本面板发出去的 Id（`{域}_{编号}_{movie|tv}`），坐标已在手里，不必再借列表绕一圈。
+     * 这一环就是「客户端点条目 → 元数据反查显示资源」里的"反查"（见指南「五」）。
+     * ⚠️ 与检索那条的关系：`Items?AnyProviderIdEquals={域}.{编号}` 是**反向**的一步
+     * （客户端只有上游编号 → 问本面板要 Id），最终都会走到这里。 */
+    const look = await richItemDto(p.type, p.entryId, p.domain);
+    if (!look.ok) return metaFailure(look.error, `${p.type}/${p.entryId}`);
     found = look.item;
     /* 同上面那条：搜源用 `searchTitle`（可能回退成中文别名），显示名仍旧是 `found.Name` */
     name = look.searchTitle || found.Name;
@@ -2517,7 +2561,7 @@ function isPlayable(type) {
   return PLAYABLE_TYPES.has(type);
 }
 
-/** Id 层面判断可播：集 = tv 带季集；电影 = movie 且不带季集（形状由 tmdb.parseItemId 保证） */
+/** Id 层面判断可播：集 = tv 带季集；电影 = movie 且不带季集（形状由 metaBridge.parseItemId 保证） */
 function isPlayableId(p) {
   if (!p) return false;
   return p.type === 'movie' ? p.season === null && p.episode === null : p.season !== null && p.episode !== null;
@@ -2540,7 +2584,7 @@ function locatorLabel(type, p) {
 }
 
 async function getPlaybackInfo(itemId, requestedId, host = '', token = '') {
-  const p = tmdb.parseItemId(itemId);
+  const p = metaBridge.parseItemId(itemId);
   if (!isPlayableId(p)) {
     return { status: 404, body: { error: '只有「集」和「电影」有播放信息' }, log: `Id 不是集/电影 → 404：${itemId}` };
   }
@@ -2589,7 +2633,7 @@ async function resolveStream(itemId, src, requestedId, clientHost) {
     if (denied) return denied;
   }
 
-  const p = tmdb.parseItemId(itemId);
+  const p = metaBridge.parseItemId(itemId);
   if (!isPlayableId(p)) {
     return { status: 404, body: { error: '只有「集」和「电影」能播' }, log: `Id 不是集/电影 → 404：${itemId}` };
   }
@@ -2850,7 +2894,7 @@ function imageTag(itemId, url) {
  * 缓存的条目 Id 要图、**后**才拉列表（时序：登录 → 4ms 后要图 → 213ms 后才拿到列表）。
  * ⇒ 只要图片位置只存在于 tag 里，这个客户端就永远取不到封面。
  *
- * **存的是「无头」值**：TMDB 图床的地址剥掉基地址只留相对路径（`tmdb.splitImageUrl`），
+ * **存的是「无头」值**：TMDB 图床的地址剥掉基地址只留相对路径（`metaBridge.splitImageUrl`），
  * 取的时候再拼当前基地址 —— 这样用户把图床换成镜像，索引**立刻跟着变**，不用等 TTL、不用清缓存。
  * 别处的绝对地址原样存。
  */
@@ -2860,7 +2904,7 @@ function tagAndRemember(itemId, type, index, url) {
   const key = `${itemId}|${String(type).toLowerCase()}|${Number(index) || 0}`;
   try {
     const cc = cache.cfg();
-    cache.putImage(key, tmdb.splitImageUrl(u) || u, cc.imageTtlMs, cc.imageMaxBytes);
+    cache.putImage(key, metaBridge.splitImageUrl(u) || u, cc.imageTtlMs, cc.imageMaxBytes);
   } catch {
     /* 索引写失败不该影响出 tag —— 客户端带 tag 时照样能取到图 */
   }
@@ -2882,7 +2926,7 @@ function imageUrlFromIndex(itemId, type, index) {
     return null;
   }
   if (!v) return null;
-  return v.includes('://') ? v : tmdb.joinImageUrl(v);
+  return v.includes('://') ? v : metaBridge.joinImageUrl(v);
 }
 
 /** `imageTag()` 的逆：验签 + 只收 http(s) —— 认不出 / 验不过一律 null（不猜、不放行） */

@@ -72,8 +72,9 @@ const bind = (ctx) => settings.setDataDir(ctx && ctx.dataDir);
 /** 影片页地址：`<站点>/<语言段>/<slug>` */
 const pageUrl = (c, slug) => `${settings.stripSlash(c.siteBase)}/${encodeURIComponent(c.language)}/${slug}`;
 
-/** 列表页地址：`<站点>/<语言段>/search/<urlencode(wd)>?page=1` */
-const searchUrl = (c, wd) => `${settings.stripSlash(c.siteBase)}/${encodeURIComponent(c.language)}/search/${encodeURIComponent(wd)}?page=1`;
+/** 列表页地址：`<站点>/<语言段>/search/<urlencode(wd)>?page=<页>`（页从 1 起） */
+const searchUrl = (c, wd, page) =>
+  `${settings.stripSlash(c.siteBase)}/${encodeURIComponent(c.language)}/search/${encodeURIComponent(wd)}?page=${Math.max(1, Number(page) || 1)}`;
 
 /**
  * 相似推荐（**单开一张缓存表**，见 `doLookup` 的说明）：取不到回空数组，只记一行日志。
@@ -142,15 +143,21 @@ async function doLookup(entryId, log) {
 
 /**
  * 按名字搜索 —— 走站点搜索页，归一成候选列表（每项带 `entryId` = slug）。
- * 查询词命中**番号形状**（`/^[A-Za-z]+-?\d+$/i`）时按番号精确过滤：
- * 两边去掉 `-` 后大写比较（照 `missav.js`），避免同名片混进来。
+ *
+ * **本层不过滤**：站点给什么就回什么。原型的"番号精确过滤"是**片源插件**用来选对片的手段
+ * （见 `plugins/source/missav`），元数据这一层是客户端找片的入口，滤掉候选只会让人搜不到 ——
+ * 例如 `fc2` 的站点结果是 `mfc-297` 这类编号，按番号逐字比对会把整批结果清成空。
+ *
+ * `page` 从 1 起（默认 1）—— 面板的搜索层要靠它**把客户端窗口填满**（见 `docs/plugin-contract.md`
+ * 「分页」一节）：只给第 1 页会让客户端拿到不足数的条目而不再翻页。
  */
-async function doSearch(wd) {
+async function doSearch(wd, page) {
   const q = String(wd || '').trim();
   if (!q) return { ok: true, rows: [] };
+  const p = Math.max(1, Number(page) || 1);
 
   const c = settings.read();
-  const key = `${c.language}|${q}`;
+  const key = `${c.language}|${q}|p${p}`;
   const hit = cache.get('names', key);
   if (hit) {
     try {
@@ -163,21 +170,12 @@ async function doSearch(wd) {
 
   let r;
   try {
-    r = await client.htmlOf(searchUrl(c, q), { siteBase: c.siteBase });
+    r = await client.htmlOf(searchUrl(c, q, p), { siteBase: c.siteBase });
   } catch (e) {
     return { ok: false, error: failFrom(e) };
   }
 
-  let rows = parse.parseList(r.text, c.imageBase);
-  if (/^[A-Za-z]+-?\d+$/i.test(q)) {
-    const want = q.toUpperCase().replace(/-/g, '');
-    rows = rows.filter((row) => {
-      const fromSlug = parse.videoCode(row.entryId).replace(/-/g, '');
-      const m = String(row.title || '').match(/^([A-Za-z]+-?\d+)/);
-      const fromTitle = m ? m[1].toUpperCase().replace(/-/g, '') : '';
-      return fromSlug === want || fromTitle === want;
-    });
-  }
+  const rows = parse.parseList(r.text, c.imageBase);
   /* 只存有结果的响应：负结果存了会让新上线的条目一直看不见 */
   if (rows.length) cache.put('names', key, JSON.stringify(rows), cache.NAME_TTL_MS);
   return { ok: true, rows };
@@ -255,7 +253,7 @@ const actions = {
   /** 搜索：按名字给候选（面板的搜索端点与首页插件都用它） */
   async search(args = {}, ctx) {
     bind(ctx);
-    return doSearch(args.wd);
+    return doSearch(args.wd, args.page);
   },
 
   /**

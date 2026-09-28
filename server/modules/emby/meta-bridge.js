@@ -1,33 +1,60 @@
 'use strict';
 /**
- * TMDB · **emby 专有那一层**（取数已经搬进元数据插件，这里只留 emby 才关心的东西）
+ * **emby 层与元数据插件打交道的那一层**（面板中立：本文件不认识某个具体域）
  *
- * 三件事：
+ * 四件事：
  *   ① `itemId` / `parseItemId` —— Emby 条目 Id 的派生与解析（形状由 `core/providers.js` 统一规定）；
  *   ② `httpStatusOf` —— 失败原因 → 该回给客户端的 HTTP 状态码；
  *   ③ **图片地址**：拼串、拆成"无头相对路径"、按当前基地址拼回来（图片的代取与签名在面板这边，
- *      见 docs/adr/0013）。图片基地址来自**元数据插件的域声明**（同步快照，见 `meta.declSync`），
- *      插件没在跑时用官方地址兜住。
+ *      见 docs/adr/0013）。图片基地址来自**元数据插件的域声明**（同步快照，见 `meta.declSync`）；
+ *   ④ **取数转发**：取元数据 / 取一季分集 / 按名字搜索 → 交给插件（面板不解析上游字段）。
  *
- * 取数三件事（取元数据 / 取一季分集 / 任意路径）转发给插件，并把插件那份**域中立的字段名**
- * 翻回这一层与 `service.js` 一直用的叫法（`entryId` → `tmdbId`、`type` → `mediaType`、
- * `personId` → `tmdbPersonId`）—— 这样 emby 层的 DTO 拼装一个字都不用改（本批的口径是"对外一致"）。
+ * 插件回的就是**面板的中立字段**（`entryId` / `type` / `personId`…，形状由插件契约第六节规定）
+ * —— 本层**不做任何改名**：`service.js` 直接消费这份中立形状，拼 DTO 时才翻成 Emby 的字段
+ * （`Id` / `Type` / `People[]`…）。即「插件负责上游 → 面板形状，emby 层负责面板形状 → Emby DTO」。
  *
- * **域是参数**：`itemId()` / `imageBase()` / `imageUrlOf()` / `providerIdKey()` 都按域取数，
- * 域由 `parseItemId` 从条目 Id 的前缀带出来（`p.domain`，转发那一侧是现成的）。
- * 字段名 `tmdbId` 是沿用下来的叫法，它装的其实是**该域自己的条目编号** ——
- * TMDB 是数字（`550`）、MissAV 是它那串 slug（`ssis-001`）。条目 Id 只透传这个编号，不解释它
+ * **域是参数，没有"默认域"**：`itemId()` / `imageUrlOf()` / `providerIdKey()` 都按域取数，
+ * 域由 `parseItemId` 从条目 Id 的前缀带出来（`p.domain`）。确实没传域时，由 `defaultDomain()`
+ * **按当前实例配置 / 已启用插件现算**（不再写死 tmdb）——装哪个域就用哪个域。
+ * 条目编号在这一层统一叫 `entryId`（与 `core/providers.js`、插件契约同一份词汇）——
+ * TMDB 时它是数字（`550`）、MissAV 时它是 slug（`ssis-001`），条目 Id 只透传这个编号，不解释它
  * （见 `core/providers.js` 与 docs/adr/0031）。
  */
 const providers = require('../../core/providers');
 const meta = require('./meta');
 const instance = require('./instance');
 
-/** 没指明域时的默认域：tmdb 这条链的老调用点最多，多域的调用点一律显式传域 */
-const DEFAULT_DOMAIN = 'tmdb';
-
-const DEFAULT_IMAGE_BASE = 'https://image.tmdb.org/t/p';
+/**
+ * TMDB 这个域的 id —— **只用于「本来就是 TMDB 专属」的那几处**，不是"全局默认域"：
+ *   · `themoviedb.org` 外链（只有 TMDB 的条目编号拼得出的才是真链）；
+ *   · 官方图床兜底 + 「用相对路径存图」这套约定（只有 TMDB 这条链用，别的域给整串 URL）。
+ * 除此之外没有任何地方该假设 tmdb 存在（见 `defaultDomain()`）。
+ */
+const TMDB_DOMAIN = 'tmdb';
+/** TMDB 官方图床：插件没声明 `imageBase` 时给 tmdb 域兜底用 */
+const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
 const stripSlash = (s) => String(s || '').replace(/\/+$/, '');
+
+/**
+ * 没显式给域时的兜底域 —— **现算，不写死**。
+ *
+ * 顺序：
+ *   ① 当前 Emby 实例限定的域里的第一个（`metaDomains[0]`）—— 实例自己选了搜哪些域，
+ *      那就是这台实例的"默认"；`metaDomains` 是空数组（显式不搜任何域）时如实回空；
+ *   ② 没实例上下文 → 取第一个**已装且启用**的元数据域；
+ *   ③ 一个都没有 → 空串（调用方据此如实报"没有可用的元数据域"，别硬编一个域去问）。
+ */
+function defaultDomain() {
+  const cur = instance.current();
+  if (cur && Array.isArray(cur.metaDomains)) return String(cur.metaDomains[0] || '');
+  const on = providers.list().find((p) => p.enabled);
+  return on ? on.prefix : '';
+}
+
+/** 「没有可用的元数据域」的统一错误（503：这台服务器现在给不出元数据，不是客户端要的东西有问题） */
+function noDomainError() {
+  return { code: 'NO_PLUGIN', status: 503, message: '没有可用的元数据域（没装或没启用元数据插件）' };
+}
 
 /**
  * 失败原因 → 该回给客户端的 HTTP 状态码。
@@ -52,7 +79,7 @@ function httpStatusOf(error) {
  *
  * 客户端拿到它当主键回查（详情 / 季集 / 图片 / 播放都只带 Id），所以它必须稳定：
  * 掺进"哪次搜索、哪个站点"就会因为源变动而变 Id，客户端缓存的「已看」会全丢。
- * 带 type 是因为 TMDB 里 tv 95350 与 movie 95350 是两条不同数据。
+ * 带 type 是因为同一个编号在 tv 与 movie 下是两条不同数据。
  *
  * 形状与拼装规则住在 `core/providers.js`（**认哪个前缀**由那张注册表说了算）。
  * 传了 season 就是季：`tmdb_95350_tv_s1`；再传 episode 就是集：`tmdb_95350_tv_s1_e3`
@@ -64,30 +91,28 @@ function itemId(domain, type, entryId, season, episode) {
 
 /**
  * itemId() 的逆 —— 必须与它互逆，所以紧挨着放（改格式时一眼能看到要一起改）。
- * 内部走注册表解析，这里只把结果翻译回 emby 层用的字段名（`tmdbId`），
- * 因此调用点（`emby/service.js` 里那二十来处）不用改。
+ * 内部走注册表解析，字段名沿用 `core/providers.js` 的中立形状（`entryId`），
+ * 只额外把 `prefix` 翻成 `domain`（聚合层按它解析"该用哪套模板"）。
  *
  * 认不出来 / 前缀没有对应的插件 / 条目编号为空或含非法字符 / 电影带季号 / 有集号却没有季号 → null。
  */
 function parseItemId(id) {
   const p = providers.parseItemId(id);
-  /* `domain` = 这个前缀（条目 Id 的前缀就是元数据域，见 docs/adr/0031）。
-   * 聚合层要拿它去解析"该用哪套模板"（见 docs/adr/0033），所以一并带出去。 */
-  return p ? { type: p.type, tmdbId: p.entryId, season: p.season, episode: p.episode, domain: p.prefix } : null;
+  return p ? { type: p.type, entryId: p.entryId, season: p.season, episode: p.episode, domain: p.prefix } : null;
 }
 
 /* ---------------------------------------------------------------- 图片 */
 
 /**
  * 该域当前生效的图片基地址：插件的域声明里那个。
- * 取不到时分两种：默认域（tmdb）用官方地址兜住；别的域**如实回空** ——
+ * 取不到时分两种：tmdb 域用官方地址兜住；别的域**如实回空** ——
  * 那些域给的是整串 URL（见 `imageUrlOf`），没有"基地址 + 相对路径"这一层可拼。
  */
-function imageBase(domain = DEFAULT_DOMAIN) {
+function imageBase(domain = TMDB_DOMAIN) {
   const decl = meta.declSync(domain);
   const own = stripSlash((decl && decl.imageBase) || '');
   if (own) return own;
-  return domain === DEFAULT_DOMAIN ? DEFAULT_IMAGE_BASE : '';
+  return domain === TMDB_DOMAIN ? TMDB_IMAGE_BASE : '';
 }
 
 /**
@@ -105,11 +130,12 @@ function imageUrlOf(domain, size, filePath) {
 }
 
 /**
- * 图片 URL → **无头相对路径**。只有当它确实在「默认域的图床基地址」或「官方基地址」之下时才拆，
- * 否则回 null（表示这是别处的绝对地址，原样存）。
+ * 图片 URL → **无头相对路径**。只有当它确实落在「tmdb 域的图床基地址」或「TMDB 官方基地址」
+ * 之下时才拆，否则回 null（表示这是别处的绝对地址，原样存）。
  *
- * **只认默认域（tmdb）**：别的域（如 MissAV 的封面站）给的是整串 URL，拆成相对路径之后
- * 读回来会按当前域的基地址重拼，而图片缓存里不带域 —— 拼错图床就是错图。那类一律原样存。
+ * **只认 tmdb**：别的域（如 MissAV 的封面站）给的是整串 URL，拆成相对路径之后读回来会按
+ * 当前的 tmdb 基地址重拼，而图片缓存里不带域 —— 拼错图床就是错图。那类一律原样存。
+ * （这条是「相对路径」这套约定本身的归属，不是"tmdb 是默认域"——见 TMDB_DOMAIN 那段。）
  *
  * **为什么要拆**：图片索引是落库的。若存完整 URL，用户把图床基地址换成镜像后，库里那批老地址
  * 就全指向旧图床了 —— 要等 TTL 过期才自愈。存相对路径、取时再拼当前基地址，**换镜像立刻生效**。
@@ -118,15 +144,15 @@ function imageUrlOf(domain, size, filePath) {
 function splitImageUrl(url) {
   const u = String(url || '');
   if (!/^https?:\/\//i.test(u)) return null;
-  for (const b of new Set([stripSlash(imageBase(DEFAULT_DOMAIN)), DEFAULT_IMAGE_BASE])) {
+  for (const b of new Set([stripSlash(imageBase(TMDB_DOMAIN)), TMDB_IMAGE_BASE])) {
     if (b && u.startsWith(b + '/')) return u.slice(b.length + 1);
   }
   return null;
 }
 
-/** `splitImageUrl` 的逆：用**当前**图片基地址把相对路径拼回完整 URL */
+/** `splitImageUrl` 的逆：用**当前**图片基地址把相对路径拼回完整 URL（相对路径这套归 tmdb 域） */
 function joinImageUrl(rel) {
-  return imageBase(DEFAULT_DOMAIN) + '/' + String(rel || '').replace(/^\/+/, '');
+  return imageBase(TMDB_DOMAIN) + '/' + String(rel || '').replace(/^\/+/, '');
 }
 
 /**
@@ -135,67 +161,86 @@ function joinImageUrl(rel) {
  */
 const PROVIDER_KEYS = { tmdb: 'Tmdb', missav: 'Missav' };
 function providerIdKey(domain) {
-  const d = String(domain || DEFAULT_DOMAIN).toLowerCase();
+  const d = String(domain || defaultDomain() || '').trim().toLowerCase();
+  if (!d) return 'Provider';
   return PROVIDER_KEYS[d] || d.replace(/^[a-z]/, (c) => c.toUpperCase());
+}
+
+/**
+ * 把客户端发来的**外部 id 引用前缀**认成一个已注册的元数据域（大小写不敏感）。
+ *
+ * 客户端的 `AnyProviderIdEquals` 是 `{前缀}.{编号}` 形状（Emby 惯例），前缀一般是域 id
+ * （`tmdb.550`、`missav.dldss-559`）。**认不出就回 null，不猜** —— 同搜索分派的口径：
+ * 认不出的前缀如实回空并点名（见 docs/plugin-contract.md）。
+ */
+function domainOfRef(prefix) {
+  const p = providers.byPrefixOf(prefix);
+  return p ? p.prefix : null;
 }
 
 /* ---------------------------------------------------------------- 取数（转发给元数据插件） */
 
 /**
- * 插件那份**域中立的字段名** → 这一层一直用的叫法。
- * 只翻这几个（面板侧别的代码读的就是它们）：`entryId` / `type` / `personId`。
+ * 当前 Emby 实例的 metaDomains 是否允许这个域。
+ *
+ * 实例上 `metaDomains` 有三种口径（见 instance.js 的 publicInstance）：
+ *   null / undefined —— 字段缺席，**不限域**（默认实例与老实例），放行；
+ *   空数组 `[]`      —— 显式"不允许任何域"，拒绝所有；
+ *   非空数组         —— 只有列出来的域才放行；
+ * 没有实例上下文（面板内部端点直接调本层）→ 也放行（面板自己不做域隔离）。
+ *
+ * 这条**是硬性契约**：客户端从一个实例里拿到的条目 id 前缀是 A，它就永远
+ * 属于 A 域 —— 实例既然选了允许的域，任何端点（搜索/详情/图片/播放）都不能
+ * 把不在清单里的域放进来。
  */
-function toInternal(item) {
-  if (!item || typeof item !== 'object') return item;
-  const out = Object.assign({}, item, { tmdbId: item.entryId, mediaType: item.type });
-  delete out.entryId;
-  delete out.type;
-  for (const key of ['cast', 'crew']) {
-    if (!Array.isArray(out[key])) continue;
-    out[key] = out[key].map((p) => {
-      const one = Object.assign({}, p, { tmdbPersonId: p.personId });
-      delete one.personId;
-      return one;
-    });
-  }
-  if (Array.isArray(out.recommendations)) {
-    out.recommendations = out.recommendations.map((x) => {
-      const one = Object.assign({}, x, { tmdbId: x.entryId });
-      delete one.entryId;
-      return one;
-    });
-  }
-  return out;
+function domainAllowed(domain) {
+  const inst = instance.current();
+  if (!inst) return true; // 没有实例上下文时放行（面板自用端点）
+  const only = inst.metaDomains;
+  if (only === null || only === undefined) return true; // 字段缺席 = 不限域
+  const want = String(domain || '').toLowerCase();
+  return Array.isArray(only) && only.some((d) => String(d).toLowerCase() === want);
 }
 
 /**
  * 反查一个条目 —— 单一实现，Emby 各端点都走这里。
  * 不抛异常：`{ ok: true, item }` 或 `{ ok: false, error: {code,status?,message} }`
  *
+ * `item` 是**插件契约的中立形状，原样返回**（`entryId` / `type` / `cast[].personId`…），
+ * 翻译成 Emby DTO 是 service.js 的事，这一层不改名。
+ *
  * withSeasons：把剧的 seasons[] 一并归一化挂到 item.seasons（季列表端点用）。
  * 默认关 —— 否则整包季数组会跟着条目一起回给客户端，纯噪声。
  * rich：详情页要的那一批（分级/时长/标语/演职/公司/关键词/预告/图集/相似）。
  */
-async function lookup({ type = 'tv', tmdbId, rich = false, withSeasons = false, domain = DEFAULT_DOMAIN } = {}) {
-  const out = await meta.lookup(domain, { entryId: tmdbId, type, rich, withSeasons });
+async function lookup({ type = 'tv', entryId, rich = false, withSeasons = false, domain = defaultDomain() } = {}) {
+  if (!domain) return { ok: false, error: noDomainError() };
+  if (!domainAllowed(domain)) {
+    return { ok: false, error: { code: 'DOMAIN_NOT_ALLOWED', status: 403, message: `实例未允许域 ${domain}` } };
+  }
+  const out = await meta.lookup(domain, { entryId, type, rich, withSeasons });
   if (!out.ok) return { ok: false, error: out.error };
-  return { ok: true, item: toInternal(out.item) };
+  return { ok: true, item: out.item };
 }
 
 /**
  * 反查某一季的分集 —— 面板侧不再认识 `/tv/{id}/season/{n}`，那是插件的事。
- * 与 `lookup()` 同一取向：不抛异常。
+ * 与 `lookup()` 同一取向：不抛异常、返回值保持插件契约的中立形状。
  */
-async function lookupSeason({ tmdbId, season, domain = DEFAULT_DOMAIN } = {}) {
-  const out = await meta.season(domain, { entryId: tmdbId, season });
+async function lookupSeason({ entryId, season, domain = defaultDomain() } = {}) {
+  if (!domain) return { ok: false, error: noDomainError() };
+  if (!domainAllowed(domain)) {
+    return { ok: false, error: { code: 'DOMAIN_NOT_ALLOWED', status: 403, message: `实例未允许域 ${domain}` } };
+  }
+  const out = await meta.season(domain, { entryId, season });
   if (!out.ok) return { ok: false, error: out.error };
-  return { ok: true, item: toInternal(out.item) };
+  return { ok: true, item: out.item };
 }
 
 /**
  * 按名字搜索 —— 给 emby 的搜索端点用。
  *
- * 走每个**已装且启用**的元数据域的「搜索」动作，按域顺序拼接（这一版只有一个域）。
+ * 走每个**已装且启用**的元数据域的「搜索」动作，按域顺序拼接。
  * **域还被当前实例限定**：实例上存了「搜索通过的域」（`instance.metaDomains`）时只走那些域；
  * 字段缺席（`null`）= 全部域，空数组 = 一个都不搜（见 `instance.js`）。
  * 失败**照实抛**（调用方按类型分别 catch，一个域失败不影响别的域）。
@@ -203,7 +248,7 @@ async function lookupSeason({ tmdbId, season, domain = DEFAULT_DOMAIN } = {}) {
  * ⚠️ 行里是**归一化字段**（`entryId` / `title` / `posterPath`…），不翻成上游那套叫法：
  * 消费方（`searchRowDto`）读的就是这几个名字 —— 面板不该懂上游的字段形状。
  */
-async function search(type, name) {
+async function search(type, name, page) {
   const cur = instance.current();
   /* 实例限定的域（小写，见 instance.normDomains）；null = 不限，即全部域 */
   const only = cur && Array.isArray(cur.metaDomains) ? cur.metaDomains.map((d) => String(d).toLowerCase()) : null;
@@ -232,19 +277,21 @@ async function search(type, name) {
   const out = [];
   for (const p of live) {
     // eslint-disable-next-line no-await-in-loop
-    const rows = await meta.search(p.prefix, type, name);
+    const rows = await meta.search(p.prefix, type, name, page);
     for (const r of rows || []) out.push(Object.assign({}, r, { domain: p.prefix }));
   }
   return out;
 }
 
 module.exports = {
-  DEFAULT_DOMAIN,
-  DEFAULT_IMAGE_BASE,
+  TMDB_DOMAIN,
+  TMDB_IMAGE_BASE,
+  defaultDomain,
   httpStatusOf,
   itemId,
   parseItemId,
   providerIdKey,
+  domainOfRef,
   lookup,
   lookupSeason,
   search,

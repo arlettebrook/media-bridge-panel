@@ -74,7 +74,7 @@ module.exports = function routes(r) {
       sites: sites.map((x) => Object.assign({}, x, { templates: usedBy.get(`${x.source}\u0001${x.key}`) || [] })),
       templates: tplList,
       domains: templates.domains(),
-      /* 已注册的元数据域（前缀就是域 id）。这一批只有内置的 tmdb；插件化之后由插件注册（见 docs/adr/0031） */
+      /* 已注册的元数据域（前缀就是域 id）—— 由元数据插件注册，面板这一层不认识具体域（见 docs/adr/0031） */
       providers: providers.list().map((x) => ({ id: x.id, prefix: x.prefix, label: x.label, series: x.series })),
     });
   });

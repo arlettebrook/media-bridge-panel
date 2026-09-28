@@ -25,6 +25,7 @@
 const crypto = require('crypto');
 const settings = require('./settings');
 const fetcher = require('./fetch');
+const cache = require('./cache');
 
 const API_BASE = 'https://api-drive.mypikpak.com/drive/v1';
 const AUTH_SIGNIN = 'https://user.mypikpak.net/v1/auth/signin';
@@ -493,8 +494,30 @@ async function waitTask(taskId, deadlineAt, opts = {}) {
   return '';
 }
 
-/** 一个文件 id → 带签名的播放地址（地址有时效，所以每次播放现取） */
+/**
+ * 播放直链的缓存存活期。
+ *
+ * PikPak 的直链**带签名、有时效**，但时效多久面板这边观察不到（面板只做 302，之后客户端
+ * 直连 CDN，CDN 的回应不会回到这里）—— 所以取一个**保守的短窗口**：客户端一次播放里
+ * 连番的 Range 请求都落在窗口内，能被同一条地址吃下；窗口外宁可重新解析一次，
+ * 也不冒「把过期地址钉在缓存里」的险。若实测链接更短，把它调小即可。
+ */
+const PLAY_URL_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * 一个文件 id → 带签名的播放地址。
+ *
+ * **带缓存**（表 `playurl`，键 = 网盘文件 id）：客户端一次播放会反复拉流 ——
+ * 面板每个 Range 请求都要解析一次地址，不缓存就每次都重新走一遍解析链、
+ * 每次落到**不同的 CDN 节点**（实测同一文件在 `dl-z01a-00XX` 各节点速度差异极大），
+ * 既慢又不稳。`opts.force` 跳过缓存，用于「明知手上那条坏了、要重取」的场合。
+ */
 async function getPlayUrl(fileId, opts = {}) {
+  const key = String(fileId || '').trim();
+  if (key && !opts.force) {
+    const hit = cachedPlayUrl(key);
+    if (hit && hit.url) return Object.assign({}, hit, { cached: true });
+  }
   const data = await apiRequest('GET', `files/${encodeURIComponent(fileId)}?_magic=2021&usage=CACHE&thumbnail_size=SIZE_LARGE`, null, opts);
   const file = data.file || data;
   let url = file.web_content_link || '';
@@ -506,13 +529,25 @@ async function getPlayUrl(fileId, opts = {}) {
     resolution = m.resolution || '';
   }
   if (!url) return null;
-  return {
+  const one = {
     name: file.name || '',
     url,
     size: Number(file.size) || 0,
     resolution,
     fileExtension: file.file_extension || '',
   };
+  /* 存进去的是干净的取值；`cached` 只在返回时附加，别把 true/false 一起落盘 */
+  if (key) cache.put('playurl', key, one, PLAY_URL_TTL_MS);
+  return Object.assign({}, one, { cached: false });
+}
+
+/** 读缓存：缓存出任何差错都不该影响取地址本身（插件未绑定数据目录时也不该炸） */
+function cachedPlayUrl(key) {
+  try {
+    return cache.get('playurl', key);
+  } catch {
+    return null;
+  }
 }
 
 /**

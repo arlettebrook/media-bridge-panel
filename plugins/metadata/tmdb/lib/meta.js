@@ -316,9 +316,9 @@ async function lookupSeason({ tmdbId, season } = {}) {
  * 查不到回空数组；失败**照实抛**（调用方决定是否降级）。走 `lib/tmdb.js` 的 `search()`，
  * 那里有「名字 → 结果」的落盘缓存，负结果不存。
  */
-async function search(type, name) {
+async function search(type, name, page) {
   const kind = type === 'movie' ? 'movie' : 'tv';
-  const rows = await client.search(kind, name);
+  const rows = await client.search(kind, name, { page });
   return (rows || [])
     .map((x) => {
       const d = String(x.release_date || x.first_air_date || '');

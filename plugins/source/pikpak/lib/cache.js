@@ -5,6 +5,11 @@
  * 布局：`data/cache/<表>/<md5(键)>.json`，一条一个文件，内容是 `{ key, at, ttl, value }`。
  *
  *   表 upstream  磁力站的**搜索页原文**（键里带基地址，换镜像后自然作别）
+ *   表 playurl   PikPak 的**播放直链**（键 = 网盘文件 id）——
+ *              直链带签名、有时效，所以 TTL 用**专门的短窗口**（见 pikpak.js 的 PLAY_URL_TTL_MS），
+ *              不跟 `upstream` 那张表的设置走。缓存它的意义：客户端一次播放会反复拉流
+ *              （每个 Range 请求都打一次面板的拉流端点），不缓存就会每次重新解析、
+ *              每次落到不同的 CDN 节点。
  *
  * 为什么不用面板那套 sqlite 缓存：插件是独立包，不能 require 面板任何代码；
  * 而这里的量级很小（一次查询一个文件），每条一个文件足以，还省掉库文件与句柄的事。
@@ -21,7 +26,7 @@ const path = require('path');
 const crypto = require('crypto');
 const settings = require('./settings');
 
-const TABLES = ['upstream'];
+const TABLES = ['upstream', 'playurl'];
 
 /** 扫一遍的节流：写入是高频动作，每次都全目录 stat 会把缓存变成负担 */
 const SWEEP_MIN_MS = 30 * 1000;

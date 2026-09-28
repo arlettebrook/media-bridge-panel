@@ -203,9 +203,12 @@ async function season(domain, args) {
   return v;
 }
 
-/** 搜索：成功回候选数组，失败**抛**（与面板原来那份 `search()` 同一取向，调用方决定怎么降级） */
-async function search(domain, type, wd) {
-  const r = await call(domain, 'search', { type, wd });
+/**
+ * 搜索：成功回候选数组，失败**抛**（与面板原来那份 `search()` 同一取向，调用方决定怎么降级）。
+ * `page` 从 1 起 —— 上游一页只有 20 条，调用方要靠它**把客户端窗口填满**（见 `getSearchItems`）。
+ */
+async function search(domain, type, wd, page) {
+  const r = await call(domain, 'search', { type, wd, page });
   if (!r.ok) {
     const e = new Error(r.error.message);
     e.code = r.error.code;

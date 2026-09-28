@@ -13,7 +13,7 @@
  * 「随机推荐」那一行额外声明了 `feed: 'random'` —— 客户端首页那条"只要推荐"的查询会路由到它，
  * 轮播图因此有素材（同 TMDB 示例插件的做法，见 `plugins/home/example/lib/rows.js`）。
  *
- * 翻页：站点自己每页 12 条，客户端把 `startIndex` / `limit` 原样透传进来，换算见 `pageOf` / `windowOf`。
+ * 翻页：站点自己每页 12 条，客户端把 `startIndex` / `limit` 原样透传进来，换算见 `listPage`。
  */
 const settings = require('./settings');
 const { getHtml } = require('./fetch');
@@ -113,6 +113,11 @@ const ROWS = [
       name: 'sort', title: '排序', type: 'enumeration', value: 'released_at',
       enumOptions: SORT_OPTIONS.map((p) => ({ title: p[0], value: p[1] })),
     }] },
+  { id: 'fc2', title: 'MissAV FC2 系列', functionName: 'listPage', cacheDuration: 3600,
+    params: [pathParam('/dm99/cn/fc2?sort=released_at'), {
+      name: 'sort', title: '排序', type: 'enumeration', value: 'released_at',
+      enumOptions: SORT_OPTIONS.map((p) => ({ title: p[0], value: p[1] })),
+    }] },
   { id: 'uncensored', title: 'MissAV 无码影片库', functionName: 'listPage', cacheDuration: 3600,
     params: [pathEnum('/dm621/cn/uncensored-leak', UNCENSORED_OPTIONS)] },
   { id: 'asian', title: 'MissAV 亚洲专区', functionName: 'listPage', cacheDuration: 3600,
@@ -142,24 +147,13 @@ const ROWS = [
 
 /* ─────────────────────────── 换算 ─────────────────────────── */
 
-/** 客户端窗口 → 站点页码 */
+/** 客户端窗口 → 站点页码（`startIndex` 落在站点哪一页） */
 function pageOf(ctx) {
   return Math.floor((ctx.startIndex || 0) / SITE_PAGE) + 1;
 }
 
-/**
- * 客户端窗口在站点**一页**里怎么切。
- *
- * 只取站点一页：窗口跨页时可能凑不满 `limit`（站点是 12 条一页，客户端要 20 条就只给 12 条，
- * 下一页补上）。`total` 是准的，客户端按**实际拿到的条数**往后推进，不影响翻页。
- * 想一次凑满就自己连着取几页 —— 那是插件自己的取舍（代价是多打上游）。
- */
-function windowOf(items, ctx) {
-  const start = ctx.startIndex || 0;
-  const size = ctx.limit > 0 ? ctx.limit : SITE_PAGE;
-  const offset = start % SITE_PAGE;
-  return items.slice(offset, offset + size);
-}
+/** 一次请求**最多**连取几页站点来填窗口 —— 防呆，别让 `Limit=1000` 把站点打穿 */
+const MAX_UPSTREAM_PAGES = 10;
 
 /**
  * 把行的入口路径拼成完整地址。`siteBase` 与路径都可能带查询串，
@@ -186,23 +180,43 @@ function applySort(url, sort) {
 /* ─────────────────────────── 处理器 ─────────────────────────── */
 
 /**
- * 跑一行：取站点一页 → 解析成 HomeItem[] → 按客户端窗口切一刀。
+ * 跑一行：按客户端窗口**连续取站点页** → 解析成 HomeItem[] → 切出这一页。
+ *
+ * ⚠️ **窗口必须填满**：站点一页只有 `SITE_PAGE`（12）条，只取一页时客户端要 20 条就只拿到 12 条，
+ * 而 Emby 客户端见到 `Items.Count < Limit` 就把这页当最后一页、**再也不翻页**（SenPlayer 6.2.1
+ * 实测如此；Rex 按实际条数推进才没暴露）。所以这里连着取，直到（去重后）攒够窗口或站点到底：
+ * `offset = start % SITE_PAGE` 是窗口在首批页里的落点，站点条目与去重后的次序基本一致，够用。
  *
  * 失败一律**照实抛**（面板记日志、客户端拿到失败码）—— 不编空数据冒充"库里没内容"。
- * `total` 取分页条上的总页数 × 每页条数；分页条没解析出来就按本页条数如实报。
+ * `total` 取分页条上的总页数 × 每页条数；分页条没解析出来就按手里条目数如实报。
  */
 async function listPage(ctx) {
   const cfg = settings.read();
-  const page = pageOf(ctx);
-  let url = buildUrl(cfg.siteBase, ctx.params.path, page);
-  if (ctx.params.sort) url = applySort(url, ctx.params.sort);
-
-  const html = await getHtml(url, { siteBase: cfg.siteBase, signal: ctx.signal });
-  const items = parseVideoList(html, { imageBase: cfg.imageBase });
-  const totalPages = parseTotalPages(html);
-  const total = totalPages > 0 ? totalPages * SITE_PAGE : items.length;
-
-  return { items: windowOf(items, ctx), total };
+  const start = Math.max(0, ctx.startIndex || 0);
+  const size = ctx.limit > 0 ? ctx.limit : SITE_PAGE;
+  const offset = start % SITE_PAGE;
+  const first = pageOf(ctx);
+  const want = offset + size; // 去重后攒够这些才够切出这一页
+  const all = [];
+  const seen = new Set();
+  let totalPages = 0;
+  for (let page = first; page < first + MAX_UPSTREAM_PAGES; page++) {
+    let url = buildUrl(cfg.siteBase, ctx.params.path, page);
+    if (ctx.params.sort) url = applySort(url, ctx.params.sort);
+    // eslint-disable-next-line no-await-in-loop
+    const html = await getHtml(url, { siteBase: cfg.siteBase, signal: ctx.signal });
+    const items = parseVideoList(html, { imageBase: cfg.imageBase });
+    totalPages = parseTotalPages(html) || totalPages;
+    for (const it of items) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      all.push(it);
+    }
+    if (items.length < SITE_PAGE) break; // 站点这一页没满 ⇒ 到底了
+    if (all.length >= want) break; // 攒够窗口
+  }
+  const total = totalPages > 0 ? totalPages * SITE_PAGE : all.length;
+  return { items: all.slice(offset, offset + size), total };
 }
 
 /* ─────────────────────── 随机推荐（接客户端的推荐查询） ─────────────────────── */
