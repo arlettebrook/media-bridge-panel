@@ -17,10 +17,10 @@ const settings = require('./settings');
  *
  * 与本项目**对客户端的自称保持一致**：`System/Info/Public` 回的就是
  * `ProductName: "Emby Server"` + `Version: "4.8.0.0"`（见 `modules/emby/service.js` 的 `EMBY_VERSION`）。
- * 对外（TMDB / 聚合层）用同一副面孔，避免一边自称 Emby、一边以 `node` 裸奔。
+ * 对外（元数据上游 / 聚合层）用同一副面孔，避免一边自称 Emby、一边以 `node` 裸奔。
  *
  * ⚠️ **如实说明**：这个串是**按惯例取的**，不是从真机 Emby 抓来的 ——
- * 真实 Emby 服务端是 .NET `HttpClient`，默认**不带** `User-Agent`，无从抓取它调 TMDB 时发的是什么。
+ * 真实 Emby 服务端是 .NET `HttpClient`，默认**不带** `User-Agent`，无从抓取它调上游时发的是什么。
  * 所以不要把它当成"和真机一模一样"。要改就改这一处（调用方自己传了 UA 则以调用方为准）。
  *
  * 为什么要设：不设的话 Node 内置 fetch 会发 `user-agent: node` —— 那是**零信息量**的默认值，

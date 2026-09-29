@@ -7,9 +7,9 @@
  *   ① 起停：`spawn` 一个常驻进程（入口是 `runner.js`），把它的 stdout/stderr 转进面板日志；
  *   ② 通话：`call(type, id, action, args)` —— 发 `{ id, action, args }`，等 `{ id, ok, … }`，
  *      带**每次调用的超时**（超时**不杀进程**：插件慢不等于它坏了）；
- *   ③ 看护：进程自己退出时，**启用中的**插件按退避策略重启（最多 5 次 / 5 分钟），
- *      每次重启都在日志里点名 —— 不静默；
- *   ④ 观测：状态（在不在跑、pid、重启次数、最近一次错误）。
+ *   ③ 看护：进程自己退出只**如实记账**（状态转 `stopped`、退出码写进 `lastError` 并进日志）——
+ *      **不自动重启**：崩了就崩了，想让它继续跑就回管理页点「启动」；
+ *   ④ 观测：状态（在不在跑、pid、最近一次错误）。
  *
  * ⚠️ "面板停、插件就停"由**宿主**保证：`stopAll()` 直接终止子进程，不依赖插件配合
  * （插件**自己**再起的实例，仍由它在收到停止指令时自行清理 —— 见契约里的 `shutdown` 义务）。
@@ -23,9 +23,6 @@ const contract = require('./contract');
 
 /** 每次调用插件的默认超时（毫秒）。插件慢不等于坏，所以超时只影响**这一次**调用 */
 const DEFAULT_CALL_TIMEOUT_MS = 20000;
-/** 自动重启的退避：最多多少次、在多长窗口内 */
-const RESTART_MAX = 5;
-const RESTART_WINDOW_MS = 5 * 60 * 1000;
 /** 启动后多久还没报 ready 就当起不来（进程会留着，但状态标成"没就绪"） */
 const READY_TIMEOUT_MS = 15000;
 /** SIGKILL 之后还愿意等多久（等不到就放弃等待，不无限挂着调用方） */
@@ -62,7 +59,6 @@ function start(type, id) {
       id,
       status: 'broken',
       lastError: (e && e.message) || String(e),
-      restarts: (cur && cur.restarts) || 0,
     });
     running.set(sid, st);
     log(`✘ 插件起不来 ${logTag(type, id)}：${st.lastError}`);
@@ -86,8 +82,6 @@ function start(type, id) {
     actions: [],
     startedAt: Date.now(),
     lastError: '',
-    restarts: (cur && cur.restarts) || 0,
-    lastRestartAt: (cur && cur.lastRestartAt) || 0,
     inflight: new Map(),
     seq: 0,
     /** 主动停的标记：用来区分"宿主叫它停"与"它自己崩了" */
@@ -155,37 +149,14 @@ function start(type, id) {
     st.pid = null;
     st.status = 'stopped';
     if (!st.stopping) {
+      /* 崩了就是崩了：**不自动重启**（要它继续跑就回管理页点「启动」） */
       st.lastError = `进程退出（code=${code} sig=${signal}）`;
       log(`✘ 插件进程退出 ${logTag(type, id)}：${st.lastError}`);
-      maybeRestart(st);
     }
   });
 
   log(`↻ 插件启动中 ${logTag(type, id)}（v${entry.version}，pid ${proc.pid}）`);
   return { ok: true, state: stateOf(type, id) };
-}
-
-/** 崩溃后的自动重启：只有"启用中"的插件才重启，且受退避上限约束 */
-function maybeRestart(st) {
-  const entry = store.get(st.type, st.id);
-  if (!entry || !entry.enabled) return;
-  const now = Date.now();
-  if (now - st.lastRestartAt > RESTART_WINDOW_MS) st.restarts = 0; // 窗口过了，重新计数
-  if (st.restarts >= RESTART_MAX) {
-    log(`✘ 插件连续退出 ${st.restarts} 次，不再自动重启 ${logTag(st.type, st.id)}（去管理页看日志，或先禁用它）`);
-    return;
-  }
-  st.restarts += 1;
-  st.lastRestartAt = now;
-  const delay = Math.min(30000, 1000 * Math.pow(2, st.restarts - 1)); // 1s / 2s / 4s …
-  log(`↻ 插件将在 ${Math.round(delay / 1000)} 秒后自动重启（第 ${st.restarts} 次）${logTag(st.type, st.id)}`);
-  setTimeout(() => {
-    const e2 = store.get(st.type, st.id);
-    if (!e2 || !e2.enabled) return;
-    const cur = running.get(st.sid);
-    if (cur && cur.proc) return; // 已经又起来了
-    start(st.type, st.id);
-  }, delay).unref?.();
 }
 
 /**
@@ -253,8 +224,6 @@ function stopAll() {
 /** 重启：**等旧进程真的退出**再起新的（见 `stop()` 的说明） */
 async function restart(type, id) {
   await stop(type, id);
-  const st = running.get(keyOf(type, id));
-  if (st) st.restarts = 0; // 手动重启：把退避计数清零（这是"宿主让它重起"，不是崩溃）
   await new Promise((r) => setTimeout(r, 200)); // 让端口/管道彻底松开一点再起
   return start(type, id);
 }
@@ -318,7 +287,6 @@ function stateOf(type, id) {
     status: st ? st.status : 'stopped',
     pid: (st && st.pid) || null,
     actions: (st && st.actions) || [],
-    restarts: (st && st.restarts) || 0,
     uptimeMs: st && st.startedAt && st.status === 'running' ? Date.now() - st.startedAt : 0,
     lastError: (st && st.lastError) || '',
     inflight: st ? st.inflight.size : 0,

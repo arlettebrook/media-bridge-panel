@@ -188,7 +188,7 @@ function cookieHeader(token, req) {
  * 还有那个专门记 501 的 `ANY /api/emby/*rest` 通配），漏一个就是**客户端直接 401**；
  * 而"面板自己那几条"是有限的、由本项目维护 —— 所以**默认放行、只拦这几条**。
  *
- * ⚠️ 已移除两条：`/api/emby/tmdb/`（TMDB 设置与测试搬到 `/api/panel/tmdb/test`）
+ * ⚠️ 已移除两条：元数据设置与测试那条（随插件化搬到**元数据插件自己的设置页**）
  * 与 `/api/emby/cache`（缓存跨两个库了，用量/清空搬到 `/api/panel/cache`）——
  * 而 `/api/panel/*` 本来就在下面那条"一律要登录"里，不必再列。
  */

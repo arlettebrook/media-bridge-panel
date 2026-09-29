@@ -178,7 +178,7 @@ async function detail(ref, args) {
  * 与上面那三个的区别：那三个的 `ref` 是「插件 id / 实例 id」（面板知道实例 id），
  * 这一个的 `ref` 是**插件自己的东西**（面板只把它当一串不透明文本）。
  * 客户端主机名（`clientHost`）要一起给过去 —— 本地部署的实例回的是回环地址，
- * 插件要拿它拼成"客户端够得着"的地址（见 plugins/source/catpaw/lib/address.js）。
+ * 插件要拿它拼成"客户端够得着"的地址（这一步归源插件）。
  */
 async function play(ref, args) {
   const { pluginId } = splitRef(ref);

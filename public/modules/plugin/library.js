@@ -122,12 +122,7 @@ export async function renderPluginLibrary(v) {
         el('span', { class: 'spacer' }),
         el('button', { class: 'btn mini', text: '刷新', title: '重新拉一次清单（绕过后端 60 秒缓存）', onclick: () => load(true) })
       ),
-      el('div', { class: 'row' }, el('label', { class: 'chk', title: '装完立刻启用（起它的进程）' }, enableCb, '装完就启用')),
-      el('div', {
-        class: 'note',
-        /* 手动那条路在另一页，这里点一句就够，别把它也搬过来（两页各管一种"从哪拿包"） */
-        text: '装的是仓库里的包，校验两道（包的 md5 + 包内清单逐个文件的 md5）。要装本地的 .tar.gz，到「插件 → 管理」页手动安装。',
-      })
+      el('div', { class: 'row' }, el('label', { class: 'chk', title: '装完立刻启用（起它的进程）' }, enableCb, '装完就启用'))
     );
     if (d.error) head.append(el('div', { class: 'hint warn', text: '清单取不到：' + d.error }));
     else if (d.generatedAt) head.append(el('div', { class: 'note', text: '索引生成于 ' + fmtTime(d.generatedAt) }));

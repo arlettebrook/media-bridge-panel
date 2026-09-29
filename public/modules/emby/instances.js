@@ -89,13 +89,7 @@ function introCard() {
     el('h3', { text: 'Emby 实例' }),
     el('p', {
       class: 'note',
-      text: '每个实例有自己的端口、自己的账号与观看进度（各一个库文件，互不相通）、自己选的一套首页插件。',
-    }),
-    el('p', {
-      class: 'note',
-      text:
-        '客户端「添加服务器 / 添加媒体服务器」时填**这一行上的连接地址**（「复制」一键拿走）；' +
-        '账号在「Emby → 账号」页里按实例建。端口被占用不影响面板本身 —— 那一行会标红并写明原因。',
+      text: '多个实例等于多个 Emby 服务器。',
     })
   );
 }
@@ -171,14 +165,12 @@ function instanceRow(inst) {
         })
   );
 
-  /* 第二行：这一实例的规模 + 状态说明（错误 / 没选首页 / 停用都写在这里，红字那句用 err-note） */
+  /* 第二行：这一实例的规模 + 状态说明（错误 / 停用都写在这里，红字那句用 err-note） */
   const stats = `${inst.accountCount} 个账号 · ${inst.sessionCount} 个在线会话 · ${inst.viewCount} 个媒体库 · 搜索域：${domainsBrief(inst)}`;
   if (inst.error) {
     row.append(el('div', { class: 'err-note', text: `没在监听：${inst.error} —— 换个端口，或把占用那个端口的程序停掉，再来点「编辑」保存一次。` }));
   } else if (!inst.enabled) {
     row.append(el('div', { class: 'note', text: `${stats}。这个实例已停用，不在监听 —— 客户端连不上（数据还在）。` }));
-  } else if (!inst.homePlugin) {
-    row.append(el('div', { class: 'note', text: `${stats}。⚠️ 还没选首页插件 —— 客户端登录后**媒体库是空的**，在上面那个下拉里挑一个。` }));
   } else {
     row.append(el('div', { class: 'note', text: stats }));
   }
@@ -273,17 +265,11 @@ function openEditor(inst) {
   modal({
     title: isNew ? '新增 Emby 实例' : `编辑「${inst.name}」`,
     body: [
-      el('div', { class: 'field' }, el('label', { text: '实例名（客户端「服务器列表」里显示的就是它）' }), name),
+      el('div', { class: 'field' }, el('label', { text: '实例名（客户端「服务器名」）' }), name),
       el('div', { class: 'field' }, el('label', { text: '端口' }), port),
       el('div', { class: 'field' }, el('label', { text: '首页插件（= 这个实例的媒体库）' }), sel),
-      el('div', { class: 'field' }, el('label', { text: '搜索通过哪些元数据域（客户端搜索会问这些域；默认全选）' }), picker.row),
+      el('div', { class: 'field' }, el('label', { text: '接受的元数据域内容' }), picker.row),
       el('label', { class: 'chk' }, enabled, '启用（启用才会在这个端口上监听）'),
-      el('p', {
-        class: 'note',
-        text:
-          '端口留空就从 8090 起自动挑一个空闲的（被占了就 +1），面板本体端口不能占用；' +
-          '改端口之后客户端要用新地址重连一次。' + (isNew ? '新实例的账号是空的 —— 建完到「Emby → 账号」页里加。' : ''),
-      }),
       tip,
     ],
     actions: [

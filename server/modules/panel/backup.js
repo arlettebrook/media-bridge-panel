@@ -34,7 +34,10 @@ const TOP_SKIP = new Set(['app', 'cache']);
 
 /** 缓存路径 —— 可随时删掉重建，不进备份 */
 function isCache(rel) {
-  if (rel === 'emby/cache.db') return true;
+  /* ⚠️ `-wal` / `-shm` 是 sqlite 的旁文件，**跟着 `cache.db` 一起排除**：`cache.db` 都排除了，
+   * 旁文件留着没有意义（它们是那份缓存的写前日志与共享内存），白占体积
+   * （实测这一份就有 4MB），而且运行中被拷走也不保证一致。 */
+  if (rel.startsWith('emby/cache.db')) return true;
   /* 插件自己的缓存固定放在它的 `data/cache` 下（见各插件 lib/cache.js 的约定） */
   return /^plugins\/[^/]+\/[^/]+\/data\/cache(\/|$)/.test(rel);
 }
@@ -49,11 +52,17 @@ function skipEntry(rel, isDir) {
 
 /**
  * 采集数据卷 → zip 字节。
- * 返回 `{ buffer, files, bytes, exportedAt }`（`files`/`bytes` 不含 manifest 本身）。
+ * 返回 `{ buffer, files, size, contentBytes, exportedAt }`。
+ *
+ * ⚠️ **`size` 与 `contentBytes` 是两回事，别拿错**：
+ *   · `size`         = **包的实际字节数**（`buffer.length`）—— 界面显示"多大"用它，与下载到的文件一致；
+ *   · `contentBytes` = 内容**未压缩**字节和 —— 只作记录（zip 会压缩，实测 64.7MB 的内容打包成 19.6MB，
+ *     差三倍多；早期把它当包大小显示出去，界面上就对不上）。
+ * `files` 不含 manifest 本身。
  */
 function exportAll() {
   const entries = zip.dirEntries(DATA_DIR, { skip: skipEntry });
-  const bytes = entries.reduce((n, e) => n + e.data.length, 0);
+  const contentBytes = entries.reduce((n, e) => n + e.data.length, 0);
   const exportedAt = new Date().toISOString();
   const manifest = {
     service: 'catpaw-panel',
@@ -61,10 +70,11 @@ function exportAll() {
     version: String(pkg.version || ''),
     exportedAt,
     files: entries.length,
-    bytes,
+    contentBytes,
   };
   entries.push({ name: MANIFEST, data: Buffer.from(JSON.stringify(manifest, null, 2)) });
-  return { buffer: zip.buildZip(entries), files: manifest.files, bytes, exportedAt };
+  const buffer = zip.buildZip(entries);
+  return { buffer, files: manifest.files, size: buffer.length, contentBytes, exportedAt };
 }
 
 /**

@@ -216,7 +216,7 @@ module.exports = function routes(r) {
    *       keys（限定站点，`{source,key}[]`）/ `source`+`site`+`vodId`（快路径：已知绑定就直查，跳过搜索）/
    *       minScore + maxItems（打分阈值与"最多留几条"，不传读设置）
    *       —— **没有 `all` 了：命中的站一律全取**（见 service.aggregateDetail）
-   *       判据是 `match.js` 的打分（不再有 TMDB 反查）
+   *       判据是 `match.js` 的打分（不再有上游反查）
    * 一律 200（每站的成败在 `sites[].ok` / `error` 里）—— 与 search 同一风格；
    * 只有"调用方搞错了"（没给 name、没配源、没勾站点）才 400。
    */

@@ -15,8 +15,8 @@
  *   · 「概览」       面板重启 + 退出登录（整机动作，见 overview.js）
  *   · 「关于」       版本与更新 + 关于（"看看而已"，见 renderPanelAbout）
  *
- * ⚠️ **TMDB 设置不在这里**了：token / 基地址 / 语言 / 它自己的缓存都归**元数据插件**
- * （插件 → tmdb → 设置，见 plugins/metadata/tmdb/）。面板只从插件的「注册」动作里拿图片基地址。
+ * ⚠️ **元数据设置不在这里**了：token / 基地址 / 语言 / 它自己的缓存都归**元数据插件**
+ * （插件 → 该插件 → 设置）。面板只从插件的「注册」动作里拿图片基地址。
  */
 import { el, toast, fmtTime, codeBlock, modal, confirmModal } from '../../core/dom.js';
 import { api } from '../../core/api.js';
@@ -271,11 +271,7 @@ function aboutCard() {
     el('h3', { text: '关于' }),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '名称' }), name),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '版本' }), ver),
-    el('div', { class: 'kv' }, el('span', { class: 'k', text: '代码仓库' }), repo),
-    el('p', {
-      class: 'note',
-      text: '面板按这个仓库的 Release 更新（资产 + sha256 校验，见上面「版本与更新」）；每个版本的更新说明都写在该 Release 页与仓库的 CHANGELOG 里。',
-    })
+    el('div', { class: 'kv' }, el('span', { class: 'k', text: '代码仓库' }), repo)
   );
 
   api('/api/panel/info')
@@ -306,9 +302,11 @@ function backupCard() {
   /* 隐藏的 file input：点「选择文件还原」时打开系统选文件框 */
   const fileInput = el('input', { type: 'file', accept: '.zip,application/zip', class: 'hidden' });
 
+  /* 下载文件名 = **品牌短标识 + 时间戳**（与项目名一致；前缀只从 BRAND 取，别写死 ——
+     后端 `Content-Disposition` 里用的是同一份 branding 的 slug） */
   function fileName(d) {
     const p = (n) => String(n).padStart(2, '0');
-    return `catpaw-panel-backup-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.zip`;
+    return `${BRAND.slug}-backup-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.zip`;
   }
 
   /* 导出的是 zip 字节，不走 api()（那条封装一律按 JSON 解析）—— 直接 fetch 取 blob 下载。
@@ -336,10 +334,11 @@ function backupCard() {
       a.remove();
       URL.revokeObjectURL(url);
       const files = Number(res.headers.get('X-Backup-Files')) || 0;
-      const bytes = Number(res.headers.get('X-Backup-Bytes')) || 0;
       const at = res.headers.get('X-Backup-Exported-At');
+      /* 显示的大小用 **blob 的实际字节数** —— 就是落到磁盘上那个文件的大小，不会与它不一致
+         （后端 `X-Backup-Size` 是同一个数；曾用"内容未压缩字节和"显示，比真实包大三倍多）。 */
       out.className = 'note';
-      out.textContent = `已导出 ${name}（${files} 个文件 / ${fmtBytes(bytes)}，不含缓存）${at ? ' · ' + fmtTime(at) : ''}`;
+      out.textContent = `已导出 ${name}（${files} 个文件 / ${fmtBytes(blob.size)}，不含缓存）${at ? ' · ' + fmtTime(at) : ''}`;
       toast('已导出 ' + name);
     } catch (e) {
       out.className = 'note err-note';
@@ -405,10 +404,10 @@ function backupCard() {
       class: 'note',
       text:
         '备份会打成一个 zip 包，包含数据卷里的全部数据：设置、模板、插件（含插件包与插件自己的数据）、' +
-        'Emby 账号与播放进度。不含缓存（可随时重建）与应用代码（可从 Release 重新取得）。' +
-        '还原会用 zip 里的数据整项覆盖当前数据卷，请先导出当前备份留档；覆盖后需重启面板才生效（「概览」页的「面板重启」）。',
+        'Emby 账号与播放进度。不含缓存。' +
+        '还原会用 zip 里的数据整项覆盖当前数据卷，请先导出当前备份留档；覆盖后需重启面板才生效。',
     }),
-    el('div', { class: 'note err-note', text: '备份含账号与插件凭证（如网盘 cookie/token），请妥善保管这份文件。' }),
+    el('div', { class: 'note err-note', text: '备份可能含账号与密码，请妥善保管这份文件。' }),
     el('div', { class: 'toolbar' }, exportBtn, pickBtn, picked, fileInput),
     out
   );
@@ -431,7 +430,7 @@ function fmtBytes(n) {
  * 与 `data/cache/lines.db`（线路结果 + 按插件的聚合耗时）。用量显示、清空、上限一把抓才可能不出错，
  * 所以设置、按钮、端点在面板层（`GET|DELETE /api/panel/cache`）。
  * ⚠️ **插件自己的缓存不在这里**：元数据、源插件的取数缓存都随插件走，归插件自己管
- * （插件 → tmdb → 设置、插件 → 源 → 设置）。
+ * （插件 → 该插件 → 设置、插件 → 源 → 设置）。
  */
 function cacheCard() {
   const c = (S.panel.settings || {}).cache || {};
@@ -552,15 +551,8 @@ function cacheCard() {
     el('p', {
       class: 'note',
       text:
-        '缓存图片索引：客户端不带 tag 来要图时靠它答出"这张图在哪儿"，也让面板少找一次上游；' +
-        '另有一层「线路结果」缓存：把「这部片在源里有哪些线路、这一集定位到哪一条」存起来（客户端点一次播放会连问三遍同一件事，' +
-        '靠它省掉后两遍）；还有「站点测速」那份统计（站点表里那两列速度就是它）。清空不影响账号，也不用重新登录。',
-    }),
-    el('p', {
-      class: 'note',
-      text:
-        '天数填 0 = 不缓存；上限填 0 = 不限（不淘汰）。两个 0 意思不一样，别当成一回事。' +
-        '「线路结果」勾了长期有效就不按天数过期（改了站点勾选 / 分数线这类设置会立刻换一份新的，不会读到旧结论）。',
+        '天数填 0 = 不缓存；上限填 0 = 不限（不淘汰）。' +
+        '「线路结果」勾了长期有效就不按天数过期（改了模板设置就会失效）。',
     }),
     el(
       'div',
@@ -697,13 +689,7 @@ function speedTestSection(v) {
           ),
           el('label', { class: 'chk', title: '多久测一轮，1~168 小时；改完从现在重新计时' }, hours, '小时'),
           save
-        ),
-        el('div', {
-          class: 'note',
-          text:
-            '测速是"这台机器与这条网络"的体检，与内容偏好无关 —— 所以不跟模板走，测速的结果也是面板级共享的一份。' +
-            '这里只管自动测速；要立刻测一轮，去「聚合 · 模板」页点「立即测速」。',
-        })
+        )
       )
     );
   })().catch((e) => v.append(el('div', { class: 'hint warn', text: '读取测速设置失败：' + e.message })));

@@ -1,7 +1,7 @@
 'use strict';
 /**
  * 聚合模块 · 「聚合搜索」页：一个关键字并发打多源多站，结果按站点顺序拼接（不去重）。
- * 两种结果显示：合并视图（renderMerged）与分站诊断（renderBySite）。
+ * 结果只有**合并视图**一种摆法（renderMerged，不设视图开关）。
  *
  * **打分匹配**：搜索这一步就给每条结果打分（口径见 `server/modules/agg/match.js`）：
  *   · 搜索行里带**电影 / 剧集**这次要的是哪种，以及**季 / 集 / 年份**（"要哪一部"的坐标，与关键字同属搜索参数）；
@@ -24,7 +24,7 @@
  * 不经过这个页面。这里用来回答"这个名字为什么一条都没命中""某个站到底回了什么""客户端点开
  * 这个条目会看到哪些线路"。
  */
-import { el, toast, modal, codeBlock } from '../../core/dom.js';
+import { el, toast, modal } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { ensureAggSites, ensureTemplates } from '../../core/store.js';
@@ -63,7 +63,7 @@ export async function renderAgg(v) {
 
   /* ---- 电影 / 剧集：这次要的是哪种 ----
    * 它决定两件事（都是"客户端会怎么要这部片"的形状）：
-   *   ① 必填项：**剧集必须填季与集**（客户端是按 TMDB 的季集号来要片子的，缺了定位不到那一集）；
+   *   ① 必填项：**剧集必须填季与集**（客户端是按上游的季集号来要片子的，缺了定位不到那一集）；
    *      电影不问季集 —— 客户端对电影是按「每条线路的全部播放项」列的；
    *   ② 弹窗用哪套取法：电影走 `pick: 'items'`，剧集按季集定位（见 docs/adr/0022）。 */
   const kind = S.aggKind === 'movie' ? 'movie' : 'tv';
@@ -88,8 +88,8 @@ export async function renderAgg(v) {
     inp.addEventListener('input', () => (S[key] = inp.value));
     return inp;
   };
-  const seasonInput = numInput('aggSeason', '', 0, 99, '剧集必填：客户端是按 TMDB 的季号来要片子的；源里集名的季号对不上会判「季不同」', 'w-xs');
-  const episodeInput = numInput('aggEpisode', '', 0, 9999, '剧集必填：想让这一集「能定位到」就必须填它（客户端是按 TMDB 的集号来要片子的）', 'w-xs');
+  const seasonInput = numInput('aggSeason', '', 0, 99, '剧集必填：客户端是按上游的季号来要片子的；源里集名的季号对不上会判「季不同」', 'w-xs');
+  const episodeInput = numInput('aggEpisode', '', 0, 9999, '剧集必填：想让这一集「能定位到」就必须填它（客户端是按上游的集号来要片子的）', 'w-xs');
   const yearInput = numInput('aggYear', '', 1900, 2100, '打分用：年份权重最低（0.1），填错也不会一票否决', 'w-xs');
 
   /**
@@ -212,7 +212,7 @@ export async function renderAgg(v) {
   /* 搜索行：**模板 + 电影/剧集 + 关键字 +（剧集才有的）季/集 + 年份 + 按钮**全是"这次要搜什么"的参数，
    * 摆在一起。（季集年份曾是按钮下面单独一行；它们与关键字同属搜索参数，放在搜索按钮之前更贴合语义。） */
   /* 模板选择器：**这条搜索用哪套模板** —— 站点与参数（分数线 / 条数 / 超时 / 并发 / 线路过滤）全从它来。
-   * 不按"域"选：域 → 模板那份对照是**客户端**那条路要的（Emby 按 `tmdb` 这类前缀问，见 docs/adr/0033），
+   * 不按"域"选：域 → 模板那份对照是**客户端**那条路要的（Emby 按元数据域前缀问，见 docs/adr/0033），
    * 面板上直接挑模板更直白，也少一步"这属于哪个域"的心算。
    * 放在搜索行最前面：它是这一页的**前提**，比关键字更靠前。 */
   const tplSel = el('select', { title: '这条搜索用哪套模板：站点与参数都来自它' });
@@ -241,13 +241,12 @@ export async function renderAgg(v) {
   /* 调试开关：低频，另起一行。
    * 分数线 / 最多几条**这一页不再填** —— 它们与站点、超时、并发同属"这一套模板"的调优项，
    * 改一处就行（「聚合设置 · 模板」）；上游第几页也不填 —— 客户端那条路**固定只取上游第 1 页**
-   * （见 `plugins/source/catpaw/index.js` 的搜索动作与 `server/modules/emby/service.js` 的注释），
+   * （见源插件的搜索动作与 `server/modules/emby/service.js` 的注释），
    * 这里翻页只会看到客户端拿不到的结果。 */
   const optRow = el(
     'div',
     { class: 'toolbar' },
     el('label', { class: 'chk', title: '忽略模板里勾的站点，改用全部标了"可搜索"的站点（调试用）' }, useAllCb, '全量站点'),
-    el('span', { class: 'note', text: '分数线与条数按模板来 —— 「聚合设置 · 模板」里调' }),
     el('span', { class: 'spacer' })
   );
 
@@ -278,10 +277,7 @@ export async function renderAgg(v) {
     r.match ? el('span', { class: 'badge ok', text: `命中 ${r.match.matched}`, title: '会被用来取版本的那几条（≤ 最多几条）' }) : null,
     missed ? el('span', { class: 'badge', title: missTitle, text: `没进 ${missed}` }) : null,
     stats.failed ? el('span', { class: 'badge err', text: `${stats.failed}站失败` }) : null,
-    el('span', { class: 'badge', text: `${r.elapsedMs} ms` }),
-    el('span', { class: 'spacer' }),
-    el('button', { class: 'btn mini' + (S.aggView === 'merged' ? ' active' : ''), text: '合并视图', onclick: () => { S.aggView = 'merged'; renderPage(); } }),
-    el('button', { class: 'btn mini' + (S.aggView === 'sites' ? ' active' : ''), text: '分站诊断', onclick: () => { S.aggView = 'sites'; renderPage(); } })
+    el('span', { class: 'badge', text: `${r.elapsedMs} ms` })
   );
 
   v.append(searchRow, optRow, bar);
@@ -299,8 +295,7 @@ export async function renderAgg(v) {
       })
     );
   }
-  if (S.aggView === 'merged') renderMerged(v, r, showItemVersions);
-  else renderBySite(v, r);
+  renderMerged(v, r, showItemVersions);
 }
 
 /**
@@ -325,16 +320,6 @@ function openVersionsModal(title, d, opts = {}) {
       el('div', {
         class: 'hint',
         text: '电影取法：每条线路的全部播放项各列成一个版本（同一部片的多个压制版本都会出现）。',
-      })
-    );
-  }
-  if (opts.filterRaw) {
-    body.push(
-      el('div', {
-        class: 'note',
-        text:
-          `线路过滤 /${opts.filterRaw}/ 生效中：只有匹配的线路会进客户端的版本列表。` +
-          '这份弹窗显示的是原始线路（不过滤），下面每条会标出它"进不进"。',
       })
     );
   }
@@ -406,7 +391,6 @@ function openVersionsModal(title, d, opts = {}) {
     }
     body.push(box);
   }
-  body.push(el('div', { class: 'note', text: '这份就是 Emby 客户端点开该条目时拿到的形状（detail → 线路 → 定位到这一集）。' }));
   modal({ title: '版本 · ' + title, body, actions: [{ label: '关闭', primary: true }] });
 }
 
@@ -436,7 +420,6 @@ function renderMerged(v, r, onVersions) {
     return;
   }
   const dupMap = aggDupMap(r);
-  v.append(el('div', { class: 'sec-title', text: `结果 · 按 ${sites.length} 个站源分组（命中的排前面，未去重）` }));
 
   for (const s of sites) {
     const raw = (s.data && s.data.list) || [];
@@ -536,50 +519,4 @@ function toggleRaw(btn, obj) {
   }
   btn.classList.add('active');
   parent.querySelector('.agg-body').append(el('pre', { class: 'json raw-json', text: JSON.stringify(obj, null, 2) }));
-}
-
-/** 分站诊断：每站一行成败 + 发出去的请求（**不回显响应体** —— 要看内容去「合并视图」） */
-function renderBySite(v, r) {
-  const sites = r.sites || [];
-  v.append(el('div', { class: 'sec-title', text: `分站诊断（${sites.length} 个站源）` }));
-
-  for (const s of sites) {
-    /* 请求里打的是**该条目所属实例**的地址（多源下不能拿别的实例的地址去拼）。
-     * 面板自己不再知道源地址，这一串是插件在站点清单里报上来的，**只为诊断显示**。 */
-    const src = (S.aggSources || []).find((x) => x.id === s.source);
-    const baseUrl = (src && src.url) || '';
-    const box = el('div', { class: 'site-group' });
-    box.append(
-      el(
-        'div',
-        { class: 'site-head' },
-        el('span', { class: 'dot ' + (s.ok ? 'running' : 'error') }),
-        el('span', { class: 'chip tag', text: (s.sourceName ? s.sourceName + ' · ' : '') + (s.name || s.key) }),
-        el('span', { class: 'badge mono', text: `${s.source}/${s.key}` }),
-        el('span', { class: 'badge mono', text: s.api || '' }),
-        el('span', { class: 'badge' + (s.ok ? ' ok' : ' err'), text: s.ok ? `${((s.data && s.data.list) || []).length} 条 · ${s.ms}ms` : s.error || '失败' }),
-        s.http ? el('span', { class: 'badge', text: 'HTTP ' + s.http }) : null
-      )
-    );
-    box.append(
-      codeBlock({
-        label: '请求（每站首次搜索前还会先 POST {api}/init，已缓存则跳过）',
-        code: JSON.stringify(
-          {
-            method: 'POST',
-            url: baseUrl + (s.api || '') + '/search',
-            /* 站源只认 `wd` + `page`（协议就这两个参数）；季集/年份/阈值那些是**面板自己打分**用的，
-             * 不会带给站源 —— 打错了会以为"源不支持"，所以这里照实写清楚。 */
-            body: { wd: r.wd, page: r.page },
-            panelMatch: r.match
-              ? { 分数线: r.match.minScore || '不筛选', 最多: r.match.maxItems || '不封顶', 命中: r.match.matched, 未命中: Math.max(0, r.match.scanned - r.match.matched) }
-              : null,
-          },
-          null,
-          2
-        ),
-      })
-    );
-    v.append(box);
-  }
 }

@@ -2,14 +2,14 @@
 /**
  * 插件模块的路由（面板侧的管理面）。
  *
- *   GET    /api/plugins                        列表：已装插件的状态（含重启次数 / 动作清单）
+ *   GET    /api/plugins                        列表：已装插件的状态（含动作清单）
  *   GET    /api/plugins/library                **插件库**：插件仓库的清单 + 已装状态标注
  *   POST   /api/plugins/library/install        **从插件库装**：body `{ type, id, version?, enable? }`
  *   POST   /api/plugins/install                手动安装：body `{ tarball: base64(tar.gz), md5?, enable? }`
  *   DELETE /api/plugins/:type/:id              卸载（`?keepData=1` 保留它的 data/）
  *   POST   /api/plugins/:type/:id/enable       启用（起进程）
  *   POST   /api/plugins/:type/:id/disable      停用（停进程；**插件自己起的东西由它自己清**）
- *   POST   /api/plugins/:type/:id/restart      重启（手动重启会把自动重启的退避计数清零）
+ *   POST   /api/plugins/:type/:id/restart      重启（停干净再起）
  *   POST   /api/plugins/:type/:id/call         手发一条动作（排障用；面板不解释动作与参数）
  *   GET    /api/plugins/:type/:id/ui/*         插件的 webui 静态文件
  *   ANY    /api/plugins/:type/:id/api/*        **纯转发**给插件：转成动作 `http`

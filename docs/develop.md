@@ -6,10 +6,11 @@
 相关文档：
 
 - 分层、依赖方向与数据流：[ARCHITECTURE.md](../ARCHITECTURE.md)
-- 插件契约（插件能做什么、面板怎么调它）：[plugin-contract.md](plugin-contract.md)
 - Emby 协议对齐：[emby-compat.md](emby-compat.md)
-- 首页插件开发：[emby-home-plugin.md](emby-home-plugin.md)
 - 设计决策记录：[adr/](adr/)
+- 插件（契约、首页插件规范、源码与打包工具）：**另一个仓库**
+  [media-bridge-plugins](https://github.com/dlushu/media-bridge-plugins) ——
+  本仓库的 `docs/plugin-contract.md` 等四份文档只剩一条指路。
 
 ## 目录
 
@@ -38,11 +39,12 @@
 | GET | `/api/modules` | 模块总览：每个模块的 `apiPrefix`、`upstream` 与当前 `upstreamUrl` |
 | GET/PUT/DELETE | `/api/modules/:id/settings` | 读写/重置某模块的设置（新增模块不需要改动此端点） |
 | GET | `/api/panel/info` | 版本、Node、数据目录、模块列表，以及**仓库地址**（`repo` / `repoUrl` —— 面板「设置 → 关于」与 Release 链接用它，唯一来源是 `panel/update.js` 的 `REPO`，`APP_REPO` 可覆盖） |
-| GET | `/api/panel/backup` | 导出**数据备份**：回一份 zip 字节（`Content-Type: application/zip`），含设置、模板、插件（包本体 + 插件数据）、Emby 账号与播放进度；**不含**缓存与应用代码 `app/`。摘要（文件数 / 字节 / 导出时间）放在 `X-Backup-*` 响应头 |
+| GET | `/api/panel/backup` | 导出**数据备份**：回一份 zip 字节（`Content-Type: application/zip`），含设置、模板、插件（包本体 + 插件数据）、Emby 账号与播放进度；**不含**缓存与应用代码 `app/`（`cache.db` 连同它的 `-wal`/`-shm` 旁文件一起排除）。摘要放在 `X-Backup-*` 响应头：`X-Backup-Files`（文件数）/ `X-Backup-Size`（**包的实际字节数**，不是内容未压缩字节和）/ `X-Backup-Exported-At`；文件名前缀取品牌短标识（`branding.slug`） |
 | POST | `/api/panel/restore` | 用备份 zip 还原：请求体是**原始二进制**（`Content-Type: application/zip`）。解包校验 `manifest.json` 后把顶层项逐个覆盖回 `DATA_DIR`，还原后需重启面板生效 |
 | GET/DELETE | `/api/panel/cache` | 看面板侧两份缓存的用量 / 清空（线路结果与图片索引） |
 | GET | `/api/panel/update` | 版本与更新状态：`{managed, current, latest, hasUpdate, repo, source, appRoot, runningDir, installed[], previous, error}`。查最新 Release 有 60 秒缓存，失败把原因写进 `error` 而不抛 |
 | POST | `/api/panel/update` | 安装某个版本并请求重启：`{version?}`（省略则装最新）。装完写 `<DATA_DIR>/app/.restart` 并向自身发 `SIGTERM` 走正常关闭流程，由容器引导脚本拉起新版本。`managed:false`（非引导脚本托管）时返回 400 |
+| POST | `/api/panel/restart` | 只重起**应用进程**（容器不动，版本不变）：受托管时写 `<DATA_DIR>/app/.restart` 再退出，由引导脚本按 `current.json` 拉起同一版本；**非托管时退出前自拉起**一个同代码的副本（见 [ADR-0038](adr/0038-self-relaunch-when-unmanaged.md)）。带文件看护的启动方式（`npm run dev` / `node --watch`、nodemon）如实回 400 —— 那套自己会重起子进程，与自拉起叠加会抢端口 |
 | GET/DELETE | `/api/logs` | 面板日志的内存缓冲：读最近 N 条 / 清空 |
 
 ### 插件宿主（plugin）
@@ -55,21 +57,23 @@
 | POST | `/api/plugins/install` | 装一个本地包（`tar.gz` 的 base64 + 可选的包 md5；包里 `plugin.json` 声明了 `files` 就逐文件核对）。任一道对不上 → **400** |
 | DELETE | `/api/plugins/:type/:id` | 卸载：停进程、删插件目录（含它自己的 `data/`） |
 | POST | `/api/plugins/:type/:id/enable` / `disable` | 启用（立刻起进程）/ 停用 |
-| POST | `/api/plugins/:type/:id/restart` | 重启（手动重启会把自动重启的退避计数清零） |
+| POST | `/api/plugins/:type/:id/restart` | 重启（停干净再起） |
 | POST | `/api/plugins/:type/:id/call` | **动作调用**：`{action, args?, timeoutMs?}` → 插件的回答（面板不解释，原样转回） |
 | GET | `/api/plugins/:type/:id/ui/*rest` | **托管插件自带的 webui** 静态文件（编码过的路径穿越 → 400） |
 | ANY | `/api/plugins/:type/:id/api/*rest` | **转发通道**：把请求转成插件的一条动作调用（GET/POST 都通，body 是 UTF-8 字符串、`contentType` 一并转过去） |
 
-- 插件跑在**常驻子进程**里、走**管道**（Node child IPC）通信；宿主负责启停、健康、日志转发、
-  崩溃重启（最多 5 次 / 5 分钟）。契约见 [plugin-contract.md](plugin-contract.md)，
+- 插件跑在**常驻子进程**里、走**管道**（Node child IPC）通信；宿主负责启停、健康与日志转发；
+  进程自己退出只**如实记账，不自动重启**（见 [ADR-0037](adr/0037-no-plugin-auto-restart.md)）。
+  契约在插件仓库：[plugin-contract.md](https://github.com/dlushu/media-bridge-plugins/blob/main/docs/plugin-contract.md)；
   决策见 [ADR-0028](adr/0028-plugin-system.md) 与 [ADR-0029](adr/0029-plugin-channel-and-actions.md)。
 - `/ui/*` 与 `/api/*` 两条都在 `/api/` 下 ⇒ **天然受面板门禁**。
-- **插件不随面板发行**（见 [ADR-0035](adr/0035-plugin-library.md)）：Release 包里没有 `plugins/`，
+- **插件不随面板发行**（见 [ADR-0035](adr/0035-plugin-library.md)）：Release 包里没有插件，
   装完零插件；插件由「插件库」页从 `dlushu/media-bridge-plugins`（`PLUGIN_REPO` 可换）
   取包安装，或在管理页上传 `.tar.gz`。两条入口只差 `origin`（`library` / `manual`），
   卸载都**只在本机生效、重启不会装回来**（原先的开机同步内置插件已删除）。
-- 仓库里的包与 `index.json` 由 `node tools/plugin-pack.js --out <插件仓库工作目录>` 产出
-  （打包时给包里的 `plugin.json` 注入 `files` 逐文件 md5）。
+- **插件源码与打包工具都在插件仓库**（本仓库不再有 `plugins/` 与 `tools/plugin-pack.js`）：
+  `node tools/plugin-pack.js <类型>/<id>` 打一个、`--all` 全量重建，`index.json` 按 `packages/`
+  里现有的包重算。
 
 ### 聚合层（agg）
 
@@ -101,7 +105,7 @@ emby 层直接 `require` 该模块而**不经过 HTTP**（原因见 [ARCHITECTUR
 - 两道闸门：
   - **名字硬拒** —— 清洗后无公共主干，或相似度 < 0.5，直接出局（用于拦掉 `斗破苍穹4：逃亡` 这类同系列不同作品）；
   - **分数线** —— `minScore`，**填 0 = 不做分数线筛选**，此时只按分数排名取前 `maxItems` 条。
-- 早期实现为「名字完全相等，否则将候选名交给 TMDB 反查 tmdbId」，失败点在输入侧：站源标题常含更新话术与
+- 早期实现为「名字完全相等，否则把候选名交给上游反查条目编号」，失败点在输入侧：站源标题常含更新话术与
   画质标注（如 `斗破苍穹年番4更211[2025][动漫]`），直接检索无法命中 ⇒ 版本列表为空
   （在 Emby 中表现为「条目在、点开没有版本」）。本地打分不需要外部依赖，且能说明「为什么是这一条」。
 - **阈值与条数进模板**（`matchMinScore` 默认 0.85 / `matchMaxItems` 默认 8 / `matchExtraK` 默认 0，
@@ -294,7 +298,7 @@ module.exports = {
   `emby` 经 `emby/meta.js` 转元数据插件、经 `emby/home/index.js` 转首页插件。转接处只有这两处。
 - **响应即「站点 key → 原样输出」**：`sites[key].data` 就是该站 `/search` 的原样响应体，不复制、不裁剪、
   不去重；前端按站点 key 分组渲染，同名条目显示「同名 ×N」角标（前端本地按相同归一化规则统计，仅作提示）。
-- **可回溯**：聚合搜索页可直接查看响应 JSON；「分站诊断」逐站展示请求与**站源原样响应体**，便于逐层对照排查。
+- **可回溯**：聚合搜索页里每条结果都能展开**原样响应里的那一条**（`原始条目`），便于逐层对照排查。
 - **并发池**：默认 8 并发、单站 5 秒超时、取详情 10 秒（模板里可改，下限 1000ms / 并发 1~32）；
   单站失败不影响整体，结果里带每站 `ok`/`ms`/`error`。
 - **首次搜索先 `/init`**：按「地址 + 站点 key」缓存，避免每次搜索都多一次请求。
@@ -303,7 +307,7 @@ module.exports = {
 ## 注意
 
 - 站源接口全部是 **POST + JSON body**（`/init` `/home` `/category` `/detail` `/play` `/search`），
-  只有 `/config`、`/check` 是 GET。这些协议细节在**源插件内部**（`plugins/source/catpaw/lib/protocol.js`），
+  只有 `/config`、`/check` 是 GET。这些协议细节在**源插件内部**（各自的源码目录下），
   面板不再解析。
 - 插件包的**两道 md5 校验**（见 [ADR-0015](adr/0015-source-bundle-integrity.md)）：
   ① 包本身的 md5（发布方给的那个，可省）；② 清单里 `files` 声明的**逐个文件** md5。
@@ -322,16 +326,15 @@ module.exports = {
   - 网络层归类为：连不上 `502` / 超时 `504` / 未配 token `500` / id 不合法 `400`。
   - 「如实回空」的端点不校验账号，见 [ADR-0009](adr/0009-unauthenticated-empty-responses.md)。
 - Emby 条目 `Id` 由**元数据域坐标**派生（`{域前缀}_{条目 id}_{tv|movie}[_s{n}][_e{m}]`，
-  如 `tmdb_95396_tv_s1_e3`），**不含源信息** —— 客户端拿它当主键缓存，掺入「哪个站点」会因源变动而改变
+  如 `{域}_{编号}_tv_s1_e3`），**不含源信息** —— 客户端拿它当主键缓存，掺入「哪个站点」会因源变动而改变
   Id、丢失「已看」。认哪个前缀由 `core/providers.js` 这张注册表说了算（元数据插件申报，见
   [ADR-0031](adr/0031-metadata-by-domain.md)）；认不出就如实返回 null（调用方照 404 处理）。
   - `条目 id → 站点 vod_id` 的绑定留给后续实现（播放时才需要）。
   - 派生与解析是一对（`providers.itemId` / `providers.parseItemId`），代码中相邻放置。
-- 元数据（TMDB）：设置**归元数据插件自己**（`plugins/metadata/tmdb/data/settings.json`：
-  token / 基地址 / 语言 / 它自己的缓存），UI 是插件自带的 webui 设置页。
-  - 面板只从插件的「注册」动作里拿**图片基地址**（替客户端取图要拼串，见 `emby/meta.js`）。
-  - 凭证只支持 **v4 API Read Access Token**（`Authorization: Bearer`，明文落盘）；
-    `apiBase` / `imageBase` 留空即官方地址，可换成反向代理。
+- 元数据插件：设置**归元数据插件自己**（其数据目录下的 `settings.json`：
+  凭证 / 基地址 / 语言 / 它自己的缓存），UI 是插件自带的 webui 设置页。
+  - 面板只从插件的「注册」动作里拿**图片基地址与外链**（替客户端取图要拼串，见 `emby/meta.js`）。
+  - 凭证与端点地址一概由元数据插件自己解释（明文落盘）；基地址留空即上游官方地址，可换成反向代理。
   - 插件的设置页有「测试连接」，会用**当前未保存**的输入值实查一个 id 并回显。
 - Emby 账号（**多个**客户端登录账号）：存 `data/emby/emby.db`（Node 内置 sqlite，文件权限 600），
   密码只存 **scrypt 哈希**，遗忘后只能删除重建。

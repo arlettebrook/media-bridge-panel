@@ -21,8 +21,11 @@
  * ⚠️ **这些"部署/数据标识"不要跟着改**（改名时容易一并换掉，换了就要重部署或使客户端掉线）：
  *   · docker-compose 的服务/容器名 `catpaw-panel`、具名卷 `catpaw_panel-data`
  *   · 登录 cookie 名 `catpaw_panel`（改了所有客户端都要重新登录）
- *   · 前端 `localStorage` 的 `catpaw-panel.nav-collapsed`、备份文件名前缀 `catpaw-panel-backup-`
- * 它们是**这套部署的身份**（与数据目录、卷、已有备份绑在一起），不是产品名。
+ *   · 前端 `localStorage` 的 `catpaw-panel.nav-collapsed`
+ * 它们是**这套部署的身份**（与数据目录、卷绑在一起），不是产品名。
+ *
+ * 备份文件名**不在这份名单里**：它是 `slug` + 时间戳（`media-bridge-panel-backup-YYYYMMDD-HHmm.zip`），
+ * 跟着品牌走 —— 它只是个下载文件名，换掉不影响已有备份包的还原。
  */
 const BRAND = {
   name: '媒体桥',

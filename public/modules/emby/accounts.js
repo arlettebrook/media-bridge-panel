@@ -91,12 +91,6 @@ function instanceCard(list, inst) {
     'div',
     { class: 'card' },
     el('h3', { text: '账号' }),
-    el('p', {
-      class: 'note',
-      text:
-        '客户端登录用这里的账号，可以加多个。账号是**按实例**分开的：上面选的是哪个实例，下面就是哪个实例的账号，' +
-        '别的实例看不见它们（进度也是各记各的）。密码忘了找不回来（只能删掉重建）。',
-    }),
     el(
       'div',
       { class: 'row' },

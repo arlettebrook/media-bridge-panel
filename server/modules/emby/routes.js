@@ -9,7 +9,7 @@
  *   GET  /api/emby/Users/{UserId}/Views      媒体库列表（每个启用的首页插件行 = 一个库；不再是留白）
  *   GET  /api/emby/Users/{UserId}/Items/Resume   继续观看（读 `playback` 表的未看完条目；必须注册在 Items/{ItemId} 之前）
  *   GET  /api/emby/Users/{UserId}/Items      条目列表（列表数据由首页模块决定：认 ParentId=<库Id>；其余如实空）
- *   GET  /api/emby/Users/{UserId}/Items/{ItemId}  单条详情（元数据 TMDB + 源绑定走本模块设置里的聚合地址）
+ *   GET  /api/emby/Users/{UserId}/Items/{ItemId}  单条详情（元数据 + 源绑定走本模块设置里的聚合地址）
  *   POST /api/emby/Users/{UserId}/Items/{ItemId}/HideFromResume  「从继续观看里移除 / 恢复」（`Hide=false` 恢复）
  *   POST|DELETE /api/emby/Users/{UserId}/PlayedItems/{ItemId}    「标记已看 / 未看」（POST=已看、DELETE=未看）
  *   POST /api/emby/Sessions/Playing[/Progress|/Stopped]  客户端播放上报（落库，见下面「播放进度上报」）
@@ -20,10 +20,10 @@
  *                                                两种大小写都注册 —— 小写是早期日志实录，大写是 Emby 官方路径）
  *   GET  /api/emby/Items/{ItemId}/Download       下载（与拉流**同一条链路**：MediaSourceId → 现取地址 → 302；
  *                                                302 之后文件名/断点续传归源站，面板不扛流量）
- *   GET  /api/emby/Shows/{Id}/Seasons        剧的季列表（**占位**：TMDB 的 seasons[]；UserId 在 query 里）
- *   GET  /api/emby/Shows/{Id}/Episodes       某一季的分集（**占位**：TMDB season 接口；UserId/SeasonId 在 query 里）
- *   GET  /api/emby/Items/{Id}/Images/{type}  图片（**豁免 token**；tag = `cpimg.<base64url(URL)>.<签名>`，验签不过 404；支持 `/Images/{type}/{index}`）
- *   GET  /api/emby/Items/{Id}/Similar        相似推荐（按 tmdb 坐标反查 TMDB，归 emby 层）
+ *   GET  /api/emby/Shows/{Id}/Seasons        剧的季列表（**占位**：插件的 seasons[]；UserId 在 query 里）
+ *   GET  /api/emby/Shows/{Id}/Episodes       某一季的分集（**占位**：插件的取季动作；UserId/SeasonId 在 query 里）
+ *   GET  /api/emby/Items/{Id}/Images/{type}  图片（**豁免 token**；tag = `cpimg.<base64url(URL)>.<签名>`，验签不过 404；**一律 302** 到原图；支持 `/Images/{type}/{index}`）
+ *   GET  /api/emby/Items/{Id}/Similar        相似推荐（按条目坐标反查上游，归 emby 层）
  *
  * 面板自用（不是 Emby 客户端协议，但同样必须注册在通配之前）—— **都走面板门禁**：
  *   GET    /api/emby/instances                Emby 实例列表（含运行态与账号/会话/库数）
@@ -34,8 +34,8 @@
  *   GET    /api/emby/meta-domains             可选元数据域清单（实例编辑弹窗的多选用：这个实例的搜索走哪些域）
  *   GET/POST    /api/emby/instances/{iid}/accounts       账号列表 / 新增（**按实例**）
  *   PUT/DELETE  /api/emby/instances/{iid}/accounts/{id}  改（用户名/密码）/ 删
- *   （TMDB 的设置与自检在**元数据插件自己的设置页**里：插件 → tmdb → 设置）
- *   （首页插件的行清单 / 参数 / token 在**首页插件自己的设置页**里：插件 → example → 设置。
+ *   （元数据插件自己的设置（token / 基地址）与自检在**它自己的设置页**里：插件 → 该插件 → 设置）
+ *   （首页插件的行清单 / 参数 / token 在**首页插件自己的设置页**里：插件 → 该插件 → 设置。
  *    原先那 8 个 `/api/emby/home/**` 端点已随批次 9 删除 —— 老宿主与老管理面没了。）
  *
  * 通配（必须注册在最后）：
@@ -53,8 +53,7 @@
  *
  * 端点清单与规矩见 docs/emby-compat.md。
  */
-const { sendJson, readBody, readRawBody } = require('../../core/http');
-const { UA } = require('../../core/upstream');
+const { sendJson, sendBuffer, readBody, readRawBody } = require('../../core/http');
 const service = require('./service');
 const log = require('./log');
 const metaBridge = require('./meta-bridge');
@@ -63,9 +62,6 @@ const home = require('./home');
 const instance = require('./instance');
 const meta = require('./meta');
 const listener = require('./listener');
-
-/** 图片端点单张上限：海报/剧照正常几十 KB～1MB，超过这个数说明取到的东西不对 */
-const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * 未实现端点的统一回应：**记一行**日志（返回序号）+ 501。
@@ -91,20 +87,27 @@ function notImplemented(req, res, { pathname, query, body }) {
 }
 
 /**
- * 把 `resolveStream` 的结果落到响应上：**一律 302**（不再有"面板代为转发"那条路）。
- * 面板只回一个 `Location`，字节全在源与客户端之间跑 —— 见 service.resolveStream 上面那段说明。
- * 本地部署的源回的地址是回环地址，这里拿到的已经是**换过域名**的那份（见 service.redirectUrl）。
+ * 把 `resolveStream` 的结果落到响应上。**两种形态**：
+ *
+ *   · `out.stream`   —— 302，只回一个 `Location`，字节全在源与客户端之间跑（绝大多数线路走这条）
+ *   · `out.playlist` —— 200，回一份**改写过的 HLS 清单**（地址已补成绝对，见 ADR-0040）：
+ *     清单**不能 302** —— 里面的地址是相对的，客户端按"自己最初请求的那条 URL"拼，
+ *     一跳过去它就拼到面板身上了（实测 VidHub 的 ffmpeg 去打 `/videos/{Id}/360p/video.m3u8` → 501）。
+ *     ⚠️ 面板搬的是**一份清单**（几百字节），不是媒体流量。
+ *
+ * 本地部署的源回的地址是回环地址，这里拿到的已经是**换过域名**的那份（见源插件的地址改写）。
  *
  * `verb` 只进日志那行（拉流 / 下载）：两个端点共用这一段，日志里得能分清是哪条在跑。
  */
 function serveStream(req, res, out, label, verb = '拉流') {
-  if (!out.stream) {
+  if (!out.stream && !out.playlist) {
     /* 失败时把**客户端原始 URL** 一起打出来 —— 光看状态行根本不知道它回传了什么
      * `MediaSourceId`（排查"缺少 vod"时就卡在这）。**只在失败时打**，所以并成一行。 */
     log.logResult(req, `${verb} ${label}`, out, out.status >= 400 ? ` 原始请求: ${req.url}` : '');
     return sendJson(res, out.status, out.body);
   }
-  log.logResult(req, `${verb} ${label}`, { status: 302, log: out.log });
+  log.logResult(req, `${verb} ${label}`, { status: out.status, log: out.log });
+  if (out.playlist) return sendBuffer(res, 200, Buffer.from(out.playlist.text, 'utf8'), out.playlist.contentType);
   /* ⚠️ `Location` 里的**非 ASCII 必须先编码**：HTTP 头的值只认 ASCII，Node 碰上中文会直接抛
    * `Invalid character in header content ["Location"]` —— 那时状态行已经写了一半，
    * 客户端看到的是一个莫名其妙的 500（实测：源回的地址里带中文站名时会这样）。
@@ -226,7 +229,7 @@ module.exports = function routes(r) {
    * GET /Items/Counts —— 全库各类条目数量（SenPlayer 实测在请求该端点）
    *
    * **回全 0**＝"数不出来"，不是"库是空的"（理由见 `service.getItemCounts` —— 没有片库索引，
-   * 而唯一能凑的数据源是插件行的 `total`，那是 TMDB 榜单总数，不是本面板的库，拿它当数就是编数据）。
+   * 而唯一能凑的数据源是插件行的 `total`，那是上游榜单总数，不是本面板的库，拿它当数就是编数据）。
    *
    * 无路由冲突：条目详情那条是 `Users/:userId/Items/:itemId`，**没有**裸的 `Items/:itemId`，
    * 所以 `Counts` 不会被当条目 Id 吞掉（⚠️ 但 `Users/:userId/Items/Resume` 曾被这种
@@ -286,7 +289,7 @@ module.exports = function routes(r) {
     return sendJson(res, out.status, out.body);
   });
 
-  /* 季列表：只认剧的 Id（tmdb_{id}_tv）；UserId 在 query 里，走同一套账号校验 */
+  /* 季列表：只认剧的 Id（{域}_{编号}_tv）；UserId 在 query 里，走同一套账号校验 */
   r.add('GET', '/api/emby/Shows/:showId/Seasons', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
@@ -302,7 +305,7 @@ module.exports = function routes(r) {
     return sendJson(res, out.status, out.body);
   });
 
-  /* 分集列表：只认剧的 Id + SeasonId（tmdb_{id}_tv_s{n}），其余回空 */
+  /* 分集列表：只认剧的 Id + SeasonId（{域}_{编号}_tv_s{n}），其余回空 */
   r.add('GET', '/api/emby/Shows/:showId/Episodes', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
@@ -371,7 +374,7 @@ module.exports = function routes(r) {
     if (!src) {
       console.log(`  ✘ emby 拉流 Items/${params.itemId}/Stream → HTTP 400  token 认不出：${params.token}${log.clientTag(req)}`);
       return sendJson(res, 400, {
-        error: '路径里的 token 认不出（应是 base64url 的 catpaw:<JSON {r: ref}>）',
+        error: '路径里的 token 认不出（应是 base64url 的、以 catpaw: 开头的版本 Id）',
       });
     }
     const out = await service.resolveStream(params.itemId, src, query.get('UserId'), req.headers.host || '');
@@ -398,7 +401,7 @@ module.exports = function routes(r) {
    *   `GET /videos/{ItemId}/stream.mkv?Static=true&MediaSourceId=<版本 Id>&PlaySessionId=…&api_key=…`
    * （实测日志 emby#39~#45），而**不是**上面那条 Path。缺了它播放一律 501，客户端只会反复重试。
    *
-   * `MediaSourceId` 自带站点/线路/vod（**base64url 编在 Id 里**，见 service.catpawSourceId），所以这里没有额外参数；
+   * `MediaSourceId` 自带站点/线路/vod（**压缩后 base64url 编在 Id 里**，见 service.catpawSourceId），所以这里没有额外参数；
    * `Static=true` 表示要直连（不转码），与一律 302 的语义一致。
    * `:file` 只认 `stream` / `stream.<扩展名>`（后缀来自 `MediaSource.Container`）；`original.mkv` 之类
    * 没在任何日志里出现过，仍按「未实现」记日志 + 501，不提前猜。
@@ -458,7 +461,7 @@ module.exports = function routes(r) {
     return serveStream(req, res, out, `Items/${params.itemId}/Download`, '下载');
   });
 
-  /* 相似推荐：按条目的 tmdb 坐标反查 TMDB（与季/集同类，归 emby 层，不走首页模块） */
+  /* 相似推荐：按条目的坐标反查上游（与季/集同类，归 emby 层，不走首页模块） */
   r.add('GET', '/api/emby/Items/:itemId/Similar', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
     const denied = service.authorize(req, query.get('UserId'));
@@ -482,14 +485,15 @@ module.exports = function routes(r) {
    *   3 条**什么凭证都不带**）。要求 token 会让那部分客户端图全挂。
    * - tag 是 `cpimg.<base64url(图片URL)>.<签名>`（见 `service.imageTag`）——
    *   **验签不过一律 404**：这个端点豁免 token，不签名就等于把面板变成"替任何人取任意 URL"的开放代理。
-   * - **由面板代为取图**（不是 302）：图很小；而且插件给的图地址可能是客户端根本连不到的地方。
+   * - **一律 302**（面板不再代取字节，取向与拉流 / 下载一致）：只回一个 `Location`，图在源站与
+   *   客户端之间直接跑。代价是**客户端得自己连得到图床**（该域申报的图片基地址那台站），面板不再兜这条网络。
    * - **两条取图路**：① tag 验签通过（客户端把 tag 带回来了）→ 从 tag 里解出 URL；
    *   ② 没带 tag / 验签不过 → 查**本地图片索引**（见下）。两条都取不到才 404。
-   *   ⚠️ 已否决方案：不要用"按条目 Id 反查 TMDB"作兜底 ——
-   *   那随片库规模**线性**消耗 TMDB 配额（实测 340 次请求 ≈ 55 次调用），而图片位置**本来就在本地**。
+   *   ⚠️ 已否决方案：不要用"按条目 Id 反查上游"作兜底 ——
+   *   那随片库规模**线性**消耗上游配额（实测 340 次请求 ≈ 55 次调用），而图片位置**本来就在本地**。
    *   现为零成本的本地索引。
-   * - `maxWidth` / `quality` / `type` / `index` 忽略：URL 来自 tag 或索引，原图转给客户端
-   *   （TMDB 那张已经是按尺寸取的）。
+   * - `maxWidth` / `quality` / `type` / `index` 忽略：URL 来自 tag 或索引，302 到**原图**
+   *   （插件给的地址本来就是按尺寸取的）。
    * - **`/:index` 变体**：给了多张背景图（`BackdropImageTags[]`）后，客户端会按
    *   `Images/Backdrop/0`、`/1`… 逐张要 —— 路径里那个 index **只在查索引时用**（tag 里逐张带着呢）。
    */
@@ -501,7 +505,7 @@ module.exports = function routes(r) {
      * ② 没带 tag / 验签不过 → 查**本地图片索引**（`service.imageUrlFromIndex`）：
      *    索引在发 tag 时顺带记下（见 `service.tagAndRemember`），URL 本来就在本地，
      *    所以这一步**零上游调用**。命中即可正常出图。
-     * ③ 都取不到 → 404，**不回退 TMDB 反查** —— 那条路随片库规模线性消耗配额
+     * ③ 都取不到 → 404，**不回退上游反查** —— 那条路随片库规模线性消耗配额
      *    （实测 340 次请求 ≈ 55 次调用，6h 过期重来），而位置本就在索引里。
      * 图片端点豁免 token，所以"URL 必须由本面板签过或记过"是这里唯一的 SSRF 防线。 */
     let url = service.parseImageTag(params.itemId, rawTag);
@@ -521,31 +525,12 @@ module.exports = function routes(r) {
       return sendJson(res, 404, { error: '这张图取不到：tag 验签不过，索引里也没有' });
     }
 
-    const t0 = Date.now();
-    try {
-      /* 取图是**裸 fetch**（不走 `upstream.request`），所以自称要单独带上 ——
-       * 用同一条常量（`core/upstream.js` 的 `UA`），别在这儿另写一串。 */
-      const up = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(15000) });
-      if (!up.ok) throw new Error('上游 HTTP ' + up.status);
-      const buf = Buffer.from(await up.arrayBuffer());
-      if (buf.length > IMAGE_MAX_BYTES) throw new Error(`图太大（${buf.length} 字节）`);
-      res.writeHead(200, {
-        'Content-Type': up.headers.get('content-type') || 'image/jpeg',
-        'Content-Length': buf.length,
-        'Cache-Control': 'public, max-age=86400',
-      });
-      res.end(buf);
-      /* 出图成功也记一行（**这条量最大**：客户端一屏海报就是十几二十行）——
-       * 记录口径见 log.js 文件头：不做筛选；量由内存缓冲的固定条数与「看的时候再过滤」兜住。 */
-      log.logResult(req, `图片 ${label}`, {
-        status: 200,
-        log: `${buf.length} 字节${via === 'tag' ? '' : '（' + via + '）'} ${Date.now() - t0}ms`,
-      });
-    } catch (e) {
-      const msg = String((e && e.message) || e);
-      console.log(`  ✘ emby 图片 ${label} → HTTP 502 取图失败：${msg}${log.clientTag(req)}`);
-      return sendJson(res, 502, { error: '取图失败：' + msg });
-    }
+    /* 一律 302（见上面那段）：面板只回 `Location`，字节全在源站与客户端之间跑。
+     * 两条取图路（tag / 本地索引）已经在上面对 URL 做过校验，仍是这里唯一的 SSRF 防线。 */
+    log.logResult(req, `图片 ${label}`, { status: 302, log: `via=${via}` });
+    /* ⚠️ `Location` 里的**非 ASCII 必须先编码**（同 serveStream 那段）：HTTP 头只认 ASCII。 */
+    res.writeHead(302, { Location: encodeURI(url), 'Cache-Control': 'public, max-age=86400' });
+    return res.end();
   };
   r.add('GET', '/api/emby/Items/:itemId/Images/:type', imagesByType);
   r.add('GET', '/api/emby/Items/:itemId/Images/:type/:index', imagesByType);
@@ -777,14 +762,14 @@ module.exports = function routes(r) {
    * `data/emby/cache.db`），"清空"必须只有一个入口 —— 见面板层 `GET|DELETE /api/panel/cache`。 */
 
   /* ⚠️ 首页插件那 8 个面板自用端点（`/api/emby/home/**`）**已删** ——
-   * 首页插件改造成统一插件（`plugins/home/`）之后，装 / 卸 / 启停 / 设置全在
+   * 首页插件改造成统一插件（走插件机制装的那种）之后，装 / 卸 / 启停 / 设置全在
    * 「插件 → 管理」页上（插件自己的设置页是它自带的 webui），见
    * docs/plugin-migration-plan.md 批次 9。 */
 
   /* ---------------- 播放进度上报（客户端 → 落库） ----------------
    * 实测（SenPlayer 6.2.1，见 docs/playback-progress.md §11）：
    *   · 开始 1 次 `POST /Sessions/Playing`；心跳每 **10 秒** 1 次 `POST /Sessions/Playing/Progress`；结束 1 次 `…/Stopped`；
-   *   · body 里 `ItemId` 就是**本面板发出去的 Id**（`tmdb_…_s{n}_e{m}` / `tmdb_…_movie`），
+   *   · body 里 `ItemId` 就是**本面板发出去的 Id**（`{域}_{编号}_tv_s{n}_e{m}` / `{域}_{编号}_movie`），
    *     另有 `PositionTicks` / `RunTimeTicks`（**只有部分心跳带**）/ `MediaSourceId` / `PlaySessionId`；
    *   · **没有 `Played` 字段，也不带 `UserId`** ⇒ "看完"只能按比例判，账号从 token 认。
    * 三条一律回 **204 空体**（真机实测同此：它连 `Progress` 的 token 都不校验；本层按 ADR-0009 三条都校验）。

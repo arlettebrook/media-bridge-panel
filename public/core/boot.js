@@ -41,7 +41,7 @@ export async function init() {
  * （见 core/registry.js 的 `pluginUiPages`）。
  *
  * ⚠️ 必须赶在 `applyHash()` **之前**拿到：地址栏停在某个插件 UI 页上（如
- * `#/plugin-home/pui-home-example`）时，`moduleOf()` 得能从那一栏里认出它，
+ * `#/plugin-<类型>/pui-<类型>-<插件id>`）时，`moduleOf()` 得能从那一栏里认出它，
  * 否则刷新一下就掉回第一栏了。拉不到就当"没有插件"—— 面板照常起，
  * 「插件 → 管理」那一页还会自己再拉一次。
  */

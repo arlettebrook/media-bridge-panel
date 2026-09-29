@@ -11,7 +11,7 @@
  * 同样受面板门禁保护）。插件想跟自己的子进程说话，走它自己那份 webui 后端
  * （面板把 `/api/plugins/<类型>/<插件id>/api/**` 原样转成动作 `http`）。
  *
- * 页 id 形如 `pui-home-example`，类型与插件 id 从 id 里反解。
+ * 页 id 形如 `pui-<类型>-<插件id>`，类型与插件 id 从 id 里反解。
  */
 import { el } from './dom.js';
 import { S } from './state.js';

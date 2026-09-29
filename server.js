@@ -188,6 +188,26 @@ process.on('unhandledRejection', (e) => {
   console.error('  ✘ 未处理的 Promise 拒绝（已拦截，服务继续）：' + ((e && e.stack) || e));
 });
 
+/**
+ * 真正退出：**只做一次**（server.close 的回调与下面那个兜底定时器都会走到这里）。
+ * 顺序很关键 —— 先让 `relaunchIfPending` 把"重启自己"的副本拉起来，再 `process.exit`：
+ * 到这一步监听已经关了（`server.close()` 一调用就放开端口，`stopListeners()` 放开了实例端口），
+ * 副本这时起来才不会撞端口。托管运行方式下它什么都不做（由引导脚本拉起）。
+ */
+let quitting = false;
+function finishQuit() {
+  if (quitting) return;
+  quitting = true;
+  if (panelModule && typeof panelModule.relaunchIfPending === 'function') {
+    try {
+      panelModule.relaunchIfPending();
+    } catch (e) {
+      console.error('  ✗ 自拉起新进程失败（面板即将退出，请手动重起进程）：' + ((e && e.message) || e));
+    }
+  }
+  process.exit(0);
+}
+
 async function shutdown() {
   /* Emby 实例的监听（每个一个 http.Server）先关 —— 它们挂在同一个进程里，
    * 不关就会在 `server.close()` 之后继续占着那些端口（见 emby/listener.js）。 */
@@ -209,8 +229,8 @@ async function shutdown() {
       console.error('  ✗ 停止插件失败：' + e.message);
     }
   }
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 3000);
+  server.close(finishQuit);
+  setTimeout(finishQuit, 3000);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

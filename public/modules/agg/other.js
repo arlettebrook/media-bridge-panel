@@ -33,15 +33,7 @@ export async function renderAggOther(v) {
     return;
   }
 
-  card.append(el('div', { class: 'note', text: '一个域最多一套模板；同一套模板可以给多个域共用。选「（没配）」= 取消指向 —— 那个域的内容就搜不到了。' }));
-  card.append(
-    el('div', {
-      class: 'note',
-      text:
-        '这份对照只给客户端那条路用（Emby 按 `tmdb` 这类前缀问，面板据此翻译成一套模板）。' +
-        '网页「聚合搜索」页不按域选，直接在那一页挑模板。',
-    })
-  );
+  card.append(el('div', { class: 'note', text: '选择每个元数据域的视频对应去哪里找片源。' }));
   for (const p of providers) card.append(domRow(p));
 }
 
@@ -67,7 +59,6 @@ function domRow(p) {
     'div',
     { class: 'kv' },
     el('span', { class: 'k', text: `${p.label}（域 ${p.prefix}）` }),
-    sel,
-    el('span', { class: 'note', text: !cur ? '⚠️ 没配模板 ⇒ 这个域的内容搜不到（如实为空）' : '' })
+    sel
   );
 }

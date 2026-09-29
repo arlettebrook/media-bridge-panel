@@ -25,6 +25,7 @@
  * 改密或删账号会作废该账号的所有 token。豁免：握手、登录、面板自用端点、501 通配（图片端点将来也要豁免）。
  */
 const crypto = require('crypto');
+const zlib = require('zlib'); // 版本 Id 的载荷要压一道（客户端对 URL 长度有硬上限，见 catpawSourceId）
 const metaBridge = require('./meta-bridge');
 const agg = require('../agg/api'); // 聚合层的进程内调用面（原来是打自己的 /api/agg/*，会撞面板门禁 → 见那个文件顶部）
 const BRAND = require('../../core/branding'); // 默认服务器名（客户端「服务器列表」里显示的那个）
@@ -369,7 +370,7 @@ function progressOf(accountId, itemId) {
  * 把进度与时长落到条目上（`progressItem` 与 `applyUserData` **共用同一口径**）。
  *
  * `RunTimeTicks` 只在条目本来没有时补：值来自**客户端上报的 `RunTimeTicks`**（源给的时长，
- * 不是编的）；集条目通常已由 TMDB 的 `runtimeMinutes` 填过，就以那个为准。
+ * 不是编的）；集条目通常已由元数据插件的 `runtimeMinutes` 填过，就以那个为准。
  */
 function applyProgressToItem(item, prog) {
   if (!prog || !item) return item;
@@ -387,7 +388,7 @@ function applyProgressToItem(item, prog) {
  * （`{Items:[…]}` / 裸数组 / 单条），处理一次全覆盖。数据库是**同步**的（`node:sqlite`），
  * 所以这一步不必 async 化。
  *
- * 剧级条目（`tmdb_x_tv`）**不补任何东西**：进度记在集上，而"整剧是否看完"要知道总集数，
+ * 剧级条目（`{域}_{编号}_tv`）**不补任何东西**：进度记在集上，而"整剧是否看完"要知道总集数，
  * 本层不知道 —— 宁可不给，也不编（ADR-0008）。
  */
 function applyUserData(out, requestedUserId, req) {
@@ -628,7 +629,7 @@ async function progressItem(r, accountId) {
   const seasonLook = await metaBridge.lookupSeason({ entryId: p.entryId, season: p.season, domain });
   if (!seasonLook.ok) return null;
   const e = (seasonLook.item.episodes || []).find((x) => Number(x.episodeNumber) === Number(p.episode));
-  if (!e) return null; // 这一季里没有这一集（源与 TMDB 对不上）→ 不列，不编
+  if (!e) return null; // 这一季里没有这一集（源与上游对不上）→ 不列，不编
 
   const showLook = await metaBridge.lookup({ type: 'tv', entryId: p.entryId, domain }); // 只为剧名（缓存里通常已有）
   const item = baseItem({
@@ -735,7 +736,7 @@ function homeViewItem(r) {
    * 两条路都**零上游请求**：
    *   ① 图片索引（持久，默认 90 天）—— 发过 tag 就记下了，重启后仍在；
    *   ② 该行的**内存缓存结果** —— 客户端逛过一次就会有。
-   * **绝不为了封面单独打一次 TMDB**：那份代价随库数线性增长（已定为红线）。
+   * **绝不为了封面单独打一次上游**：那份代价随库数线性增长（已定为红线）。
    * 取不到就不给 `ImageTags` / `PrimaryImageAspectRatio` —— 真机无图的库正是这个形状
    * （实测：`ImageTags: {}`、`BackdropImageTags: []`、**没有** `PrimaryImageAspectRatio` 这个键）。
    *
@@ -757,10 +758,10 @@ function homeViewItem(r) {
     Id: id,
     Guid: guid,
     /* 真机的 `Etag` 是**库内容**的指纹。这里的"库"就是这一行：库名或封面变了才算变。
-     * （TMDB 榜单内容每天在变，但本层无从观察 —— 那就只对能观察到的部分负责。） */
+     * （上游榜单内容每天在变，但本层无从观察 —— 那就只对能观察到的部分负责。） */
     Etag: stableHash([id, name, cover || ''].join('|')),
     /* `DateCreated` = **占位值**。
-     * 真机那是库的创建时间，而本层没有"建库"这个动作 —— TMDB 里也没有"这一行"这个实体，
+     * 真机那是库的创建时间，而本层没有"建库"这个动作 —— 上游里也没有"这一行"这个实体，
      * 拿不到任何真实时间可用。曾经用"库首次出现在 `Views` 的时刻"（`view_seen` 表）近似，
      * 但那是个**不可再生**的值（表一丢，所有库看起来就"全新建了"），为它养一张表不划算；
      * 占位值取 Emby 自己的零值（与 DateModified 同一个），这样"一看就知道是占位"，
@@ -830,7 +831,7 @@ async function getResume(requestedId, req, query) {
  *
  * **如实回空**。这不是"还没做"，是**做不出真数据**：
  *
- *   · 每条片的 `Studios[]` **本地本来就有** —— 详情页从 TMDB 的 `production_companies` 映射
+ *   · 每条片的 `Studios[]` **本地本来就有** —— 详情页从上游的 `production_companies` 映射
  *     （见 `applyRich`），实测 `movie/603` 给 4 个（含 `Warner Bros. Pictures`）
  *   · 但这个端点要的是**全库去重后的清单**，而**服务端没有片库索引**：列表数据由首页插件
  *     在请求时现跑，本层从不存"库里有哪些片"
@@ -880,24 +881,58 @@ function itemsWillReturnData(query) {
 }
 
 /**
- * 客户端在按**外部 id** 找一条吗？`AnyProviderIdEquals={域}.{编号}` → 回 `{domain, entryId}`，否则回 null。
+ * 客户端在按**外部 id** 找条目吗？把 `AnyProviderIdEquals` 解成一张**候选表**。
+ *
+ * 这个参数是**逗号分隔的多值**，语义是"任一条对上就算"（Emby 的 OR）——
+ * 实测 Rex/0.5.0 打的就是 `tmdb.282326,imdb.tt32500958`；同名参数重复出现也收（`query.getAll`）。
+ * ⚠️ 多值里**只要有一条认得出**，这条查询就算成立；认不出的那些**跳过并记下原因**，
+ * 不等于整条查询作废（以前只认单值，多值一律判"没这条查询"→ 回空，链路就断在那里）。
  *
  * **前缀按注册表认域，不写死某个域**：客户端手里那串前缀（Emby 惯例是提供者名）交给
- * `metaBridge.domainOfRef()` 找已注册的元数据域；认不出就回 null（如实当"没这条查询"处理，
- * 不猜、不回退到别的域）。编号**不要求是数字** —— TMDB 是数字（`550`），MissAV 是 slug
- * （`dldss-559`），面板只透传（见 core/providers.js）。形状与条目 Id 里的编号段同一套：只允许
- * `[A-Za-z0-9._-]`。
+ * `metaBridge.domainOfRef()` 找已注册的元数据域；**认不出就跳过**（不猜、不回退到别的域）。
+ * 编号**不要求是数字** —— 数字（`550`）与 slug（`dldss-559`）都可能，面板只透传
+ * （见 core/providers.js）。形状与条目 Id 里的编号段同一套：只允许 `[A-Za-z0-9._-]`。
+ *
+ * 回 `{ refs, skipped }`：`refs` 保序去重、至多 `PROVIDER_REF_MAX` 条（上限是挡"客户端拿一长串
+ * 外部 id 刷成一长串上游请求"）；`skipped` 是每条没认出来的原文与原因，供日志点名。
  *
  * **判据只此一处**：`getItems` 的搜索分支与 `itemsWillReturnData`（决定要不要校验账号）都用它，
  * 别各写一份正则（两处一旦漂移，就会出现"出数据却没校验"）。
  */
 const PROVIDER_REF_RE = /^([A-Za-z][A-Za-z0-9]*)\.([A-Za-z0-9][A-Za-z0-9._-]*)$/;
+const PROVIDER_REF_MAX = 8;
+function searchProviderRefs(query) {
+  if (!query || typeof query.get !== 'function') return { refs: [], skipped: [] };
+  const vals = typeof query.getAll === 'function' ? query.getAll('AnyProviderIdEquals') : [query.get('AnyProviderIdEquals') || ''];
+  const refs = [];
+  const skipped = [];
+  for (const raw of vals) {
+    for (const one of String(raw || '').split(',')) {
+      const s = one.trim();
+      if (!s) continue;
+      const m = PROVIDER_REF_RE.exec(s);
+      if (!m) {
+        skipped.push({ ref: s, why: '形状不是「{前缀}.{编号}」' });
+        continue;
+      }
+      const domain = metaBridge.domainOfRef(m[1]);
+      if (!domain) {
+        skipped.push({ ref: s, why: `前缀 ${m[1]} 不是已注册域` });
+        continue;
+      }
+      if (refs.length >= PROVIDER_REF_MAX) {
+        skipped.push({ ref: s, why: `超出候选上限 ${PROVIDER_REF_MAX}` });
+        continue;
+      }
+      if (!refs.some((r) => r.domain === domain && r.entryId === m[2])) refs.push({ domain, entryId: m[2] });
+    }
+  }
+  return { refs, skipped };
+}
+
+/** 第一个候选（没有就回 null）—— 只判"是不是这条查询"的地方用它，别自己再解析一遍 */
 function searchProviderId(query) {
-  const val = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
-  const m = PROVIDER_REF_RE.exec(String(val('AnyProviderIdEquals')).trim());
-  if (!m) return null;
-  const domain = metaBridge.domainOfRef(m[1]);
-  return domain ? { domain, entryId: m[2] } : null;
+  return searchProviderRefs(query).refs[0] || null;
 }
 
 /**
@@ -922,7 +957,7 @@ function searchTermOf(query) {
 const SEARCH_DEFAULT_LIMIT = 20;
 const SEARCH_MAX_LIMIT = 40;
 
-/** 上游搜索**一页**的条数（TMDB 与 missav 都是 20）—— 把客户端窗口换算成"要取几页"用 */
+/** 上游搜索**一页**的条数（实测各域都是 20）—— 把客户端窗口换算成"要取几页"用 */
 const SEARCH_UPSTREAM_PAGE = 20;
 /** 一次搜索**最多**连取几页上游 —— 防呆，别让大 `Limit` 把上游打穿 */
 const SEARCH_MAX_UPSTREAM_PAGES = 3;
@@ -1004,7 +1039,7 @@ function withParentId(query, parentId) {
  *   · 该剧最近看的那一集**没看完** → 回它自己（接着看）；
  *   · 已经看完 → 回**下一集**：同一季内找得到就回；找不到再试下一季第 1 集。
  *
- * 「下一集」一律要**在 TMDB 的季数据里真实存在**才回 —— 不存在就跳过这部剧，不编（ADR-0008）。
+ * 「下一集」一律要**在上游的季数据里真实存在**才回 —— 不存在就跳过这部剧，不编（ADR-0008）。
  *
  * 参数：`SeriesId` 可选（SenPlayer 实测会带，只问某一部剧）、`UserId` 在 query；
  * `MediaTypes` / `Recursive` / `Fields` 忽略，`Limit` 只用来截断条数。
@@ -1057,7 +1092,7 @@ async function nextEpisodeItem(row, accountId) {
      * 本季到头就试下一季第 1 集（只试一次，与原来的口径一致）；
      * **被隐藏的集跳过** —— 客户端"从继续观看里移除"的就是它在列表里点的那一条，
      * 移除之后该让位给下一集（真机实测：隐藏会让那条从「Resume」消失）。
-     * 上限 50 次：源与 TMDB 对不上时别在这里空转，找不到就如实跳过这部剧（ADR-0008）。 */
+     * 上限 50 次：源与上游对不上时别在这里空转，找不到就如实跳过这部剧（ADR-0008）。 */
     let cur = { season, episode: p.episode + 1 };
     let fellBack = false;
     let found = null;
@@ -1088,7 +1123,7 @@ async function nextEpisodeItem(row, accountId) {
   );
 }
 
-/** TMDB 的季数据里有没有这一集（`NextUp` 只回真实存在的下一集） */
+/** 上游的季数据里有没有这一集（`NextUp` 只回真实存在的下一集） */
 async function episodeExists(domain, entryId, season, episode) {
   const look = await metaBridge.lookupSeason({ entryId, season, domain });
   if (!look.ok) return false;
@@ -1127,7 +1162,7 @@ const ITEM_COUNT_FIELDS = [
  *   的形状里没有"未知"这个取值（14 个字段都是数字），只能填 0。
  *
  *   为什么不去凑：唯一的数据来源是各插件行返回的 `total`（如 `top_rated` 报 11216）—— 那是
- *   **TMDB 榜单的总数，不是本面板库里的数量**，拿它当"库里有 11216 部片"是**编数据**，比 0 更糟。
+ *   **上游榜单的总数，不是本面板库里的数量**，拿它当"库里有 11216 部片"是**编数据**，比 0 更糟。
  *
  * 参数（`ParentId` 等）全忽略 —— 给哪个范围数都一样是 0。
  * **不校验账号**：回空没有数据可保护（同 `getResume` / `getStudios`）。
@@ -1144,7 +1179,8 @@ function getItemCounts() {
  * **列表数据由首页模块决定，emby 层只做端点映射与 DTO 转换**（见
  * docs/emby-home-plugin.md）。分支共五条：
  *   - `SearchTerm=<词>` → **按名字搜**（元数据插件搜索；SenPlayer 的搜索框走这条）
- *   - `AnyProviderIdEquals={域}.{编号}` → **按外部 id 搜一条**（回一条带本面板 Id 的条目，客户端接着进详情）
+ *   - `AnyProviderIdEquals={域}.{编号}` → **按外部 id 搜一条**（回一条带本面板 Id 的条目，客户端接着进详情）。
+ *     该参数可**逗号分隔多值**，语义是"任一条对上就算"（见 `searchProviderRefs`）：按序逐个试，先命中先返回
  *   - `ParentId=<catpawhome_…>`（本面板发给客户端的媒体库 Id，见 getViews）→ `home.listByQuery` 跑对应插件行
  *   - 无 `ParentId` 的「推荐」查询（`SortBy` 含 `IsFavoriteOrLiked`）→ 路由到插件声明了 `feed` 的行
  *   - `Filters=IsPlayed` → 读 `playback` 表（**已看的条目，真数据**）；`Filters=IsFavorite` → 仍如实回空
@@ -1154,7 +1190,7 @@ function getItemCounts() {
  * （进 `ctx.startIndex` / `ctx.limit`），取哪一页由**插件**决定；模块回来的 `total` 直接当
  * `TotalRecordCount`。`SortBy` / `Recursive` / `IncludeItemTypes` 忽略 —— 插件返回的顺序就是它想要的顺序。
  *
- * 插件行取数失败 → **照实回失败码**（与 TMDB 同一取向：不编占位数据、不回空的假成功）。
+ * 插件行取数失败 → **照实回失败码**（与上游同一取向：不编占位数据、不回空的假成功）。
  */
 async function getItems(requestedId, query) {
   const val = (key) => (query && typeof query.get === 'function' ? query.get(key) || '' : '');
@@ -1186,7 +1222,7 @@ async function getItems(requestedId, query) {
    * 链路：客户端手里只有一个上游编号（外部链接 / 书签 / 它自己记着的），**拼不出本面板的 Id**，
    * 于是来问一句"这条在本面板的 Id 是多少"；这里回**一条带 Id 的条目**（`{域}_{编号}_{movie|tv}`），
    * 它拿到就接着打详情 → 详情那条同样是"按域坐标反查"，两条路同源。前缀认哪个域由
-   * `searchProviderId`（走注册表）定，**不写死 tmdb**。
+   * `searchProviderRefs`（走注册表）定，**不写死某个域**。
    *
    * ⚠️ 该分支曾以「列表数据由首页模块决定」为由**删掉过**，后来又**恢复**：
    *   · 模块管的是**首页渲染**（给客户端什么样的行列、每个条目的 Id），
@@ -1194,24 +1230,38 @@ async function getItems(requestedId, query) {
    *   · 而且**详情端点在删它之后一直还在做同一件事**（`richItemDto()` 按坐标反查），
    *     删检索这条只会让两条路不自洽；
    *   · 当时删它的依据是"实测客户端 0 次使用"—— **已被 Rex/0.1.0 推翻**
-   *     （它连打两条 `AnyProviderIdEquals=tmdb.1339713`，回空之后就拿不到 Id、链路断在那里）。
+   *     （它连打两条单值的 `AnyProviderIdEquals={域}.{编号}`，回空之后就拿不到 Id、链路断在那里）。
    *   结论同 `Items/Latest`：某条查询"没人要"只对**当时那批客户端**成立。
    *
    * 类型从 `IncludeItemTypes` 推（`Series`→tv / `Movie`→movie；都没给 → tv，照旧例）；
    * 取不到 → **照实回失败码**（`metaFailure`，不编占位条目）。
    */
-  const ref = searchProviderId(query);
-  if (ref) {
+  const refQuery = searchProviderRefs(query);
+  if (refQuery.refs.length) {
     const include = val('IncludeItemTypes');
     const type = /series/i.test(include) ? 'tv' : /movie/i.test(include) ? 'movie' : 'tv';
-    const look = await metaBridge.lookup({ type, entryId: ref.entryId, domain: ref.domain });
-    if (!look.ok) return metaFailure(look.error, `${ref.domain}/${type}/${ref.entryId}`);
-    const item = leanItemDto(Object.assign({}, look.item, { type, parentId: defaultLibraryId() }));
-    return {
-      status: 200,
-      body: { Items: [item], TotalRecordCount: 1 },
-      log: `AnyProviderIdEquals=${ref.domain}.${ref.entryId} → ${type}「${item.Name}」id=${item.Id}（搜索结果，可进详情）`,
-    };
+    /* **OR 语义：按候选顺序逐个试，先命中先返回**。跳过项（前缀没注册、形状不对）点名写进日志，
+     * 免得又出现"打了三条、不知道哪条被忽略了"的排查成本。 */
+    const skippedNote = refQuery.skipped.length
+      ? `；跳过 ${refQuery.skipped.map((s) => `${s.ref}（${s.why}）`).join('、')}`
+      : '';
+    const candidates = refQuery.refs.map((r) => `${r.domain}.${r.entryId}`).join(',');
+    let last = null;
+    for (const ref of refQuery.refs) {
+      const look = await metaBridge.lookup({ type, entryId: ref.entryId, domain: ref.domain });
+      if (!look.ok) {
+        last = { error: look.error, what: `${ref.domain}/${type}/${ref.entryId}` };
+        continue;
+      }
+      const item = leanItemDto(Object.assign({}, look.item, { type, parentId: defaultLibraryId() }));
+      return {
+        status: 200,
+        body: { Items: [item], TotalRecordCount: 1 },
+        log: `AnyProviderIdEquals=${candidates} → ${type}「${item.Name}」id=${item.Id}（搜索结果，可进详情${skippedNote}）`,
+      };
+    }
+    /* 候选都试完了、一条都没取到 → 如实回失败码（与单候选时同一口径，不回假的空成功） */
+    return metaFailure(last.error, last.what);
   }
 
   const vid = home.parseViewId(val('ParentId'));
@@ -1246,11 +1296,13 @@ async function getItems(requestedId, query) {
   }
   if (!got) {
     const provider = val('AnyProviderIdEquals');
-    return empty(
-      provider
-        ? `AnyProviderIdEquals=${provider} → 空（只认「{已注册域}.{编号}」；列表本身由首页模块决定）`
-        : '没有可识别的查询参数 → 空'
-    );
+    if (!provider) return empty('没有可识别的查询参数 → 空');
+    /* 走到这里 = 这一串外部 id **一条候选都没认出来**（有候选的话上面那支早就返回了）。
+     * 逐条点名是哪一条、为什么 —— 以前只笼统说「只认「{已注册域}.{编号}」」，排查时还得自己猜。 */
+    const why = refQuery.skipped.length
+      ? refQuery.skipped.map((s) => `${s.ref}（${s.why}）`).join('、')
+      : '只认「{已注册域}.{编号}」';
+    return empty(`AnyProviderIdEquals=${provider} → 空（${why}；列表本身由首页模块决定）`);
   }
 
   return {
@@ -1270,21 +1322,21 @@ const LATEST_DEFAULT_LIMIT = 20;
 /**
  * `Items?SearchTerm=…` —— **按名字搜**（依据见 `searchTermOf`）。
  *
- * 数据来源：TMDB `search/tv` 与 `search/movie`（**归 emby 层** —— 与详情同类：
- * 它是"按坐标/名字去 TMDB 反查"，不是"这台服务器上有什么"，所以不走首页模块）。
+ * 数据来源：元数据插件的「搜索」动作（**归 emby 层** —— 与详情同类：
+ * 它是"按坐标/名字去上游反查"，不是"这台服务器上有什么"，所以不走首页模块）。
  *
  * 三条口径，都不猜：
  *   ① **不为结果再打 `lookup()`**：搜索行里的字段够画卡片，详情才需要 rich（见 `searchRowDto`）。
- *      代价是**每类型 1 次上游**（`Limit` 由 TMDB 自己的分页决定），不是"结果数 × 1 次"。
+ *      代价是**每类型 1 次上游**（`Limit` 由上游自己的分页决定），不是"结果数 × 1 次"。
  *   ② **按客户端窗口取上游页**（每类型 1 页起、至多 `SEARCH_MAX_UPSTREAM_PAGES` 页）：上游一页
  *      只有 20 条，只取第 1 页就**填不满 `Limit`**（客户端常要 30/40）；而 Emby 客户端见到
  *      `Items.Count < Limit` 就把这页当成最后一页、**再也不翻页**（SenPlayer 6.2.1 实测如此）。
  *      `StartIndex`/`Limit` 在这**一堆结果里切片**，`TotalRecordCount` 如实 = 本地手里的条数
- *      （**不是"TMDB 里有多少条"** —— 那个数本层不知道，不能编）。见 `docs/plugin-contract.md`「分页」。
- *   ③ **跨类型怎么排 = 按名次轮流**（tv#1, movie#1, tv#2, movie#2…）：TMDB 的 tv / movie 是两份
+ *      （**不是"上游里有多少条"** —— 那个数本层不知道，不能编）。见 `docs/plugin-contract.md`「分页」。
+ *   ③ **跨类型怎么排 = 按名次轮流**（tv#1, movie#1, tv#2, movie#2…）：上游的 tv / movie 是两份
  *      **独立的相关度排序**，谁也不能替谁排序 —— 轮流合并让两份次序都原样保留，不引入跨类型的人造指标。
  *      ⚠️ 曾经按行的 `popularity` 降序合并，**实测是错的**：搜「斗破苍穹」时它把一个叫 `111` 的剧
- *      （TMDB 相关度很低、但 popularity 数字不小）顶到了第 7 位，把真正相关的电影挤下去。
+ *      （上游相关度很低、但 popularity 数字不小）顶到了第 7 位，把真正相关的电影挤下去。
  *
  * 取不到 → **照实回失败码**（与详情/相似同一取向，不编占位条目）：
  * 一个类型失败、另一个有结果时，回有结果的那部分并在日志里写明（部分失败 ≠ 整条失败）。
@@ -1308,7 +1360,7 @@ async function getSearchItems(requestedId, query) {
   );
 
   /* 按名字去**元数据插件**搜（`metaBridge.search` 是转发层：哪个域、走哪个插件的「搜索」动作都在那里；
-   * 名字搜索的缓存也在插件自己那边 —— 见 plugins/metadata/tmdb/lib/tmdb.js）。
+   * 名字搜索的缓存也在插件自己那边）。
    * **逐页取到"够填窗口"或"上游给空"为止** —— 只取第 1 页会因 `Items.Count < Limit` 让客户端
    * 误判成末页（见注释 ②），所以每页取 `SEARCH_UPSTREAM_PAGE` 条、不足即停。 */
   const settled = await Promise.allSettled(
@@ -1341,7 +1393,7 @@ async function getSearchItems(requestedId, query) {
    * 但**在日志里写明**，免得以后有人以为搜出来的结果被库限制过。 */
   const scopedTo = home.parseViewId(val('ParentId')) ? '（带了库 ParentId，但库没有成员索引 → 全局搜）' : '';
 
-  /* 按名次轮流合并（见本函数注释 ③）：每份列表保持 TMDB 给的相关度次序 */
+  /* 按名次轮流合并（见本函数注释 ③）：每份列表保持上游给的相关度次序 */
   const rows = [];
   for (let rank = 0; ; rank++) {
     let added = false;
@@ -1431,7 +1483,7 @@ async function getLatest(requestedId, query) {
  * 首页插件条目（HomeItem）→ Emby `BaseItemDto`。
  *
  * - **Id 原样带过去**：插件规范**约定**它就是 `{域}_{编号}_{tv|movie}` —— 客户端点这一条时会去打
- *   `/Users/{id}/Items/{这个Id}`，那条走 **TMDB 反查 + 聚合资源**（见指南「五」）。
+ *   `/Users/{id}/Items/{这个Id}`，那条走 **上游反查 + 聚合资源**（见指南「五」）。
  *   插件自己编的 Id 照样显示，只是点进去没有资源（模块自己的事，这边不兜底）。
  * - **图片**：插件的 `poster` / `backdrop` 是**完整 URL**，直接编成签名 tag 交给客户端
  *   （见 `imageTag`）。插件没给就不给 `ImageTags`（不承诺）。
@@ -1458,14 +1510,14 @@ function homeItemDto(it, parentId) {
   if (it.originalTitle !== undefined) item.OriginalTitle = it.originalTitle;
   if (it.genres !== undefined) item.Genres = it.genres;
 
-  /* 外部链接：真机**列表项**就有（IMDb / TheMovieDb / Trakt）。本地只有插件的
-   * `providerIds.Tmdb`（列表接口不给 `imdb_id`），所以**只给能从 id 推出来的那条**：
-   * TheMovieDb。**IMDb 不编** —— 不知道 tt 号就是不知道；**Trakt 不给** —— 那个格式已失效（见 `applyRich`）。 */
-  const tmdbId = it.providerIds && it.providerIds.Tmdb;
-  if (tmdbId) {
-    item.ExternalUrls = [
-      { Name: 'TheMovieDb', Url: `https://www.themoviedb.org/${it.type === 'movie' ? 'movie' : 'tv'}/${tmdbId}` },
-    ];
+  /* 外部链接：真机**列表项**就有（IMDb / 条目站点 / Trakt）。本地手里只有插件给的
+   * `providerIds` 与这个条目的 Id，所以**只给能从 Id 推出来的那条** —— 由**插件自己申报**
+   * （`register.links`，见 `metaBridge.entryLinks`）：**IMDb 不编**（不知道 tt 号就是不知道）；
+   * **Trakt 不给** —— 那个格式已失效（见 `applyRich`）。 */
+  const ref = metaBridge.parseItemId(it.id);
+  if (ref) {
+    const ext = metaBridge.entryLinks(ref.domain, { type: ref.type, entryId: ref.entryId });
+    if (ext.length) item.ExternalUrls = ext.map((l) => ({ Name: l.name, Url: l.url }));
   }
   return item;
 }
@@ -1515,13 +1567,13 @@ function metaFailure(error, what) {
 /**
  * GET /Shows/{Id}/Seasons —— 剧的季列表（Rex-Standard 实测端点：`Id` 在路径、`UserId` 在 query）
  *
- * 只认剧的 Id（`tmdb_95350_tv`），季条目 Id 为 `tmdb_95350_tv_s{n}`（与 itemId/parseItemId 互逆）。
- * 季数据来自同一个 TMDB 接口（`/tv/{id}` 的响应里本来就有 seasons[]），不额外多打一次。
+ * 只认剧的 Id（`{域}_{编号}_tv`），季条目 Id 为 `{域}_{编号}_tv_s{n}`（与 itemId/parseItemId 互逆）。
+ * 季数据来自同一次详情请求（响应里本来就有 seasons[]），不额外多打一次。
  *
- * 特别篇（`season_number === 0`）**本轮不返回** —— 注意 TMDB 的季 `name` 是本地化文案
+ * 特别篇（`season_number === 0`）**本轮不返回** —— 注意上游的季 `name` 是本地化文案
  * （zh-CN 下特别篇叫「特别篇」），所以判定只看 season_number，绝不能匹配名字。见指南「七」的待定条。
  *
- * TMDB 取不到 → 照实回失败（与 Items 同一取向，不编占位季）。
+ * 上游取不到 → 照实回失败（与 Items 同一取向，不编占位季）。
  */
 async function getSeasons(showId, requestedId) {
   const denied = assertUser(requestedId);
@@ -1553,7 +1605,7 @@ async function getSeasons(showId, requestedId) {
         providerIds: { [metaBridge.providerIdKey(domain)]: String(entryId) },
         posterUrl: metaBridge.imageUrlOf(domain, 'w500', s.posterPath || show.posterPath), // 季海报缺失时退回剧海报，免得客户端出白块
       });
-      item.Genres = []; // TMDB 的季没有 genres，空是如实，不套剧的
+      item.Genres = []; // 上游的季没有 genres，空是如实，不套剧的
       item.ChildCount = s.episodeCount;
       item.IndexNumber = s.seasonNumber;
       item.SeriesId = showKey;
@@ -1561,18 +1613,18 @@ async function getSeasons(showId, requestedId) {
       return item;
     });
 
-  const gap = items.length !== show.seasonCount ? ` tmdb 报 ${show.seasonCount} 季` : '';
+  const gap = items.length !== show.seasonCount ? ` 上游报 ${show.seasonCount} 季` : '';
   return {
     status: 200,
     body: { Items: items, TotalRecordCount: items.length },
-    log: `id=${showId} → ${items.length} 季${show.title ? `（TMDB「${show.title}」）` : ''}${gap}`,
+    log: `id=${showId} → ${items.length} 季${show.title ? `（上游「${show.title}」）` : ''}${gap}`,
   };
 }
 
 /**
  * GET /Shows/{Id}/Episodes —— 某一季的分集列表（Rex-Standard 实测端点）
  *
- * 入参形态（实测）：路径 `Id` 是剧 Id（`tmdb_95350_tv`），`UserId` 与 `SeasonId` 都在 query，
+ * 入参形态（实测）：路径 `Id` 是剧 Id（`{域}_{编号}_tv`），`UserId` 与 `SeasonId` 都在 query，
  * 另有 `EnableTotalRecordCount` / 一长串 `Fields`（忽略 —— 只回手里有的）。
  *
  * 季必须能唯一确定：`SeasonId` 取自上一步 Seasons 发出去的季 Id（`{域}_{编号}_tv_s{n}`），
@@ -1590,7 +1642,7 @@ async function getEpisodes(showId, requestedId, seasonId) {
   /* ⚠️ **路径里给「季 Id」也算数**（真机实测容错）：
    * 官方文档写的是 `Shows/{Id}/Episodes` 里 Id = **剧**，但真机（`emby.example.com`）实测
    * `Shows/{季Id}/Episodes?SeasonId={季Id}` **同样回 200**（212 条，与剧 Id 那条一模一样）——
-   * 而 Lumenic/1.0.0 打的就是这种（面板日志里 3 次 `Id 不是剧 → 404：tmdb_79481_tv_s5`）。
+   * 而 Lumenic/1.0.0 打的就是这种（面板日志里 3 次 `Id 不是剧 → 404：{域}_{编号}_tv_s5`）。
    * 季 Id 里本来就带着剧号与季号，信息不缺，没有理由拒。 */
   if (!show || show.type !== 'tv' || show.episode !== null) {
     return { status: 404, body: { error: '没有这个剧' }, log: `Id 不是剧 → 404：${showId}` };
@@ -1660,7 +1712,7 @@ async function getEpisodes(showId, requestedId, seasonId) {
 }
 
 /**
- * TMDB 的 `status` → Emby 的剧状态。**Emby 只认 `Continuing` / `Ended` 两个值**，
+ * 上游的 `status` → Emby 的剧状态。**Emby 只认 `Continuing` / `Ended` 两个值**，
  * 别的写法客户端会当成未知（等于白给）。电影没有这个概念 → 回空、不挂这个字段。
  */
 function statusOf(s) {
@@ -1673,14 +1725,14 @@ function statusOf(s) {
 /**
  * 把 `lookup({rich:true})` 那一批铺到详情 DTO 上 —— **详情页"丰富度"就在这里**。
  *
- * 全部来自**同一次** TMDB 请求的 append 结果（不额外打上游）。每项都是「有才给、没有就不挂」：
+ * 全部来自**同一次**上游请求的 append 结果（不额外打上游）。每项都是「有才给、没有就不挂」：
  * 编不出真值的东西一律留空，宁可页面上少一块，也不给假数据。
  *
  * 刻意**没做**的几项（都写了理由，免得以后反复琢磨）：
- *   · `OriginalLanguage`：TMDB 给 2 位码（`en`）、Emby 要 3 位码（`eng`），映射表容易错，而客户端基本不显示。
- *   · `CriticRating`（媒体评分）：TMDB 没有这个数据（它的 vote 是用户评分）。
+ *   · `OriginalLanguage`：上游给 2 位码（`en`）、Emby 要 3 位码（`eng`），映射表容易错，而客户端基本不显示。
+ *   · `CriticRating`（媒体评分）：上游没有这个数据（它的 vote 是用户评分）。
  *   · 演员头像：要再开一个「人物图片」端点（`Items/{personId}/Images/Primary`），人物不是本层的条目 —— 先不碰。
- *   · `ScreenshotImageTags`：TMDB 没有"截图"这个独立类别，它那些就是背景图，给了等于重复。
+ *   · `ScreenshotImageTags`：上游没有"截图"这个独立类别，它那些就是背景图，给了等于重复。
  *   · 合集（Boxset）：Emby 里是另一类条目，要单独建，不是塞个字段就行。
  */
 function applyRich(item, got, domain) {
@@ -1692,7 +1744,7 @@ function applyRich(item, got, domain) {
    * 实测：SenPlayer 曾打不开本层的详情，而换成真机响应（Studios 带 Id）就正常 ——
    * 客户端模型里缺这个键会让**整个响应解码失败**。 */
   if (got.productionCompanies && got.productionCompanies.length) {
-    /* 按 Id 去重：TMDB 的 `production_companies` 会**重复**（实测同一部片里同一个公司出现两次），
+    /* 按 Id 去重：上游的 `production_companies` 会**重复**（实测同一部片里同一个公司出现两次），
      * 真机的 `Studios[]` 不会重复。 */
     const seenStudio = new Set();
     item.Studios = got.productionCompanies
@@ -1713,7 +1765,7 @@ function applyRich(item, got, domain) {
    * 代价远大于收益。这条是**无条件的**：SenPlayer 只认"键在不在"，缺一条就整条详情报
    * 「网络错误 / 当前媒体库不存在该项目」（Rex 容错所以看不出问题）—— 所以**插件没给
    * `personId` 时也要补一个稳定派生 id**，不能把 `Id` 键整个省掉。
-   *   有插件给的人物 id（TMDB 域是 TMDB 人物号）就用它；没有（如 MissAV 的导演常没给）
+   *   有插件给的人物 id（域给的编号就是它自己的人物号）就用它；没有（有些域的导演常没给）
    *   就用 `p-<md5(域|名字)>` 派生，前缀 `p-` 与纯数字 id 不会撞，且同一人物稳定不变。
    *
    * **顺带把人物头像也做通**：有 `profilePath` 的就给
@@ -1737,26 +1789,26 @@ function applyRich(item, got, domain) {
   const st = statusOf(got.status);
   if (st) item.Status = st;
 
-  /* 外部链接：**名字与顺序照真机**（实测：电影 IMDb → TheMovieDb → [Trakt]、剧 IMDb → TheMovieDb
+  /* 外部链接：**名字与顺序照真机**（实测：电影 IMDb → 条目站点 → [Trakt]、剧 IMDb → 条目站点
    * → TheTVDB → [Trakt]）。客户端有可能会按名字认这几个链接，所以名字不自创。
-   * 每一条的来源：IMDb/TheTVDB ← TMDB 的 `external_ids`；TheMovieDb ← tmdb id 本身。
+   * 每一条的来源：IMDb/TheTVDB ← 插件给的 `externalIds`；条目站点那一条 ← 插件在 `register.links`
+   * 里申报的模板（`{type}` / `{id}` 由面板替换）—— 面板不认识任何具体站点。
    *
-   * ⚠️ **Trakt 刻意不给**（实测后去掉）：真机给的是
-   * `https://trakt.tv/search/tmdb/{id}?id_type=movie|show`，而 **Trakt 已经下架了这条深链** ——
-   * 影、剧、IMDb 三种形状实测**全部 404**（`404: Nothingness. The void.`），
-   * 同站有效路由（`/shows/breaking-bad`）却正常 200 ⇒ 是路由被删，不是被墙/UA。
-   * Trakt 的条目页要用**它自己的 id/slug**，本地手上只有 tmdb/imdb 号，**造不出能用的直链**——
-   * 那就**不给**：发一条必 404 的死链比不发更糟（同"不知道就空字段"的口径）。
+   * ⚠️ **Trakt 刻意不给**（实测后去掉）：真机给的是 `https://trakt.tv/search/<站点>/{id}`
+   * 形状的深链，而 **Trakt 已经下架了这条深链** —— 影、剧、IMDb 三种形状实测**全部 404**
+   * （`404: Nothingness. The void.`），同站有效路由（`/shows/breaking-bad`）却正常 200
+   * ⇒ 是路由被删，不是被墙/UA。Trakt 的条目页要用**它自己的 id/slug**，本地手上只有上游编号，
+   * **造不出能用的直链**——那就**不给**：发一条必 404 的死链比不发更糟（同"不知道就空字段"的口径）。
    * 哪天 Trakt 又支持了、或者能拿到它的 id，再加回来。 */
   const urls = [];
   const isMovie = got.type === 'movie';
   if (got.externalIds && got.externalIds.imdb) {
     urls.push({ Name: 'IMDb', Url: `https://www.imdb.com/title/${got.externalIds.imdb}` });
   }
-  /* 只有 **tmdb 这条链**的条目才拼这一条外链（别的域如 MissAV 的 `got.entryId` 装的是
-   * **它自己的编号**，如 `ssis-001`，拿它去拼 themoviedb.org 的链接是一条必 404 的假链）。 */
-  if (got.entryId && domain === metaBridge.TMDB_DOMAIN) {
-    urls.push({ Name: 'TheMovieDb', Url: `https://www.themoviedb.org/${isMovie ? 'movie' : 'tv'}/${got.entryId}` });
+  /* 条目站点那条由**插件自己申报**：面板不认识任何具体站点，而条目编号是**提供者自己的**
+   * （数字或 slug 都可能），拿它去拼别家的链接会是一条必 404 的假链 */
+  for (const l of metaBridge.entryLinks(domain, { type: got.type, entryId: got.entryId })) {
+    urls.push({ Name: l.name, Url: l.url });
   }
   if (!isMovie && got.externalIds && got.externalIds.tvdb) {
     urls.push({ Name: 'TheTVDB', Url: `https://thetvdb.com/?tab=series&id=${got.externalIds.tvdb}` });
@@ -1781,7 +1833,7 @@ function applyRich(item, got, domain) {
 function leanItemDto(r) {
   /* 域决定三样：条目 Id 的前缀、`ProviderIds` 的键、图片基地址。
    * 调用方都该显式给域（搜索行、相似推荐、播放项都带 `domain`）；真没给时再现算一个兜底域
-   * （见 `metaBridge.defaultDomain` —— 按实例配置/已启用插件现算，不是写死 tmdb）。 */
+   * （见 `metaBridge.defaultDomain` —— 按实例配置/已启用插件现算，不是写死某个域）。 */
   const domain = r.domain || metaBridge.defaultDomain();
   const entryId = r.entryId;
   const item = baseItem({
@@ -1852,9 +1904,9 @@ async function richItemDto(type, entryId, domain = metaBridge.defaultDomain()) {
 /**
  * GET /Items/{ItemId}/Similar —— 「相似 / 更多类似」。
  *
- * **归 emby 层**（和 `Shows/{Id}/Seasons`、`Items/{id}` 同类）：它是**按条目的 tmdb 坐标去 TMDB
+ * **归 emby 层**（和 `Shows/{Id}/Seasons`、`Items/{id}` 同类）：它是**按条目的上游坐标去上游
  * 反查回来的关联内容**，不是"这台服务器上有什么" —— 所以不走首页模块。
- * 数据就来自详情那次 lookup 的 `recommendations`（**同一次 TMDB 请求**，不额外打）。
+ * 数据就来自详情那次 lookup 的 `recommendations`（**同一次上游请求**，不额外打）。
  *
  * ⚠️ 响应形状按 `QueryResult<BaseItemDto>`（`{Items, TotalRecordCount}`）实现，**待客户端实测复核**：
  * 官方这边没有可靠文档，若客户端不渲染，第一个要试的是 `RecommendationDto[]` 那种分组形状。
@@ -1885,9 +1937,9 @@ async function getSimilar(itemId, requestedId, limit) {
  * GET /Users/{UserId}/Items/{ItemId} —— 按 Id 取单条详情
  *
  * 两个数据来源，各司其职：
- *   ① 元数据（名字 / 简介 / 图片 / 集号…）—— **TMDB 反查**。客户端认的是本面板发出去的 Id，
+ *   ① 元数据（名字 / 简介 / 图片 / 集号…）—— **上游反查**。客户端认的是本面板发出去的 Id，
  *      所以必须回**同一个对象**（形状与列表里那条一致）。
- *   ② 源绑定 —— 用 TMDB 的**影视名**，交给聚合层（`agg/api.js` 的 `detail()`，**进程内直调**）搜一遍，
+ *   ② 源绑定 —— 用上游的**影视名**，交给聚合层（`agg/api.js` 的 `detail()`，**进程内直调**）搜一遍，
  *      挑同名条目，命中结果落到日志与 `ProviderIds.Catpaw` / `CatpawSource`。
  *
  * 实现上尽量不重复组装逻辑：季/集**复用列表实现**（`getSeasons` / `getEpisodes`）再挑出那一条；
@@ -1920,7 +1972,7 @@ async function getItem(itemId, requestedId, host = '') {
     }
     /* 集/季两条列表都不含剧名，而搜索关键词要的就是剧名 → 这里必须问一次剧。
      * ⚠️ 搜源用的是 `searchTitle`（主标题没中文时回退中文别名），**不是** `title`：
-     * 客户端看到的仍是被 TMDB 标成主标题的那个名字，但拿它去源里搜会一条都对不上
+     * 客户端看到的仍是被上游标成主标题的那个名字，但拿它去源里搜会一条都对不上
      * （见 emby/meta-bridge.js 的 searchTitleOf）。 */
     const show = await metaBridge.lookup({ type: 'tv', entryId: p.entryId, domain: p.domain });
     if (!show.ok) return metaFailure(show.error, `tv/${p.entryId}`);
@@ -1942,7 +1994,7 @@ async function getItem(itemId, requestedId, host = '') {
 
   if (!found) return { status: 404, body: { error: '没有这个条目' }, log: `列表里没有 ${itemId} → 404` };
 
-  /* ---- 不可播类型（剧 / 季）：TMDB 元数据照给，**源那一趟不跑** ----
+  /* ---- 不可播类型（剧 / 季）：上游元数据照给，**源那一趟不跑** ----
    * Emby 里「剧」「季」是**容器**（真机就是 `IsFolder:true / CanPlay:false`），版本清单
    * （MediaSources）的语义是"这里有 N 个能直接播的文件"，给了客户端会以为整部剧是一个文件、
    * 给出播放入口 —— 而源里每条线路对应的是一集一个文件，点了必然播不出来。
@@ -1963,7 +2015,7 @@ async function getItem(itemId, requestedId, host = '') {
   /* 电影没有季集号：取法用 `pick: 'items'` —— 聚合层把**每条线路的全部播放项**都列成目标
    * （同一部片的多个压制版本各自成一个版本），见 `wantLocator()` 与 docs/adr/0022。
    * 名字 + 年份 + 季集就是全部输入：聚合层用它们**打分**挑片（`agg/match.js`）。
-   * ⚠️ **不再把 tmdb 坐标传下去**（早期给"别名回退"用）：判据换成了本地打分，
+   * ⚠️ **不再把上游坐标传下去**（早期给"别名回退"用）：判据换成了本地打分，
    * 阈值与"最多留几条"来自**这个域用的那套模板**（`agg/templates.js`）——
    * emby 这条链与 web 的聚合搜索**共用同一套**：`aggregateDetail` 内部那发搜索
    * 也把模板参数原样带下去了（否则会退回内置的 0.85 / 8）。 */
@@ -2042,7 +2094,7 @@ async function getItem(itemId, requestedId, host = '') {
       detailDigests.push(dg);
 
       /* **兜底**：不可播类型（剧/季）不进版本列表。正常走不到这里 ——
-       * 函数开头那个「拿到 TMDB 元数据后先判类型」的早返回已经把剧/季挡在聚合层之前了
+       * 函数开头那个「拿到上游元数据后先判类型」的早返回已经把剧/季挡在聚合层之前了
        * （见 `getItem` 里那段说明）；留着是给以后新增类型时的保险。 */
       if (!isPlayable(found.Type)) continue;
       /* 可播目标：**电影 = 该线路下的每个播放项**（多条压制版本各自成一个版本）；
@@ -2377,7 +2429,7 @@ function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel 
     ItemId: itemId,
     MediaStreams: [],
   };
-  /* 体积是源标的近似值；时长来自 TMDB（`RunTimeTicks`），两个都有才能算码率 */
+  /* 体积是源标的近似值；时长来自上游（`RunTimeTicks`），两个都有才能算码率 */
   if (t.sizeBytes) ms.Size = t.sizeBytes;
   if (runtimeTicks) ms.RunTimeTicks = runtimeTicks;
   const avgBitrate = t.sizeBytes && runtimeTicks ? Math.round((t.sizeBytes * 8) / (runtimeTicks / 1e7)) : 0;
@@ -2444,7 +2496,7 @@ function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel 
 /**
  * MediaSource 的 Id：把**源插件编的那个 `ref`** 包一层。
  *
- * 形状：`catpaw:` + **base64url**(JSON `{r: ref}`)。
+ * 形状：`catpaw:` + **base64url**(deflateRaw(JSON `{r: ref}`))。
  *
  * **为什么必须编码**（实测）：客户端把 Id 拼进 query 时，中文它会编码
  * （日志里是 `%E5%A4%B8%E5%85%8B…`），但 **`#` 它不编码** —— 而线路名里就有 `#`（如 `夸克原画#01`），
@@ -2452,19 +2504,25 @@ function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel 
  * 客户端反复重试（实测 e1/e2 各 34 次）。base64url 字符集只有 `[A-Za-z0-9_-]`，
  * 客户端编不编码都是同一串，对该问题**免疫**。
  *
+ * **为什么还要压一道**（实测）：SenPlayer 把整条请求 URL 截在 4095 字符，留给 `MediaSourceId` 的
+ * 只有 4048 —— 而 `ref` 本身就是插件编的一串 base64（里面还嵌着一层站点的 playToken），
+ * 不压直接编出来最长实测 5098 字符：客户端发出去的是半截串，服务端按形状校验回 400
+ * 「src 认不出」，同一个视频换个客户端却能播（Rex 无此上限）。deflate 对这种"base64 套 base64"
+ * 的重复文本收益明显：同一批 19 个版本最长的 5098 → 3391 字符，压完都在 4048 以内。
+ *
  * **面板不解释 `ref` 的内容**（契约第八节）：里面是什么、怎么换成一个地址，都是源插件的事。
- * 这一层只做两件事：编码成客户端安全的一串、播放时原样交回插件。
+ * 这一层只做三件事：压小、编码成客户端安全的一串、播放时原样交回插件。
  */
 function catpawSourceId(ref) {
   const payload = JSON.stringify({ r: String(ref || '') });
-  return 'catpaw:' + Buffer.from(payload, 'utf8').toString('base64url');
+  return 'catpaw:' + zlib.deflateRawSync(Buffer.from(payload, 'utf8')).toString('base64url');
 }
 
 /* 拉流方式：**一律 302**（`play.mode` 与「面板代理」那条路一并删掉）。
  *
  * 为什么删代理：面板在路由器上（2G 内存、U 盘），把每条流的字节都接一遍是最贵的那种"省事"——
  * 而 302 把流量留在源与客户端之间，面板只回一个 Location。代价是**客户端得连得到源地址**，
- * 而"把地址变成客户端够得着的那一个"现在是**源插件**在做（见 plugins/source/catpaw/lib/address.js）：
+ * 而"把地址变成客户端够得着的那一个"现在是**源插件**在做：
  * 面板不再知道实例端口，也没法再做那一步 —— 它只把客户端主机名交给插件。
  *
  * 老配置里残留的 `play.mode` 不再读、也不再校验（`PLAY_MODE_VALUES` 已删）——
@@ -2474,15 +2532,15 @@ function catpawSourceId(ref) {
 /**
  * 拆版本 Id —— 认出来就是 `{ref}`，认不出回 `null`（上层据此报 400，不猜）。
  *
- * 形状只有一种：`catpaw:<base64url(JSON {r: ref})>`（见 `catpawSourceId`）。
- * ⚠️ **旧形状不再认**（多源之前那种 `<源>:<站点>:<线路>|<vod>`）：按 ADR-0034 不留双读分支 ——
- * 客户端手里缓存的旧 Id 会被如实回一句"重新进一次播放页"（客户端进播放页必先问 PlaybackInfo，
- * 所以它自会拿到新的）；这正是那条"不为未发布的东西留兼容"的口径。
+ * 形状只有一种：`catpaw:<base64url(deflateRaw(JSON {r: ref}))>`（见 `catpawSourceId`）。
+ * ⚠️ **旧形状不再认**（多源之前那种 `<源>:<站点>:<线路>|<vod>`，以及只编码不压缩的那一版）：
+ * 按 ADR-0034 不留双读分支 —— 客户端手里缓存的旧 Id 会被如实回一句"重新进一次播放页"
+ * （客户端进播放页必先问 PlaybackInfo，所以它自会拿到新的）；这正是那条"不为未发布的东西留兼容"的口径。
  */
 function parseCatpawSourceId(src) {
   const s = String(src || '');
   if (!s.startsWith('catpaw:')) return null;
-  const plain = b64urlDecode(s.slice('catpaw:'.length));
+  const plain = inflateText(s.slice('catpaw:'.length));
   if (!plain || !plain.startsWith('{')) return null;
   try {
     const o = JSON.parse(plain);
@@ -2494,12 +2552,16 @@ function parseCatpawSourceId(src) {
 }
 
 /**
- * base64url → utf8。`Buffer` 对非法字符是**静默忽略**的（会解出乱码而不抛），所以这里自己兜一道：
- * 解不出可打印文本（含控制字符 / 空）就回空串，让上层的形状校验去拒 —— **不猜**。
+ * base64url → deflate 解压 → utf8。两道都自己兜住，只把"确定是可打印文本"的结果交出去 —— **不猜**：
+ *   - `Buffer` 对非法 base64 字符是**静默忽略**的（会解出乱码而不抛）；
+ *   - `inflateRawSync` 碰上不是 deflate 的数据（老的只编码不压缩那一版、客户端截断的半截串）会抛。
+ * 任一不成立就回空串，让上层的形状校验去拒。`maxOutputLength` 是必需的：这一段是**客户端递进来的**，
+ * 不设上限的话一个小串能原地炸出很大一块内存；合法载荷（实测约 3.8KB 明文）离 64KB 还远。
  */
-function b64urlDecode(s) {
+function inflateText(s) {
   try {
-    const out = Buffer.from(String(s || ''), 'base64url').toString('utf8');
+    const buf = Buffer.from(String(s || ''), 'base64url');
+    const out = zlib.inflateRawSync(buf, { maxOutputLength: 64 * 1024 }).toString('utf8');
     return /^[^\u0000-\u001f]+$/.test(out) ? out : '';
   } catch {
     return '';
@@ -2624,7 +2686,7 @@ async function getPlaybackInfo(itemId, requestedId, host = '', token = '') {
  * 现取、不缓存（地址会过期；缓存在插件自己那边，它自己管有效期）。
  *
  * `clientHost` = 客户端访问本面板用的 `Host` 头：本地部署的实例回的是回环地址，
- * 插件要拿它拼成"客户端够得着的那台机器"（见 plugins/source/catpaw/lib/address.js）。
+ * 插件要拿它拼成"客户端够得着的那台机器"（这一步归源插件）。
  */
 async function resolveStream(itemId, src, requestedId, clientHost) {
   /* 有 UserId 就校验，没有也不拦（客户端拉流不保证带上它） */
@@ -2662,17 +2724,20 @@ async function resolveStream(itemId, src, requestedId, clientHost) {
       log: `${locatorLabel(p.type === 'movie' ? 'Movie' : 'Episode', p)} 解析地址失败（${e.code}：${e.message || ''}）`,
     };
   }
-  return finishStream({ p, pr });
+  return await finishStream({ p, pr });
 }
 
 /**
  * 拉流的**共同尾段**：拿到地址之后怎么跳。请求头提醒与日志口径只此一处。
  *
  * ⚠️ 地址**不再由面板改写**：回环地址换成"客户端够得着的那台机器"这一步随 `ref` 转交
- * 搬进了源插件（见 plugins/source/catpaw/lib/address.js）—— 面板已经不知道实例端口，
+ * 搬进了源插件 —— 面板已经不知道实例端口，
  * 插件给回来的就是最终地址。这里只做"能不能 302"的如实判断。
+ *
+ * 唯一的例外是 **HLS 清单**（见下面 `isPlaylistUrl` 那段）：那种地址不能 302，
+ * 得由面板取回来改写一次再回（ADR-0040）。
  */
-function finishStream({ p, pr }) {
+async function finishStream({ p, pr }) {
   const play = pr.play || {};
   const url = (play.urls || [])[0] || '';
   const headers = play.header || {};
@@ -2686,19 +2751,138 @@ function finishStream({ p, pr }) {
       log: `非直连地址（${url.slice(0, 12)}…）`,
     };
   }
-  /* 该线路要求请求头 → 302 后**客户端带不了**（头是源自己内嵌在 proxy URL 里的例外，那种 header 是空的）。
-   * 如实记一行，别让它变成"点了播放没反应"的无头案。 */
+  /* 措辞按 **Emby 的类型**走：`p.type` 是上游的 `tv`/`movie`，直接喂 locatorLabel 会得到
+   * 「非可播类型：tv」这种误导日志（早期一直这么打）。 */
+  const label = locatorLabel(p.type === 'movie' ? 'Movie' : 'Episode', p);
+  /* 该线路要求请求头（头是源自己内嵌在 proxy URL 里的例外，那种 header 是空的）。
+   * 两条路上的"带不了"不是一回事，所以分开说，别让它变成"点了播放没反应"的无头案。 */
   const reqHeaders = Object.keys(headers || {});
-  const headerNote = reqHeaders.length ? ` ⚠️ 该线路要求请求头 ${reqHeaders.join('/')}，302 后客户端带不了` : '';
+  const headerNote302 = reqHeaders.length ? ` ⚠️ 该线路要求请求头 ${reqHeaders.join('/')}，302 后客户端带不了` : '';
+  const headerNoteRelay = reqHeaders.length
+    ? ` ⚠️ 该线路要求请求头 ${reqHeaders.join('/')}：取清单这一跳由面板带了，之后客户端直连、带不了`
+    : '';
+
+  if (!isPlaylistUrl(url)) {
+    return { status: 200, log: `${label} parse=${play.parse} → 302` + headerNote302, stream: { url, headers, parse: play.parse } };
+  }
+
+  /* HLS 清单**不能 302** —— 理由见 `serveStream` 那段注释。取不回来就退回 302（与改前一致，至少不变差）。 */
+  const got = await fetchPlaylist(url, headers);
+  if (got.error) {
+    return {
+      status: 200,
+      log: `${label} parse=${play.parse} → 302（清单中继失败：${got.error}）` + headerNote302,
+      stream: { url, headers, parse: play.parse },
+    };
+  }
+  const fixed = absolutizePlaylist(got.text, got.url);
   return {
     status: 200,
-    /* 措辞按 **Emby 的类型**走：`p.type` 是 tmdb 的 `tv`/`movie`，直接喂 locatorLabel 会得到
-     * 「非可播类型：tv」这种误导日志（早期一直这么打）。 */
-    log:
-      `${locatorLabel(p.type === 'movie' ? 'Movie' : 'Episode', p)}` +
-      ` parse=${play.parse} → 302` + headerNote,
-    stream: { url, headers, parse: play.parse },
+    log: `${label} parse=${play.parse} → 200 清单中继（${fixed.count} 个地址补成绝对，${fixed.text.length} 字节）` + headerNoteRelay,
+    playlist: { text: fixed.text, contentType: PLAYLIST_MIME },
   };
+}
+
+/* ----------------------------------------------------------- HLS 清单中继 */
+
+/** 清单单次最多读多少字节 —— 正常清单（master 或媒体）都只有几 KB，分片则是兆级的，超了就不是清单 */
+const PLAYLIST_MAX_BYTES = 256 * 1024;
+/** 取清单的超时（客户端在等这一跳，不能久留） */
+const PLAYLIST_TIMEOUT_MS = 15000;
+/** 回给客户端的清单 MIME（HLS 规范写的那个；客户端据此认它是清单而非文件） */
+const PLAYLIST_MIME = 'application/vnd.apple.mpegurl';
+
+/**
+ * 这份地址是不是 HLS 清单。**只看路径后缀**（`.m3u8`，query 里带 token 的照样算）——
+ * 不依赖源插件声明 `Container`，也不依赖响应体（要判响应体就得先把分片拉下来）。
+ */
+function isPlaylistUrl(u) {
+  try {
+    return /\.m3u8$/i.test(new URL(u).pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** 相对 → 绝对。已经是绝对的（含 `data:` 那类）返回空串，表示"不用动" */
+function absoluteUri(uri, base) {
+  const s = String(uri || '').trim();
+  if (!s || /^[a-z][a-z0-9+.-]*:/i.test(s)) return '';
+  try {
+    return new URL(s, base).toString();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 把清单里所有**地址**补成绝对地址，其余一行不动。
+ *
+ * 两种都算地址：
+ *   · 非 `#` 开头的整行（master 的变体行、媒体清单的分片行）；
+ *   · 标签里 `URI="…"` 的值（`#EXT-X-KEY` / `#EXT-X-MAP` / `#EXT-X-MEDIA` /
+ *     `#EXT-X-I-FRAME-STREAM-INF` / `#EXT-X-PART` …）—— 规范里这些 URI 都带引号。
+ * 其它标签（`#EXT-X-TOKEN` 这种非标准的也在内）**原样保留**；认不出的地址原样留着，
+ * 不猜、不把清单改坏。
+ *
+ * @param base 清单**最终**的地址（跟随过跳转的那个）—— 相对地址是相对它算的
+ * @returns `{ text, count }`：`count` 是补掉几处（只进日志）
+ */
+function absolutizePlaylist(text, base) {
+  let count = 0;
+  const lines = String(text).split('\n').map((raw) => {
+    const line = raw.replace(/\r$/, '');
+    const s = line.trim();
+    if (!s) return line;
+    if (s.startsWith('#')) {
+      return line.replace(/URI="([^"]*)"/g, (m, uri) => {
+        const abs = absoluteUri(uri, base);
+        if (!abs) return m;
+        count++;
+        return `URI="${abs}"`;
+      });
+    }
+    const abs = absoluteUri(s, base);
+    if (!abs) return line;
+    count++;
+    return abs;
+  });
+  return { text: lines.join('\n'), count };
+}
+
+/**
+ * 取回清单原文。**不落地、不缓存**：这一跳只为改写，改完就扔。
+ *
+ * 三条硬约束（地址是源给的，面板只是照取）：
+ *   ① 超时 `PLAYLIST_TIMEOUT_MS`；
+ *   ② 边读边数，超过 `PLAYLIST_MAX_BYTES` 立刻断开（免得被一个"看着像清单其实是大分片"的地址拖住）；
+ *   ③ 取回来必须真以 `#EXTM3U` 开头 —— 不是清单就如实说，让调用方退回 302。
+ */
+async function fetchPlaylist(url, headers) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), PLAYLIST_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { headers, redirect: 'follow', signal: ctrl.signal });
+    if (!res.ok) return { error: `上游 HTTP ${res.status}` };
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of res.body) {
+      size += chunk.length;
+      if (size > PLAYLIST_MAX_BYTES) {
+        ctrl.abort();
+        return { error: `响应超过 ${PLAYLIST_MAX_BYTES} 字节，不像是清单` };
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+    const text = Buffer.concat(chunks).toString('utf8');
+    if (!/^\s*#EXTM3U/.test(text)) return { error: '取回的不是清单' };
+    return { text, url: res.url || url };
+  } catch (e) {
+    const msg = e && e.name === 'AbortError' ? `取清单超时（${PLAYLIST_TIMEOUT_MS / 1000} 秒）` : String((e && e.message) || e);
+    return { error: msg };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -2806,7 +2990,7 @@ function baseItem(f) {
     .filter(Boolean);
   if (backs.length) item.BackdropImageTags = backs;
 
-  /* `DateCreated` / `DateModified` 用 **TMDB 的发行日期**。
+  /* `DateCreated` / `DateModified` 用 **上游的发行日期**。
    * ⚠️ 语义：真机的这两个字段是**文件**的创建/修改时间，本层没有文件 —— 用"上映日期"近似。
    * 好处是客户端的「最近添加」会按**上映时间**排（比"首次见到"更有用）。
    * 拿不到发行日期（插件给的行只有 `year`、没有整日期）就**不给这两个字段** ——
@@ -2848,7 +3032,7 @@ function emptyViewUserData() {
 /**
  * Emby 的"从未修改/未知"零值 —— 真机库条目的 `DateModified` 25/25 全是它，照给（不是编的）。
  * **库的 `DateCreated` 也用它**：本层没有任何真实时间可用（库里没有"创建"这个动作，
- * TMDB 也没有对应实体），口径是"给个一看就知道是占位的值"，而它同时是合法时间
+ * 上游也没有对应实体），口径是"给个一看就知道是占位的值"，而它同时是合法时间
  * （`0000-00-00` 那种非法日期会让客户端的 DateTime 解析整条失败）。
  */
 const ZERO_STAMP = '0001-01-01T00:00:00.0000000Z';
@@ -2859,8 +3043,8 @@ const ZERO_STAMP = '0001-01-01T00:00:00.0000000Z';
  * 图片 tag = `cpimg.<base64url(图片URL)>.<签名>`。
  *
  * **为什么把 URL 编进 tag**：客户端取图时**只回传 `Id` + `tag`，不回传 URL**；而条目 Id 是
- * `tmdb_{id}_{tv|movie}`，单靠它还原不出"插件给的那张图"（插件给的是完整 URL）。编进去就零额外调用，
- * 而且**详情**（TMDB 图床 URL）与**列表**（插件给的 URL）统一成同一种形状，端点不必分类讨论。
+ * `{域}_{编号}_{tv|movie}`，单靠它还原不出"插件给的那张图"（插件给的是完整 URL）。编进去就零额外调用，
+ * 而且**详情**（上游图床 URL）与**列表**（插件给的 URL）统一成同一种形状，端点不必分类讨论。
  *
  * **为什么要签名**：图片端点**必须豁免 token**（实测图片请求的凭证携带不统一，同批 8 条里 3 条啥都不带），
  * 那它就是一个"面板代为取任意 URL"的接口 —— 不签名等于把面板变成局域网/Tailscale 上的**开放代理（SSRF）**。
@@ -2894,9 +3078,9 @@ function imageTag(itemId, url) {
  * 缓存的条目 Id 要图、**后**才拉列表（时序：登录 → 4ms 后要图 → 213ms 后才拿到列表）。
  * ⇒ 只要图片位置只存在于 tag 里，这个客户端就永远取不到封面。
  *
- * **存的是「无头」值**：TMDB 图床的地址剥掉基地址只留相对路径（`metaBridge.splitImageUrl`），
- * 取的时候再拼当前基地址 —— 这样用户把图床换成镜像，索引**立刻跟着变**，不用等 TTL、不用清缓存。
- * 别处的绝对地址原样存。
+ * **存的就是插件给的那个 URL**（完整地址，原样存原样取）：基地址是插件自己的设置，
+ * 面板不替任何域记"基地址 + 相对路径"这套拼法 —— 代价是插件换了图床基地址之后，
+ * 库里那批老地址要等 TTL 过期（或清一次图片索引）才自愈。
  */
 function tagAndRemember(itemId, type, index, url) {
   const u = String(url || '');
@@ -2904,7 +3088,7 @@ function tagAndRemember(itemId, type, index, url) {
   const key = `${itemId}|${String(type).toLowerCase()}|${Number(index) || 0}`;
   try {
     const cc = cache.cfg();
-    cache.putImage(key, metaBridge.splitImageUrl(u) || u, cc.imageTtlMs, cc.imageMaxBytes);
+    cache.putImage(key, u, cc.imageTtlMs, cc.imageMaxBytes);
   } catch {
     /* 索引写失败不该影响出 tag —— 客户端带 tag 时照样能取到图 */
   }
@@ -2913,20 +3097,15 @@ function tagAndRemember(itemId, type, index, url) {
 
 /**
  * 图片索引查询：条目 Id + 类型 + 索引 → 完整图片 URL（查不到回 null）。
- *
- * 值是「相对路径」时用**当前**图床基地址拼回；含 `://` 的是绝对地址，原样返回。
- * 这个判据是无歧义的：TMDB 的相对路径（`w500/xx.jpg`）里不可能出现 `://`。
+ * 值就是写进去时那个完整 URL，原样返回。
  */
 function imageUrlFromIndex(itemId, type, index) {
   const key = `${itemId}|${String(type).toLowerCase()}|${Number(index) || 0}`;
-  let v = null;
   try {
-    v = cache.getImage(key);
+    return cache.getImage(key) || null;
   } catch {
     return null;
   }
-  if (!v) return null;
-  return v.includes('://') ? v : metaBridge.joinImageUrl(v);
 }
 
 /** `imageTag()` 的逆：验签 + 只收 http(s) —— 认不出 / 验不过一律 null（不猜、不放行） */

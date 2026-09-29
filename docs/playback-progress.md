@@ -1,7 +1,7 @@
 # 播放进度上报（`POST /Sessions/Playing*`）实现方案
 
 > 状态：**已实施**（决策落在 [ADR-0023](adr/0023-playback-progress.md)；本文保留为设计过程与真机实测记录）。
-> 与方案的两处偏差：① 元数据**读时按坐标反查 TMDB**（走 `data/cache/tmdb.db` 缓存），**不写快照**（§5.2 选 B 而非 A）；
+> 与方案的两处偏差：① 元数据**读时按坐标反查上游**（走元数据插件自己的缓存），**不写快照**（§5.2 选 B 而非 A）；
 > ② `PlayCount` 按"看完才 +1"（真机是"开始播放就 +1"，差异记在 ADR-0023 的「后果」）。
 > 实测依据：面板容器留档日志 `2026-09-22T16:52:35 ~ 17:01:31Z`（96 行，`docker logs media-bridge-panel`）。
 > 实施时按 `CONTRIBUTING.md` 的规矩补一条 **ADR-0023**（新数据结构 + 新失败语义），并把三条端点登记进
@@ -93,7 +93,7 @@ r.add('ANY', '/api/emby/*rest', async (req, res, { pathname, query }) => {
   而 **`Progress` 缺 token 也回 204**（真机对进度心跳是"尽力而为、不求鉴权"）。
   本面板按 ADR-0009 的口径**三条一律校验账号**（它们都会写真实数据）—— 这处与真机的差异写进 ADR-0023。
 - **ItemId 形状**：真机要求 Guid（非 Guid 回 **500** `Unrecognized Guid format.`），
-  而本面板发出去的是 `tmdb_*`。客户端**只是原样回传**，所以实现按 `tmdb.parseItemId` 判形状；
+  而本面板发出去的是 `{域}_{编号}_*`。客户端**只是原样回传**，所以实现按 `metaBridge.parseItemId` 判形状；
   认不出的仍按「未实现」记一行 + 501（不静默吞掉，沿用现有口径）。
 
 ### 4.2 数据模型（新表 `playback`）
@@ -143,8 +143,8 @@ CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, u
 
 ### 4.4 键的粒度：集 / 电影
 
-条目 Id 由 `tmdb.js:81-106` 的 `itemId()` 派生，四种形状：`tmdb_<id>_movie`、`tmdb_<id>_tv`、
-`tmdb_<id>_tv_s{n}`、`tmdb_<id>_tv_s{n}_e{m}`。**可播的只有后两种里的"电影 / 集"**（`isPlayableId()`，`service.js:2168`），
+条目 Id 由 `meta-bridge.js` 的 `itemId()` 派生，四种形状：`{域}_{编号}_movie`、`{域}_{编号}_tv`、
+`{域}_{编号}_tv_s{n}`、`{域}_{编号}_tv_s{n}_e{m}`。**可播的只有后两种里的"电影 / 集"**（`isPlayableId()`，`service.js:2168`），
 所以客户端上报的 `ItemId` 一定是 **episode 或 movie 级** —— 进度就记在这一级，剧级（`_tv`）不记。
 `Resume` 列表里"某部剧"的呈现，由读侧从集坐标反推 `SeriesId` / `SeriesName` / 季集号。
 
@@ -160,7 +160,7 @@ CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, u
 |---|---|---|
 | `service.js:2416`（`baseItem()` 内） | `UserData: emptyUserData()` | 由调用方传 `f.userData`（有记录给真值，无记录给现有的空形状） |
 | `service.js:395`（`homeViewItem()`） | `UserData: emptyViewUserData()` | 库条目形状不同（少 `PlayCount`），**别复用**那条 |
-| `homeItemDto()` / `leanItemDto()` / `tmdbItemDto()` / `getSeasons()` / `getEpisodes()` | 多数**不带** `UserData` | 补上（否则库列表与详情看不到"已看"和"看到哪"） |
+| `homeItemDto()` / `leanItemDto()` / `richItemDto()` / `getSeasons()` / `getEpisodes()` | 多数**不带** `UserData` | 补上（否则库列表与详情看不到"已看"和"看到哪"） |
 
 ⚠️ **字段集合必须一致**（ADR-0007）：有记录与无记录时 `UserData` 的键要完全相同，只是取值不同。
 
@@ -181,9 +181,9 @@ CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, u
 
 | 方案 | 做法 | 代价 |
 |---|---|---|
-| **A（推荐）写时快照** | 写端点里**只在该 item 还没有快照时** resolve 一次（`tmdb.lookup`，通常命中已有缓存），把最小字段存进 `snapshot` | 写路径多一次（一次性的）解析；读路径完全不碰上游，行为可预测 |
-| B 读时 resolve | `Resume` 时按坐标现查，走 `tmdb` 缓存 | 冷缓存时**会真的打上游**；`Resume` 是客户端高频端点 |
-| C 只读缓存 | 只读缓存，查不到就不列 | 需要在元数据插件里新增 `cacheOnly`（现在只有 `noCache`，**没有**"只读"的口子；见 `plugins/metadata/tmdb/lib/tmdb.js`） |
+| **A（推荐）写时快照** | 写端点里**只在该 item 还没有快照时** resolve 一次（`metaBridge.lookup`，通常命中已有缓存），把最小字段存进 `snapshot` | 写路径多一次（一次性的）解析；读路径完全不碰上游，行为可预测 |
+| B 读时 resolve | `Resume` 时按坐标现查，走元数据插件的缓存 | 冷缓存时**会真的打上游**；`Resume` 是客户端高频端点 |
+| C 只读缓存 | 只读缓存，查不到就不列 | 需要在元数据插件里新增 `cacheOnly`（现在只有 `noCache`，**没有**"只读"的口子；见插件契约） |
 
 **快照要存的最小字段**（够拼一条列表项）：`Name` / `Type`(`Episode`\|`Movie`) / `ProductionYear` /
 `posterUrl` / `runTimeTicks` / 剧集还需 `SeriesId` / `SeriesName` / `ParentIndexNumber` / `IndexNumber`。
@@ -238,7 +238,7 @@ CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, u
 | `server/modules/emby/service.js` | 新增 `recordPlayback()`；改 `getResume` / `getNextUp` / `getItems` 的 Filters 分支 / `itemsWillReturnData`；`baseItem` 与各 DTO 的 `UserData` 注入；`userDataOf(accountId,itemId)`；`authorize` 的回账号通道 |
 | `server/modules/emby/db.js` | `playback` 表 + `SCHEMA_VERSION=3`；`upsertPlayback` / `listResume` / `listPlayed` / `userDataOf` / `removePlaybackOfAccount` |
 | `server/modules/emby/log.js` | `bodyBrief()`（掩码 + 限长 300）并导出 |
-| `plugins/metadata/tmdb/lib/tmdb.js` | 仅当选 §5.2 的 C 方案：加 `cacheOnly`（元数据缓存现在归插件） |
+| 元数据插件源码（不在本仓库） | 仅当选 §5.2 的 C 方案：加 `cacheOnly`（元数据缓存现在归插件） |
 | `docs/adr/0023-*.md`（新）、`docs/adr/README.md`、`docs/emby-compat.md`、`docs/develop.md` | 决策与端点清单同步（`Sessions/Playing*` 现在**根本没登记**在缺口清单里，顺手补上） |
 | `CHANGELOG.md` | `[Unreleased]` 记一条 |
 

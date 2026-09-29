@@ -18,9 +18,6 @@ emby.log.bak
 # 运行时数据：源 bundle、缓存 db、以及可能含网盘 cookie/token 的源 profile
 data/
 
-# 插件源码：由独立插件仓库分发（见 ADR-0035），不进本版本库；本地留一份供 plugin-pack.js 打包
-plugins/
-
 # 容器与部署：不属于项目源码，只在本机保留
 #   Dockerfile / docker-compose*.yml / bundle.sh / publish.sh / compose 部署记录 / 构建产物
 # 删除本行即可把部署文件一并纳入版本库。

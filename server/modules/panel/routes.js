@@ -11,6 +11,7 @@
 const settings = require('../../core/settings');
 const registry = require('../../core/registry');
 const cachedb = require('../../core/cachedb');
+const BRAND = require('../../core/branding'); // 备份文件名前缀（品牌短标识，与项目名一致）
 /* 面板层的「缓存设置」要顺带显示**按插件记的聚合耗时**（ADR-0032 第 4 条）——
  * 那份账写在 `agg_stat`（agg/cache.js），所以这里直接读它。方向是单向的：
  * agg 层不 require panel（只 require core），不会转圈。 */
@@ -38,8 +39,8 @@ function migrateCacheFromEmby() {
   const old = emby.cache;
   if (!old || typeof old !== 'object') return;
 
-  /* ⚠️ 只搬**还在面板管**的那两项：`tmdbTtlDays` / `tmdbMaxMB` 已随元数据插件化归插件，
-   * 面板这边不再有这两个键（盘上老值就留着，谁都不读它）。 */
+  /* ⚠️ 只搬**还在面板管**的那两项：元数据缓存那两个键已随元数据插件化归插件，
+   * 面板这边不再有它们（盘上老值就留着，谁都不读它）。 */
   const keys = ['imageTtlDays', 'imageMaxMB'];
   const next = {};
   for (const k of keys) {
@@ -155,14 +156,21 @@ module.exports = function routes(r) {
   );
 
   /* 备份：回一份 **zip 字节**（不是 JSON）。摘要放响应头，前端下载后凭它显示"含多少文件 / 多大"。
-   * 范围与排除项见 backup.js 顶部注释（全部数据、不含缓存与应用代码）。 */
+   * 范围与排除项见 backup.js 顶部注释（全部数据、不含缓存与应用代码）。
+   * ⚠️ 摘要里的"多大"是**包的实际大小**（`out.size` = zip 字节数），不是内容原始字节和 ——
+   *    两者实测差三倍多，拿错了界面上显示的数就与下载到的文件对不上。 */
   r.add('GET', '/api/panel/backup', (req, res) => {
     const out = backup.exportAll();
-    res.setHeader('Content-Disposition', 'attachment; filename="catpaw-panel-backup.zip"');
+    /* 文件名前缀取品牌短标识（`branding.slug`）—— 与项目名一致，不写死；
+     * 前端下载时用它拼带时间戳的名字（那份 branding 与这份成对，见 core/branding.js）。 */
+    res.setHeader('Content-Disposition', `attachment; filename="${BRAND.slug}-backup.zip"`);
     res.setHeader('X-Backup-Files', String(out.files));
-    res.setHeader('X-Backup-Bytes', String(out.bytes));
+    res.setHeader('X-Backup-Size', String(out.size));
     res.setHeader('X-Backup-Exported-At', out.exportedAt);
-    console.log(`  ↑ 面板数据备份：${out.files} 个文件 / ${Math.round(out.bytes / 1024)} KB（不含缓存与应用代码）`);
+    console.log(
+      `  ↑ 面板数据备份：${out.files} 个文件 / ${Math.round(out.size / 1024)} KB` +
+        `（内容未压缩 ${Math.round(out.contentBytes / 1024)} KB，不含缓存与应用代码）`
+    );
     return sendBuffer(res, 200, out.buffer, 'application/zip');
   });
 
@@ -272,18 +280,24 @@ module.exports = function routes(r) {
   });
 
   /* ---- 面板重启 ----
-   * 只把**应用进程**重起一遍，容器不动：写 `.restart` 再退出，由引导脚本按 `current.json`
-   * 拉起同一个版本（协议见 update.js / docker/entrypoint.js）。
-   * 与自更新同一道门禁 —— 没有监督者时进程退出就没人拉回来了，如实拒绝。
-   * `reason` 记成 restart，日志里与"更新触发的重启"区分得开。 */
+   * 只把**应用进程**重起一遍，容器不动，版本不变：
+   *   · 受托管（引导脚本）→ 写 `.restart` 再退出，由它按 `current.json` 拉起同一个版本；
+   *   · 非托管（直接跑源码等）→ 退出前**自拉起**一个同代码的副本（见 update.js 的 `relaunchIfPending`）。
+   * 只有带文件看护的启动方式（npm run dev / node --watch、nodemon）如实拒绝 —— 那套自己会重起子进程，
+   * 与自拉起叠加就是两个进程抢端口（判据见 update.js 的 `restartRefusal`）。
+   * `reason` 记成 restart，日志里与"更新触发的重启"区分得开（自更新那条路仍然只受托管时才允许）。 */
   r.add('POST', '/api/panel/restart', async (req, res) => {
-    if (!update.isManaged()) {
-      return sendError(res, 400, '当前不是由容器引导脚本托管的运行方式，面板无法自行重启（请重起容器或手动重起进程）');
-    }
+    const refuse = update.restartRefusal();
+    if (refuse) return sendError(res, 400, refuse);
     await readBody(req); // 请求体（若有）读掉，避免连接挂着
     const version = update.currentVersion();
+    const managed = update.isManaged();
     update.requestRestart(version, 'restart');
-    console.log(`  ↻ 面板重启：应用进程即将重起（版本 ${version}，容器不动）`);
+    console.log(
+      managed
+        ? `  ↻ 面板重启：应用进程即将重起（版本 ${version}，容器不动）`
+        : `  ↻ 面板重启：非托管运行方式，本进程退出前自拉起（版本 ${version}）`
+    );
     return sendJson(res, 200, { ok: true, restarting: true, version });
   });
 

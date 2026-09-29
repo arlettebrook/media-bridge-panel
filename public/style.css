@@ -44,7 +44,7 @@ html, body {
 
 /* ---------------- 表单控件（形状与高度统一） ----------------
  * ⚠️ 选择器写得**宽**是有意的：原来只写 `input[type=text], input[type=number]`，
- * 于是 `type=password`（账号管理 / TMDB Token）、`type=url`、`type=search` **一点样式都没有** ——
+ * 于是 `type=password`（账号管理 / 元数据 Token）、`type=url`、`type=search` **一点样式都没有** ——
  * 在暗色界面上就是一块浏览器默认的白框。除 checkbox / radio / file 外一律纳入。
  * 高度统一 34px：**输入框、下拉、按钮三者对齐**，同一行里不再高低不齐。 */
 input:not([type='checkbox']):not([type='radio']):not([type='file']),

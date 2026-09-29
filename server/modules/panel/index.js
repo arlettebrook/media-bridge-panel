@@ -30,8 +30,8 @@ module.exports = {
       speedTestAuto: true,
       speedTestHours: 6,
       modules: { source: true, agg: true, emby: true, panel: true },
-      /* ⚠️ TMDB 设置**不在面板层**（原来在）——它随元数据插件走：token / 基地址 / 语言 /
-       * 它自己的缓存都在 `plugins/metadata/tmdb/data/settings.json` 里，UI 是插件自己的设置页。
+      /* ⚠️ 元数据设置**不在面板层**（原来在）——它随元数据插件走：token / 基地址 / 语言 /
+       * 它自己的缓存都在**插件自己的数据目录**里，UI 是插件自己的设置页。
        * 面板只从插件的「注册」动作里拿**图片基地址**（替客户端取图要拼串，见 emby/meta.js）。 */
       /* 本地缓存策略（原在 emby 层）—— 面板这边还剩两个库：
        *   core 的 `data/cache/lines.db`（line_cache = **线路结果缓存**，见 agg/cache.js）
@@ -98,6 +98,9 @@ module.exports = {
 
   /** 启动成功后清掉"当前版本之外"的版本目录（每次启动都跑，见 update.js 的 pruneOnBoot） */
   pruneOnBoot: (opts) => update.pruneOnBoot(opts),
+
+  /** 退出前调一次：非托管运行方式下的「面板重启」，在这里把新进程拉起来（见 update.js 的 relaunchIfPending） */
+  relaunchIfPending: () => update.relaunchIfPending(),
 
   routes,
 };

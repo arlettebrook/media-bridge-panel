@@ -5,8 +5,8 @@
  * 四件事：
  *   ① `itemId` / `parseItemId` —— Emby 条目 Id 的派生与解析（形状由 `core/providers.js` 统一规定）；
  *   ② `httpStatusOf` —— 失败原因 → 该回给客户端的 HTTP 状态码；
- *   ③ **图片地址**：拼串、拆成"无头相对路径"、按当前基地址拼回来（图片的代取与签名在面板这边，
- *      见 docs/adr/0013）。图片基地址来自**元数据插件的域声明**（同步快照，见 `meta.declSync`）；
+ *   ③ **图片地址**：按插件申报的基地址拼串 + 出 tag（图片的代取与签名在面板这边，
+ *      见 docs/adr/0013）。基地址来自**元数据插件的域声明**（同步快照，见 `meta.declSync`）；
  *   ④ **取数转发**：取元数据 / 取一季分集 / 按名字搜索 → 交给插件（面板不解析上游字段）。
  *
  * 插件回的就是**面板的中立字段**（`entryId` / `type` / `personId`…，形状由插件契约第六节规定）
@@ -15,24 +15,15 @@
  *
  * **域是参数，没有"默认域"**：`itemId()` / `imageUrlOf()` / `providerIdKey()` 都按域取数，
  * 域由 `parseItemId` 从条目 Id 的前缀带出来（`p.domain`）。确实没传域时，由 `defaultDomain()`
- * **按当前实例配置 / 已启用插件现算**（不再写死 tmdb）——装哪个域就用哪个域。
+ * **按当前实例配置 / 已启用插件现算** —— 装哪个域就用哪个域。
  * 条目编号在这一层统一叫 `entryId`（与 `core/providers.js`、插件契约同一份词汇）——
- * TMDB 时它是数字（`550`）、MissAV 时它是 slug（`ssis-001`），条目 Id 只透传这个编号，不解释它
+ * 它是**提供者自己的编号**（数字或 slug 都可能），条目 Id 只透传它、不解释
  * （见 `core/providers.js` 与 docs/adr/0031）。
  */
 const providers = require('../../core/providers');
 const meta = require('./meta');
 const instance = require('./instance');
 
-/**
- * TMDB 这个域的 id —— **只用于「本来就是 TMDB 专属」的那几处**，不是"全局默认域"：
- *   · `themoviedb.org` 外链（只有 TMDB 的条目编号拼得出的才是真链）；
- *   · 官方图床兜底 + 「用相对路径存图」这套约定（只有 TMDB 这条链用，别的域给整串 URL）。
- * 除此之外没有任何地方该假设 tmdb 存在（见 `defaultDomain()`）。
- */
-const TMDB_DOMAIN = 'tmdb';
-/** TMDB 官方图床：插件没声明 `imageBase` 时给 tmdb 域兜底用 */
-const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
 const stripSlash = (s) => String(s || '').replace(/\/+$/, '');
 
 /**
@@ -82,7 +73,7 @@ function httpStatusOf(error) {
  * 带 type 是因为同一个编号在 tv 与 movie 下是两条不同数据。
  *
  * 形状与拼装规则住在 `core/providers.js`（**认哪个前缀**由那张注册表说了算）。
- * 传了 season 就是季：`tmdb_95350_tv_s1`；再传 episode 就是集：`tmdb_95350_tv_s1_e3`
+ * 传了 season 就是季：`{域}_{编号}_tv_s1`；再传 episode 就是集：`{域}_{编号}_tv_s1_e3`
  * （电影分不了季，季分不了集 —— 层级只能一级一级往下走）。
  */
 function itemId(domain, type, entryId, season, episode) {
@@ -104,22 +95,18 @@ function parseItemId(id) {
 /* ---------------------------------------------------------------- 图片 */
 
 /**
- * 该域当前生效的图片基地址：插件的域声明里那个。
- * 取不到时分两种：tmdb 域用官方地址兜住；别的域**如实回空** ——
- * 那些域给的是整串 URL（见 `imageUrlOf`），没有"基地址 + 相对路径"这一层可拼。
+ * 该域当前生效的图片基地址：插件的域声明里那个（插件没申报就如实回空）——
+ * 面板不替任何域兜一个默认值，"官方地址"是插件自己 settings 里的默认，归它自己。
  */
-function imageBase(domain = TMDB_DOMAIN) {
+function imageBase(domain) {
   const decl = meta.declSync(domain);
-  const own = stripSlash((decl && decl.imageBase) || '');
-  if (own) return own;
-  return domain === TMDB_DOMAIN ? TMDB_IMAGE_BASE : '';
+  return stripSlash((decl && decl.imageBase) || '');
 }
 
 /**
  * 拼图片地址。
- *   · `filePath` 已是完整 http(s) 地址 → **原样返回**（MissAV 这类来源给的就是整串 URL，
- *     面板不擅自改写）；
- *   · 否则按该域的基地址拼（`poster_path` 以 / 开头）；基地址取不到就如实回空。
+ *   · `filePath` 已是完整 http(s) 地址 → **原样返回**（插件给整串 URL 时面板不擅自改写）；
+ *   · 否则按该域的基地址拼（路径以 / 开头）；基地址取不到就如实回空。
  */
 function imageUrlOf(domain, size, filePath) {
   const p = String(filePath || '');
@@ -130,52 +117,49 @@ function imageUrlOf(domain, size, filePath) {
 }
 
 /**
- * 图片 URL → **无头相对路径**。只有当它确实落在「tmdb 域的图床基地址」或「TMDB 官方基地址」
- * 之下时才拆，否则回 null（表示这是别处的绝对地址，原样存）。
- *
- * **只认 tmdb**：别的域（如 MissAV 的封面站）给的是整串 URL，拆成相对路径之后读回来会按
- * 当前的 tmdb 基地址重拼，而图片缓存里不带域 —— 拼错图床就是错图。那类一律原样存。
- * （这条是「相对路径」这套约定本身的归属，不是"tmdb 是默认域"——见 TMDB_DOMAIN 那段。）
- *
- * **为什么要拆**：图片索引是落库的。若存完整 URL，用户把图床基地址换成镜像后，库里那批老地址
- * 就全指向旧图床了 —— 要等 TTL 过期才自愈。存相对路径、取时再拼当前基地址，**换镜像立刻生效**。
- * 同时认官方基地址：插件可能把 `https://image.tmdb.org/t/p` 写死在自己代码里，而面板配的是镜像。
+ * 域 → `ProviderIds` 里那个键（客户端拿它做外部 id 反查）：按域 id 首字母大写。
+ * 客户端认的那几个键都正好是这条规则的结果，所以不需要一张映射表；
+ * 多一个域也不该因为少一条映射就整条 DTO 拼不出来。
  */
-function splitImageUrl(url) {
-  const u = String(url || '');
-  if (!/^https?:\/\//i.test(u)) return null;
-  for (const b of new Set([stripSlash(imageBase(TMDB_DOMAIN)), TMDB_IMAGE_BASE])) {
-    if (b && u.startsWith(b + '/')) return u.slice(b.length + 1);
-  }
-  return null;
-}
-
-/** `splitImageUrl` 的逆：用**当前**图片基地址把相对路径拼回完整 URL（相对路径这套归 tmdb 域） */
-function joinImageUrl(rel) {
-  return imageBase(TMDB_DOMAIN) + '/' + String(rel || '').replace(/^\/+/, '');
-}
-
-/**
- * 域 → `ProviderIds` 里那个键（客户端拿它做外部 id 反查）：tmdb → `Tmdb`、missav → `Missav`。
- * 没登记的域按首字母大写兜一个 —— 多一个域不该因为少一条映射就整条 DTO 拼不出来。
- */
-const PROVIDER_KEYS = { tmdb: 'Tmdb', missav: 'Missav' };
 function providerIdKey(domain) {
   const d = String(domain || defaultDomain() || '').trim().toLowerCase();
   if (!d) return 'Provider';
-  return PROVIDER_KEYS[d] || d.replace(/^[a-z]/, (c) => c.toUpperCase());
+  return d.replace(/^[a-z]/, (c) => c.toUpperCase());
 }
 
 /**
  * 把客户端发来的**外部 id 引用前缀**认成一个已注册的元数据域（大小写不敏感）。
  *
- * 客户端的 `AnyProviderIdEquals` 是 `{前缀}.{编号}` 形状（Emby 惯例），前缀一般是域 id
- * （`tmdb.550`、`missav.dldss-559`）。**认不出就回 null，不猜** —— 同搜索分派的口径：
- * 认不出的前缀如实回空并点名（见 docs/plugin-contract.md）。
+ * 客户端的 `AnyProviderIdEquals` 是 `{前缀}.{编号}` 形状（Emby 惯例），前缀就是域 id。
+ * **认不出就回 null，不猜** —— 同搜索分派的口径：认不出的前缀如实回空并点名
+ * （见 docs/plugin-contract.md）。
  */
 function domainOfRef(prefix) {
   const p = providers.byPrefixOf(prefix);
   return p ? p.prefix : null;
+}
+
+/**
+ * 条目站点外链 —— 插件在 `register` 里申报的 `links`（`{ name, url }`，`url` 里的
+ * `{type}` / `{id}` 由面板替换成 Emby 用的 `movie|tv` 与该条目的编号）。
+ *
+ * 为什么要插件申报：条目编号是**提供者自己的**，只有它知道该拿这个编号去哪个站点拼链接。
+ * 面板不认识任何具体站点 —— 插件不申报就没有这一条，不猜也不兜。
+ */
+function entryLinks(domain, { type, entryId } = {}) {
+  const decl = meta.declSync(domain);
+  const tpls = decl && Array.isArray(decl.links) ? decl.links : [];
+  const id = String(entryId === undefined || entryId === null ? '' : entryId).trim();
+  if (!id) return [];
+  const kind = type === 'movie' ? 'movie' : 'tv';
+  const out = [];
+  for (const one of tpls) {
+    const name = String((one && one.name) || '').trim();
+    const tpl = String((one && one.url) || '').trim();
+    if (!name || !tpl) continue;
+    out.push({ name, url: tpl.replace(/\{type\}/g, kind).replace(/\{id\}/g, encodeURIComponent(id)) });
+  }
+  return out;
 }
 
 /* ---------------------------------------------------------------- 取数（转发给元数据插件） */
@@ -284,19 +268,15 @@ async function search(type, name, page) {
 }
 
 module.exports = {
-  TMDB_DOMAIN,
-  TMDB_IMAGE_BASE,
   defaultDomain,
   httpStatusOf,
   itemId,
   parseItemId,
   providerIdKey,
   domainOfRef,
+  entryLinks,
   lookup,
   lookupSeason,
   search,
-  imageBase,
   imageUrlOf,
-  splitImageUrl,
-  joinImageUrl,
 };

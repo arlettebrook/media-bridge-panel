@@ -8,8 +8,8 @@
  * 两页都只是把包交给面板：**面板不解释插件的内容** —— 装的是包（两道 md5 校验），
  * 调的是"动作"，插件自己的设置页是它自己的静态文件（面板只托管与转发，见 docs/adr/0029）。
  *
- * 状态每 2 秒拉一次（只在这一页活着）：**状态、重启次数**都在上面，
- * 「插件崩了会自动重启」这件事得看得见（见 docs/adr/0028）。
+ * 状态每 2 秒拉一次（只在这一页活着）：**状态与已跑时长**都在上面。
+ * 插件崩了**不会自动重启**，只留一个「已启用（没在跑）」与退出原因在那儿（见 docs/adr/0037）。
  */
 import { $, el, toast } from '../../core/dom.js';
 import { api } from '../../core/api.js';
@@ -72,13 +72,6 @@ export async function renderPluginManage(v) {
     for (const p of d.plugins || []) {
       card.append(pluginRow(p));
     }
-    card.append(
-      el('div', {
-        class: 'note',
-        text:
-          '状态每 2 秒刷新一次。「启用」会立刻把它的进程拉起来；它自己崩了或被杀掉，宿主会自动重启它（最多 5 次 / 5 分钟，每次都在日志里点名）。',
-      })
-    );
     box.append(card);
   }
 
@@ -106,7 +99,6 @@ export async function renderPluginManage(v) {
       p.domain ? `域 ${p.domain}` : '',
       p.author ? `作者 ${p.author}` : '',
       p.status === 'running' ? `已跑 ${fmtDuration(p.uptimeMs)}` : '',
-      p.restarts ? `重启过 ${p.restarts} 次` : '',
       /* 只有两条来路（见 docs/adr/0035）：插件库装的 / 手动上传的。
          历史条目里写过的 `builtin` / `upload` 按同一口径归并显示，不做数据迁移。 */
       p.origin === 'manual' || p.origin === 'upload' ? '手动安装' : '插件库',
@@ -129,7 +121,7 @@ export async function renderPluginManage(v) {
           p.enabled
             ? btn('停用', '停掉它的进程（它自己起的东西由它自己清理）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/disable`, { method: 'POST' })))
             : btn('启用', '起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/enable`, { method: 'POST' })), 'btn mini primary'),
-          btn('重启', '重起它的进程（手动重启会把自动重启的退避计数清零）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/restart`, { method: 'POST' }))),
+          btn('重启', '重起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/restart`, { method: 'POST' }))),
           btn('卸载', '卸载它 —— 它的 data/ 目录也会一起删掉', () => uninstall(p))
         )
       ),
@@ -212,7 +204,7 @@ function installCard(onInstalled = () => {}) {
     out,
     el('div', {
       class: 'note',
-      text: '包是一个 .tar.gz：里面要有 plugin.json（声明 id / 名称 / 版本 / 类型 / 入口）+ 入口文件。校验两道：包的 md5（发布方给的那个）+ 清单里逐个文件的 md5。',
+      text: '包是一个 .tar.gz',
     })
   );
 }

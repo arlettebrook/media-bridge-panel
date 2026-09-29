@@ -25,7 +25,7 @@ const DEFAULT_TIMEOUT_MS = 20000;
 /** 同一个域连续失败时的日志节流：插件停着的时候不该每次调用都刷一行 */
 const WARN_MIN_MS = 60000;
 
-const decls = new Map(); // 域 → { at, pid, name, series, imageBase, language, capabilities, error }
+const decls = new Map(); // 域 → { at, pid, name, series, imageBase, links, language, capabilities, error }
 const warnedAt = new Map();
 let lastSig = '';
 
@@ -40,9 +40,21 @@ function warnOnce(domain, line) {
   console.log('  ✘ 元数据 ' + line);
 }
 
+/** 插件申报的条目站点外链：只留 `{ name, url }` 两条都在的，别的都当没申报（不猜） */
+function normLinks(v) {
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const one of v) {
+    const name = String((one && one.name) || '').trim();
+    const url = String((one && one.url) || '').trim();
+    if (name && url) out.push({ name, url });
+  }
+  return out;
+}
+
 /**
  * 按插件清单重建域表：**已安装的 `metadata` 插件**都进表（装着的就算，不管开没开），
- * 因为"这个前缀是谁的"要在插件停掉时也说得出来（"元数据插件 TMDB 没启用"比"认不出前缀"有用）。
+ * 因为"这个前缀是谁的"要在插件停掉时也说得出来（"元数据插件 X 没启用"比"认不出前缀"有用）。
  * 开关状态一并带进去，转发那一刻再判。
  */
 function syncProviders() {
@@ -127,6 +139,7 @@ async function declOf(domain, { force = false } = {}) {
     name: String(v.name || provider.label),
     series: v.series !== false,
     imageBase: String(v.imageBase || ''),
+    links: normLinks(v.links),
     language: String(v.language || ''),
     capabilities: v.capabilities || null,
     error: null,

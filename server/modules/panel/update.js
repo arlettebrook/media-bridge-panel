@@ -10,15 +10,19 @@
  * ⚠️ **目录布局、包名、校验文件格式必须与容器的引导脚本（`docker/entrypoint.js`）保持一致** ——
  *    两者是同一份约定的两端（一边负责首次安装，一边负责后续更新），改动必须同步。
  *
- * 运行方式与能否自更新：只有在"由引导脚本托管的进程"里才允许自更新
- * （引导脚本会给子进程带上 `MB_SUPERVISED=1`）。直接跑源码、或用别的方式启动时如实拒绝，
- * 因为此时没有监督者来把新版本拉起来。
+ * 运行方式与能不能做这两件事（判据都是 `MB_SUPERVISED=1` + 代码装在数据卷，见 `isManaged`）：
+ *   · **自更新**只在受托管时允许 —— 非托管时如实拒绝，因为"把新版本装进 `app/`"这一步
+ *     必须由引导脚本按 `current.json` 拉起来才有意义；
+ *   · **面板重启**（不换版本）非托管时也允许 —— 没有监督者就**自己拉自己**
+ *     （退出前 spawn 一个脱离父进程的副本，见 `relaunchIfPending`），
+ *     于是直接跑源码也能从面板上重启。唯一的例外是带文件看护的启动方式，
+ *     见 `restartRefusal`。
  */
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const { DATA_DIR } = require('../../core/paths');
 const pkg = require('../../../package.json');
 
@@ -368,15 +372,83 @@ async function install(version) {
 }
 
 /**
- * 请求监督者把面板重启到某个版本：写 `app/.restart` 标记，然后给自己发 SIGTERM
- * 走正常的关闭流程（停掉托管的源子进程、关监听），退出后由监督者拉起新版本。
+ * 「面板重启」能不能做：能则回 null，不能则回一句给前端看的原因。
  *
- * 延迟一小段时间再发信号，是为了让本次 HTTP 响应先写回客户端。
+ * 托管时由引导脚本拉起（读写 `.restart` 的协议见 `requestRestart`）；非托管时自己拉自己，
+ * 所以直接跑源码也能重启。**唯一的例外是带文件看护的启动方式**（`npm run dev` / `node --watch`、
+ * nodemon 这些）：它们发现文件变了就会把子进程重起一遍，而面板自拉起的副本与那个看护没有父子关系，
+ * 两下叠加就是两个进程抢同一个端口 —— 这种情况如实拒绝，重启交给看护去做。
+ */
+function restartRefusal() {
+  if (isManaged()) return null;
+  if (underWatcher()) {
+    return '当前是带文件看护的启动方式（npm run dev / node --watch 这类）：改动文件时它自己会把面板重起一遍，无需在面板上重启';
+  }
+  return null;
+}
+
+/** 启动本进程的那条命令（取不到就回空串）。只为判断"上面是不是还挂着一个看护进程"。 */
+function parentCommand() {
+  try {
+    return execFileSync('ps', ['-o', 'command=', '-p', String(process.ppid)], { stdio: 'pipe' }).toString().trim();
+  } catch {
+    return ''; // 没有 ps（或权限不够）就当作没有看护：自拉起本身不依赖它
+  }
+}
+
+/** 父进程是不是文件看护（`node --watch` / nodemon）。看护与自拉起只能有一个，见 `restartRefusal`。 */
+function underWatcher() {
+  return /(^|\s)(--watch|nodemon)(\s|$)/.test(parentCommand());
+}
+
+/** 非托管运行方式下"退出前自拉起一次"的待办标记（托管时走 `.restart` 标记，用不上它） */
+let pendingRelaunch = false;
+
+/**
+ * 请求重启面板：托管时写 `app/.restart` 标记再给自己发 SIGTERM，退出后由引导脚本按 `current.json`
+ * 拉起同一个版本；**非托管时没有引导脚本读这个标记**，改为退出前自拉起（见 `relaunchIfPending`）。
+ *
+ * 两种方式都延迟一小段时间再发信号，是为了让本次 HTTP 响应先写回客户端。
  */
 function requestRestart(to, reason = 'update') {
-  fs.mkdirSync(APP_ROOT, { recursive: true });
-  writeJsonAtomic(RESTART_FILE, { to, reason, at: new Date().toISOString() });
+  if (isManaged()) {
+    fs.mkdirSync(APP_ROOT, { recursive: true });
+    writeJsonAtomic(RESTART_FILE, { to, reason, at: new Date().toISOString() });
+  } else {
+    pendingRelaunch = true;
+  }
   setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500);
+}
+
+/**
+ * 非托管运行方式的重启：没有监督者，只能自己拉自己 —— 跑的还是同一份代码（版本不变）。
+ *
+ * ⚠️ **必须在监听都关掉之后再 spawn**（调用点是 `server.js` 的 `shutdown()`，`process.exit` 之前）：
+ * 端口要等 `server.close()` 才放开，早一步子进程就会撞上 EADDRINUSE 起不来。
+ *
+ * `detached` 让副本脱离父进程（也有自己的进程组），那个终端关掉不影响它继续跑；
+ * `stdio: 'inherit'` 把日志留在**原来那个终端**里 —— 直接跑源码的人就在那儿看日志。
+ * 入口与启动参数从当前进程抄（`execPath` + `execArgv` + 入口文件），不猜启动方式。
+ */
+function relaunchIfPending() {
+  if (!pendingRelaunch) return null;
+  pendingRelaunch = false;
+  try {
+    const entry = require.main && require.main.filename;
+    if (!entry) throw new Error('拿不到入口文件路径');
+    const child = spawn(process.execPath, [...process.execArgv, entry], {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: 'inherit',
+    });
+    child.unref();
+    console.log(`  ↻ 面板重启：已自拉起新进程（pid ${child.pid}），本进程退出`);
+    return child.pid;
+  } catch (e) {
+    /* 拉不起来时**如实说清怎么办**：面板马上就退出，此时没人能救这一版 */
+    console.error(`  ✗ 面板重启：自拉起失败（面板即将退出，请手动重起进程）：${(e && e.message) || e}`);
+    return null;
+  }
 }
 
 /**
@@ -444,6 +516,10 @@ module.exports = {
   isManaged,
   listInstalled,
   repoInfo,
+  /* 重启：`restartRefusal` 是 `POST /api/panel/restart` 的门禁（能不能重启、为什么不能）；
+   * `relaunchIfPending` 由 `server.js` 的 `shutdown()` 在退出前调一次（非托管时的自拉起） */
+  restartRefusal,
+  relaunchIfPending,
   /* 清理：`pruneOnBoot` 是 `server.js` 启动成功后调的那个；`pruneVersions` 供排障与自测直接调用 */
   pruneVersions,
   pruneOnBoot,

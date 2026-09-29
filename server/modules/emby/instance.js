@@ -267,8 +267,7 @@ function validate(o, self) {
 
 /**
  * 挑一个空闲端口：先排除**清单里已声明**的（哪怕它现在没在监听），再真去 bind 试一次。
- * 两步都要 —— 只看 bind 会挑中"已分配但进程还没绑上"的端口（源实例那边踩过，见
- * `plugins/source/catpaw/lib/runner.js` 的 `portsHeldByOthers`）。
+ * 两步都要 —— 只看 bind 会挑中"已分配但进程还没绑上"的端口（源实例那边踩过）。
  */
 function isFree(port) {
   return new Promise((resolve) => {

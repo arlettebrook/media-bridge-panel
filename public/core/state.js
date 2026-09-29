@@ -22,7 +22,6 @@ export const S = {
   aggUseAll: false,
   aggKind: 'tv',        // 「聚合搜索」页这次要的是哪种：'tv' = 剧集（季、集必填）/ 'movie' = 电影（不问季集）
   aggResult: null,
-  aggView: 'merged',
   aggBusy: false,
   apiError: null,
   busy: false,

@@ -86,7 +86,7 @@ function list() {
  * 再传 episode 就是集：`{前缀}_{条目编号}_tv_s1_e3`。
  * 电影式提供者只到 `{前缀}_{条目编号}_movie`（季集层级对它无意义，传了也不拼）。
  *
- * 条目编号是**提供者自己的编号**，面板只透传：TMDB 是数字（`550`），MissAV 是它自己那串
+ * 条目编号是**提供者自己的编号**，面板只透传：有的是数字（`550`），有的是它自己那串
  * slug（`ssis-001`）。所以这里**不转数字、不做校验** —— 那一步是 `parseItemId` 的事。
  */
 function itemId(prefix, entryId, type, season, episode) {

@@ -80,7 +80,7 @@ function ensureTemplate(tplId) {
 /**
  * 搜索 / 取详情的**作用域** —— 两种入口最后都落到同一份模板上：
  *   · `tpl`    —— web「聚合搜索」页按**模板**选（面板上直接挑一套模板，见 docs/adr/0033）；
- *   · `domain` —— 客户端（Emby）那条路按**域**问（`tmdb` / `tvdb` 这类前缀），
+ *   · `domain` —— 客户端（Emby）那条路按**域**问（注册表里那些元数据域前缀），
  *                 由「其他设置」里的"域 → 模板"对照翻译成模板。
  * 两个都不给 ⇒ 报错点明缺什么：不猜、也不回退到内置默认值。
  */
@@ -269,7 +269,7 @@ function noteAggPerPlugin(name, out) {
  * `extraK` / `extraAll`（接续补打：前面一条能用的都没拿到时再往下试几条 / 匹配到底，不传读设置）。
  * **没有 `all`**：命中的站一律全取（见 service.aggregateDetail），
  * 但条数受 `maxItems` 限制（每多一条命中就要多打一次 `/detail` 取链，太慢）。
- * ⚠️ **不再有 TMDB 反查**：判据是 `match.js` 的打分（理由见那个文件顶部）。
+ * ⚠️ **不再有上游反查**：判据是 `match.js` 的打分（理由见那个文件顶部）。
  * 成功回 `{ok:true, sites, picked, stats, sources, elapsedMs}`（每站的成败在 `sites[].ok/error` 里）；
  * 走缓存时多一个 `cached:true`，`elapsedMs` 是**当初算它那一次的耗时**，
  * 且**响应里没有 `sites[].data`**（那份上游原样响应不入库，见 `slimLines`）。
