@@ -925,7 +925,8 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 | `server/modules/panel/index.js` | 面板层设置与钩子：`logMax`（改了就 `resize`）、**`cache.*`**（面板这边那两份缓存；`onSettingsChange` 里调 `cachedb.sweepAll()` 落实新上限）。⚠️ `tmdb.*` 已不在面板层（归元数据插件） |
 | `public/modules/emby/instances.js`（「Emby → 实例」页） | 实例列表：每行是名称 / 端口徽章 / **首页插件行内下拉**（点一下就 PATCH）/ 运行状态点（端口被占时红点 + 原因）/ 连接地址（一键复制）/ 编辑 / 删除（默认实例不给删）。编辑弹窗含名称、端口、首页插件、启用；**服务器名就是这个实例的 `name`** |
 | `public/modules/emby/accounts.js`（「Emby → 账号」页） | 顶部**实例选择器**，下方账号增删改只作用于所选实例（端点 `/api/emby/instances/{iid}/accounts`）；每行带上该实例的 `UserId`（`md5(serverId\|用户名)`，服务端现算），便于对着客户端日志排查 |
-| `public/modules/panel/settings.js`（「面板设置」页） | 备份还原 / **缓存设置**（用量 + 上限 + 清空，端点 `GET\|DELETE /api/panel/cache`）/ **站点测速**（开关与间隔）/ 面板密码。⚠️ **TMDB 设置已不在这一页**（归元数据插件自己的设置页：「插件」→ tmdb → 「设置」） |
+| `public/modules/panel/settings.js`（「面板设置」页） | 「设置」子项：**缓存设置**（用量 + 上限 + 清空，端点 `GET\|DELETE /api/panel/cache`）/ **站点测速**（开关与间隔）；同模块另有「备份与还原」（`renderPanelBackup`）、「安全」（改面板密码，`renderPanelSecurity`）两个子项。⚠️ **TMDB 设置已不在这一页**（归元数据插件自己的设置页：「插件」→ tmdb → 「设置」） |
+| `public/modules/panel/overview.js`（「面板设置 → 概览」页） | 运行环境 + 两个整机动作：**面板重启**（`POST /api/panel/restart`，写 `.restart` 让引导脚本拉起同一版本，容器不动）与**退出登录** |
 | `data/settings/emby.json` | `account`（**只剩空壳**，账号已搬到 sqlite）。（`serverId` / `imageKey` **已迁出**到 `data/emby/instances.json`，首次加载时从旧值搬一次；`tmdb.*` 与 `cache.*` 搬到 `panel.json`；`play.filter` 搬到 `agg.json` 的 `lineFilter`，盘上那几个老键既不读也不校验） |
 | `data/settings/panel.json` | 面板监听参数、`logMax`、`modules`、`speedTest*`、**`cache.{imageTtlDays,imageMaxMB,detailTtlMinutes,detailNeverExpire,detailMaxMB}`**。⚠️ `tmdb.*` 已不在这里（归元数据插件自己的 `data/settings.json`）；盘上留着老键也没人读 |
 | `data/emby/emby.db` | 客户端登录账号表（内置 sqlite；密码为 scrypt 哈希）。**数据备份包含它**（`backup.js` 打包整份数据卷，`emby/` 在其中）—— 还原后账号跟着回来，但需重启面板才生效 |

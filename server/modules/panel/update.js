@@ -373,10 +373,19 @@ async function install(version) {
  *
  * 延迟一小段时间再发信号，是为了让本次 HTTP 响应先写回客户端。
  */
-function requestRestart(to) {
+function requestRestart(to, reason = 'update') {
   fs.mkdirSync(APP_ROOT, { recursive: true });
-  writeJsonAtomic(RESTART_FILE, { to, reason: 'update', at: new Date().toISOString() });
+  writeJsonAtomic(RESTART_FILE, { to, reason, at: new Date().toISOString() });
   setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500);
+}
+
+/**
+ * 当前**运行中**的版本：以 `current.json` 为准（监督者就是照它拉起的），
+ * 读不到再退到 `package.json` —— 「面板重启」（不换版本）要把这个值写进重启请求。
+ */
+function currentVersion() {
+  const cur = readJson(CURRENT_FILE);
+  return String((cur && cur.version) || pkg.version || '').trim();
 }
 
 /* ------------------------------------------------------------------ 对外 */
@@ -429,6 +438,7 @@ module.exports = {
   status,
   install,
   requestRestart,
+  currentVersion,
   resolveLatest,
   resolveLatestInfo,
   isManaged,

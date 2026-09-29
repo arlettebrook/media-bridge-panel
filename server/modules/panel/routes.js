@@ -133,11 +133,19 @@ module.exports = function routes(r) {
     return sendJson(res, 200, { id: params.id, settings: settings.reset(params.id) });
   });
 
+  /* 进程身份（进程启动时刻）：**模块加载时算一次** —— 必须在同一进程内恒定。
+   * 不能每个请求现算（`Date.now() - uptime()` 毫秒取整会有 ±1ms 抖动，会被误认成新进程）。
+   * 「面板重启」只换进程不换版本，前端靠它认出"回来的是个新进程"。 */
+  const PROCESS_STARTED_AT = new Date(Date.now() - process.uptime() * 1000).toISOString();
+
   /* 面板自身 */
   r.add('GET', '/api/panel/info', (req, res) =>
     sendJson(res, 200, {
       version: pkg.version,
       node: process.version,
+      /* 见 PROCESS_STARTED_AT：「面板重启」等待判定的进程身份；pid 仅作展示/排查。 */
+      pid: process.pid,
+      startedAt: PROCESS_STARTED_AT,
       dataDir: DATA_DIR,
       settingsDir: SETTINGS_DIR,
       /* 仓库地址（「设置 → 关于」与「版本与更新」的 Release 链接都用它，见 update.js 的 repoInfo） */
@@ -261,6 +269,22 @@ module.exports = function routes(r) {
       console.log(`  ✘ 面板更新失败：${msg}`);
       return sendError(res, 400, msg);
     }
+  });
+
+  /* ---- 面板重启 ----
+   * 只把**应用进程**重起一遍，容器不动：写 `.restart` 再退出，由引导脚本按 `current.json`
+   * 拉起同一个版本（协议见 update.js / docker/entrypoint.js）。
+   * 与自更新同一道门禁 —— 没有监督者时进程退出就没人拉回来了，如实拒绝。
+   * `reason` 记成 restart，日志里与"更新触发的重启"区分得开。 */
+  r.add('POST', '/api/panel/restart', async (req, res) => {
+    if (!update.isManaged()) {
+      return sendError(res, 400, '当前不是由容器引导脚本托管的运行方式，面板无法自行重启（请重起容器或手动重起进程）');
+    }
+    await readBody(req); // 请求体（若有）读掉，避免连接挂着
+    const version = update.currentVersion();
+    update.requestRestart(version, 'restart');
+    console.log(`  ↻ 面板重启：应用进程即将重起（版本 ${version}，容器不动）`);
+    return sendJson(res, 200, { ok: true, restarting: true, version });
   });
 
   /* ---------------- 面板日志（内存环形缓冲，见 core/logbus.js）----------------

@@ -1,28 +1,28 @@
 'use strict';
 /**
- * 面板模块 · 「设置」页：面板自己的设置（跟「概览」分开 —— 概览只看环境，这里动设置）。
+ * 面板模块 · 「设置」页：面板自己那些**要动手改的参数**。
  *
- *   · 数据备份与还原 导出直接下载 .zip（全部数据、不含缓存）；还原选一个 .zip 覆盖回数据卷
- *                    （GET /api/panel/backup · POST /api/panel/restore，范围见 panel/backup.js）
  *   · 站点测速       **开关与间隔**（`panel.json` 的 `speedTest*`，实现见 agg/site-test.js）——
  *                    测速是"这台机器与这条网络"的体检，与内容偏好无关，所以不跟模板走（见 ADR-0033）；
  *                    测速的结果（站点统计）也是面板级共享的一份。「立即测速」在「聚合 · 模板」页。
  *   · 缓存设置       面板自己那两份缓存的用量与清空（`data/emby/cache.db` 图片索引 +
  *                    `data/cache/lines.db` 线路结果 + 按插件的聚合耗时），端点 `GET|DELETE /api/panel/cache`，
  *                    策略存 `panel.json` 的 `cache.*`（见 core/cachedb.js）。⚠️ 插件自己的缓存在各自插件设置页。
- *   · 面板密码        改密码（见 core/auth.js）+ 退出登录
+ *
+ * 其余按性质分在别页（同模块的侧栏子项）：
+ *   · 「备份与还原」 导出 / 还原整份数据（见本文件 renderPanelBackup）
+ *   · 「安全」       改面板密码（见 renderPanelSecurity）
+ *   · 「概览」       面板重启 + 退出登录（整机动作，见 overview.js）
+ *   · 「关于」       版本与更新 + 关于（"看看而已"，见 renderPanelAbout）
  *
  * ⚠️ **TMDB 设置不在这里**了：token / 基地址 / 语言 / 它自己的缓存都归**元数据插件**
  * （插件 → tmdb → 设置，见 plugins/metadata/tmdb/）。面板只从插件的「注册」动作里拿图片基地址。
- *
- * **版本与更新 / 关于 两张卡在「关于」页**（`renderPanelAbout`）—— 它们是"看看而已"，
- * 跟这一页"要动手改"的东西分开放（见 registry 里的页面声明）。
  */
 import { el, toast, fmtTime, codeBlock, modal, confirmModal } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { BRAND } from '../../core/branding.js';
-import { authStatus, changePassword, logout } from '../../core/auth.js';
+import { changePassword } from '../../core/auth.js';
 import { renderPage } from '../../core/shell.js';
 
 /* -------------------------------------------------------------- 版本与更新 */
@@ -372,7 +372,7 @@ function backupCard() {
       text:
         `会用「${file.name}」里的全部数据覆盖当前面板：设置、模板、插件（含插件数据）、` +
         `Emby 账号与播放进度都会被替换，缓存与应用代码不受影响。当前数据不会自动留档，` +
-        `建议先「导出备份」存一份。覆盖后需重启面板才生效。`,
+        `建议先「导出备份」存一份。覆盖后需重启面板才生效（到「概览」页点「面板重启」）。`,
       okLabel: '覆盖还原',
     });
     if (!yes) return;
@@ -397,7 +397,7 @@ function backupCard() {
       const restored = (data && data.restored) || [];
       toast('已还原：' + (restored.join(' / ') || '备份里没有数据'));
       out.className = 'note';
-      out.textContent = `已还原 ${restored.length} 项（${restored.join(' / ') || '为空'}）：${(data && data.note) || '请重启面板使其生效。'}`;
+      out.textContent = `已还原 ${restored.length} 项（${restored.join(' / ') || '为空'}）：${(data && data.note) || '到「概览」页点「面板重启」使其生效。'}`;
     } catch (e) {
       out.className = 'note err-note';
       out.textContent = '还原失败：' + e.message;
@@ -415,7 +415,7 @@ function backupCard() {
       text:
         '备份会打成一个 zip 包，包含数据卷里的全部数据：设置、模板、插件（含插件包与插件自己的数据）、' +
         'Emby 账号与播放进度。不含缓存（可随时重建）与应用代码（可从 Release 重新取得）。' +
-        '还原会用 zip 里的数据整项覆盖当前数据卷，请先导出当前备份留档；覆盖后需重启面板才生效。',
+        '还原会用 zip 里的数据整项覆盖当前数据卷，请先导出当前备份留档；覆盖后需重启面板才生效（「概览」页的「面板重启」）。',
     }),
     el('div', { class: 'note err-note', text: '备份含账号与插件凭证（如网盘 cookie/token），请妥善保管这份文件。' }),
     el('div', { class: 'toolbar' }, exportBtn, pickBtn, picked, fileInput),
@@ -719,34 +719,35 @@ function speedTestSection(v) {
 }
 
 export function renderPanelSettings(v) {
-  const first = backupCard();
-  v.append(first, passwordCard());
   /* 缓存卡要异步读一次设置，往 v 末尾插，不挡上面的卡。 */
   speedTestSection(v);
-  cacheSection(v).then(() =>
-    v.append(el('div', { class: 'actions' }, el('button', { class: 'btn', text: '退出登录', onclick: () => logout() })))
-  );
+  cacheSection(v);
+}
 
-  /* 还在用默认密码 → 页顶插一条警告（翻到页面底部才看见就太晚了） */
-  authStatus().then((st) => {
-    if (!st.isDefault) return;
-    v.insertBefore(
-      el(
-        'div',
-        { class: 'hint warn' },
-        '⚠️ 面板还在用默认密码 ',
-        el('code', { text: '123456' }),
-        ' —— 任何人打开这个地址都能进。就在下面改掉。'
-      ),
-      first
-    );
-  });
+/**
+ * 「备份与还原」页：只有那一张卡。
+ *
+ * 从「设置」页拆出来单开一页 —— 备份/还原是**低频但后果重**的操作（还原会整项覆盖数据卷），
+ * 跟"改个数字就生效"的测速、缓存摆在一起，容易被顺手点。
+ */
+export function renderPanelBackup(v) {
+  v.append(backupCard());
+}
+
+/**
+ * 「安全」页：改面板密码。
+ *
+ * 从「设置」页拆出来单开一页 —— 密码是**登录这个面板的凭据**，与"面板怎么跑"的设置不是一类；
+ * 退出登录挪去了「概览」页（那里是整机动作）。
+ */
+export function renderPanelSecurity(v) {
+  v.append(passwordCard());
 }
 
 /**
  * 「关于」页：**版本与更新** + **关于**两张卡。
  *
- * 从「设置」页挪过来的：「设置」页是"要动手改的东西"（备份/密码/缓存），
+ * 从「设置」页挪过来的：「设置」页是"要动手改的东西"（缓存/测速），
  * 而这两张是"看看而已" —— 更新卡里那段说明还动辄几十行，摆在设置页会把要改的卡挤到很下面。
  */
 export function renderPanelAbout(v) {

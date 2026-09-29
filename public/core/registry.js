@@ -148,7 +148,14 @@ export const MODULES = [
       '<path d="M2 4.6h7.3M13.4 4.6H14M2 11.4h1.6M7.7 11.4H14"/>' +
         '<circle cx="11.3" cy="4.6" r="1.7"/><circle cx="5.4" cy="11.4" r="1.7"/>'
     ),
-    pages: () => [['panel', '概览'], ['panel-settings', '设置'], ['panel-about', '关于'], ['panel-logs', '日志']],
+    pages: () => [
+      ['panel', '概览'],
+      ['panel-settings', '设置'],
+      ['panel-backup', '备份与还原'],
+      ['panel-security', '安全'],
+      ['panel-about', '关于'],
+      ['panel-logs', '日志'],
+    ],
   },
 ];
 

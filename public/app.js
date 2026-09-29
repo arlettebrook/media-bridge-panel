@@ -38,7 +38,7 @@ import { renderEmbyAccounts } from './modules/emby/accounts.js';
 import { renderPluginManage } from './modules/plugin/manage.js';
 import { renderPluginLibrary } from './modules/plugin/library.js';
 import { renderPanelOverview } from './modules/panel/overview.js';
-import { renderPanelSettings, renderPanelAbout } from './modules/panel/settings.js';
+import { renderPanelSettings, renderPanelBackup, renderPanelSecurity, renderPanelAbout } from './modules/panel/settings.js';
 import { renderPanelLogs } from './modules/panel/logs.js';
 
 /* 页渲染函数登记（必须在 init() 之前跑完） */
@@ -52,6 +52,8 @@ registerPages({
   'plugin-manage': renderPluginManage,
   panel: renderPanelOverview,
   'panel-settings': renderPanelSettings,
+  'panel-backup': renderPanelBackup,
+  'panel-security': renderPanelSecurity,
   'panel-about': renderPanelAbout,
   'panel-logs': renderPanelLogs,
 });
