@@ -64,6 +64,10 @@ async function waitRestart(prevVersion) {
  * 安装目录，也没有重启后拉起新版本的监督者。
  *
  * 打开页面即查一次（摘要要如实显示"最新版本"只能来自这次请求），之后由「检查更新」手动触发。
+ *
+ * 卡上只有两颗按钮：「检查更新」只刷新摘要；「更新到 x」**先弹更新弹窗**（说明 + 真正执行更新的
+ * 按钮，见 showNotes），点框里那颗才开始安装。原本另有一颗「查看更新内容」与"查到新版本就自动弹窗"
+ * 两条入口，与更新弹窗重复，已去掉 —— 看说明这件事只在"决定要更新"的那一下发生。
  */
 function updateCard() {
   /* 三行摘要先占「未知」：请求整体失败时仍有可读的摘要，不留空白 */
@@ -72,8 +76,6 @@ function updateCard() {
   const mode = el('span', { class: 'v', text: '未知' });
   const check = el('button', { class: 'btn', text: '检查更新' });
   const install = el('button', { class: 'btn primary hidden' });
-  /* 有新版本时才有：把该版本的更新内容（Release 说明 = CHANGELOG 里那一节）**弹窗**展示 */
-  const notes = el('button', { class: 'btn hidden', text: '查看更新内容' });
   const result = el('div', { class: 'hint' });
   const versions = el('div', { class: 'note' });
   let last = null; // 最近一次 GET /api/panel/update 的结果
@@ -86,7 +88,7 @@ function updateCard() {
   /**
    * 安装某个版本：下载并安装 → 等面板重启到新版本 → 刷新页面。
    * 进度显示在卡片里（弹窗在点下「更新」后即关闭，避免把几十行说明一直挡在屏幕上）。
-   * 与更新说明弹窗配合使用（见 showNotes）；这里只管把动作做完。
+   * 由更新弹窗里的那颗「更新到 x」按钮触发（见 showNotes）；这里只管把动作做完。
    */
   const doInstall = async (target) => {
     const prev = (last && last.current) || '';
@@ -117,14 +119,13 @@ function updateCard() {
   };
 
   /**
-   * 更新内容弹窗。用弹窗而不是摊在卡片里：说明动辄几十行，摊开会把卡片撑得很长、
-   * 还得往下滚才看得见「更新到 x」那个按钮。框里同时给 GitHub 上那个 Release 的链接。
-   * 该版本没写说明时**如实说一句**，不留白 —— 否则看着像前端忘了显示。
-   *
-   * `confirm: true`（点「更新到 x」时）会在弹窗里给一颗确认按钮，且**先倒计时 3 秒**才允许点：
-   * 更新不可逆，这段等待留给"看更新内容"，不给"没看就点确定"的机会。
+   * 更新弹窗 —— **点「更新到 x」才会弹**，里面摆两样东西：
+   *   ① 该版本的更新说明（Release 说明 = CHANGELOG 里那一节，动辄几十行，所以弹窗展示而不是摊在卡片里）；
+   *   ② 真正执行更新的那颗「更新到 x」按钮，**先倒计时 3 秒**才允许点：更新不可逆，
+   *      这段等待留给"看更新内容"，不给"没看就点确定"的机会。
+   * 框里同时给 GitHub 上那个 Release 的链接；该版本没写说明时**如实说一句**，不留白。
    */
-  const showNotes = (r, { confirm: needConfirm = false } = {}) => {
+  const showNotes = (r) => {
     if (!r) return;
     const title = `更新内容 · ${r.latest || ''}${r.publishedAt ? ` · 发布 ${fmtTime(r.publishedAt)}` : ''}`;
     const body = [];
@@ -140,11 +141,6 @@ function updateCard() {
           '（说明摘在该 Release 页与 CHANGELOG 里）'
         )
       );
-    }
-
-    if (!needConfirm) {
-      modal({ title, body, actions: [{ label: '知道了' }] });
-      return;
     }
 
     const target = r.latest || '';
@@ -176,8 +172,6 @@ function updateCard() {
       go.textContent = `更新到 ${target}`;
     }, 1000);
   };
-
-  notes.addEventListener('click', () => showNotes(last));
 
   const paint = (r) => {
     last = r;
@@ -212,21 +206,18 @@ function updateCard() {
       lines.push('检查更新失败：' + r.error);
     }
     showResult(cls, lines);
-
-    /* 有新版本 → 给一个「查看更新内容」入口（点开是弹窗，见 showNotes）。
-     * 说明只在有新版本时才有意义，所以跟 install 一起显隐。 */
-    notes.classList.toggle('hidden', !hasNew);
   };
 
+  /**
+   * 检查更新：**只刷新摘要**（当前 / 最新 / 运行方式），由人看到有新版本后自己去点「更新到 x」。
+   * 不在这一步弹窗 —— 弹窗是"决定要更新"之后才看的东西（更新说明 + 确认按钮，见 showNotes）。
+   */
   const load = async (loud) => {
     check.disabled = true;
     check.innerHTML = '<span class="spinner"></span> 检查中…';
     try {
       const r = await api('/api/panel/update');
       paint(r);
-      /* 手动点「检查更新」查到新版本时**直接把更新内容弹出来**（那一下点击就是"想看什么更新"的意图）；
-       * 打开页面那次（loud=false）不弹 —— 一进页面就糊一个弹窗很烦。 */
-      if (loud && r.managed && r.hasUpdate && r.latest) showNotes(r);
     } catch (e) {
       showResult('hint warn', ['检查更新失败：' + e.message]);
       if (loud) toast('检查更新失败：' + e.message, true);
@@ -238,10 +229,10 @@ function updateCard() {
 
   check.addEventListener('click', () => load(true));
 
-  /* 点「更新到 x」先弹窗把更新内容摆出来，倒计时 3 秒后才允许点确认（见 showNotes） */
+  /* 点「更新到 x」弹更新弹窗：先看说明，框里那颗「更新到 x」才是真正执行更新的按钮（见 showNotes） */
   install.addEventListener('click', () => {
     if (!(last && last.latest)) return;
-    showNotes(last, { confirm: true });
+    showNotes(last);
   });
 
   const card = el(
@@ -255,7 +246,7 @@ function updateCard() {
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '当前版本' }), cur),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '最新版本' }), latest),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '运行方式' }), mode),
-    el('div', { class: 'row' }, check, install, notes),
+    el('div', { class: 'row' }, check, install),
     result,
     versions
   );
