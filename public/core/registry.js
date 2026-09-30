@@ -10,7 +10,7 @@
 import { S } from './state.js';
 
 /**
- * 三类插件各占侧栏一栏（ADR-0029 已定 18：**插件设置页按类型挂栏**）。
+ * 四类插件各占侧栏一栏（ADR-0029 已定 18：**插件设置页按类型挂栏**）。
  *
  * 插件自带 UI 是它自己的 HTML（`plugin.json` 的 `webui`），不是面板的页 ——
  * 所以这里只登记"哪一栏、叫什么"，具体有几个子项**开页面时现算**（读 `S.plugins`）。
@@ -41,6 +41,12 @@ const PLUGIN_UI_TYPES = [
     label: '首页',
     type: 'home',
     icon: ico('<path d="M2 7.1 8 2.3l6 4.8"/><path d="M3.7 6.2v7.5h8.6V6.2"/>'),
+  },
+  {
+    id: 'plugin-output',
+    label: '输出',
+    type: 'output',
+    icon: ico('<path d="M6.2 3.2H3.8a1.2 1.2 0 0 0-1.2 1.2v7.2a1.2 1.2 0 0 0 1.2 1.2h2.4"/><path d="M10 5.2 12.8 8 10 10.8"/><path d="M12.8 8H6.6"/>'),
   },
 ];
 
@@ -131,7 +137,7 @@ export const MODULES = [
       ['plugin-manage', '管理'],
     ],
   },
-  /* 三类插件栏：子项现算（`pages()` 每次都重新读 S.plugins），所以插件启停之后要调
+  /* 四类插件栏：子项现算（`pages()` 每次都重新读 S.plugins），所以插件启停之后要调
    * shell.refreshNav() 把侧栏重画一遍；**一栏里一个子项都没有时整栏不显示**
    * （见 shell.renderNavButtons —— 侧栏不留空栏目）。
    * 侧栏是树，子项永远亮着，所以不必再区分"只有一个子项时要不要亮名字"。 */

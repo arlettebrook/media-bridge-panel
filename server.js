@@ -14,6 +14,7 @@ const registry = require('./server/core/registry');
 const { DATA_DIR } = require('./server/core/paths');
 const logbus = require('./server/core/logbus');
 const auth = require('./server/core/auth');
+const pluginIngress = require('./server/modules/plugin/ingress');
 const BRAND = require('./server/core/branding');
 
 /* ⚠️ **必须在加载模块之前装**（就在这一行）：模块顶层、路由注册、启动横幅都会打日志，
@@ -97,15 +98,24 @@ const server = http.createServer(async (req, res) => {
 
     // 面板接口（各模块注册的路由；插件宿主那几条也在其中）
     if (pathname.startsWith('/api/')) {
-      /* 面板门禁（单密码，见 core/auth.js）：**只拦面板自己的接口**。
-       * `/api/auth/*` 由 auth.needsAuth 放行（不然登录不了）；`/api/emby/*` 下
-       * 只有面板自用端点要登录（名单与 auth.needsAuth 同一份），客户端协议端点
-       * 根本不在这里提供（见下面那条 404）。
-       * ⚠️ 容器健康检查**不再走这里**：它打的是上面那条 `/api/health`（本进程存活即可）。 */
-      const deny = auth.guard(req, pathname);
-      if (deny) {
-        res.setHeader('Set-Cookie', auth.cookieHeader('', req)); // 顺手清掉过期/无效的那个 cookie
-        return sendError(res, 401, deny);
+      /* 插件 ingress 先判一道（单端口入口：/api/plugins/<类型>/<id>/(ui|api)/...）。
+       * 插件在 plugin.json 里声明 public（匿名）/ token（外部令牌或面板 cookie）路径；
+       * 名单外的路径返回 null，继续走下面的面板登录门禁 —— 默认收紧。 */
+      const inr = pluginIngress.check(pathname, req, parsed.searchParams);
+      if (inr && inr.access === 'deny') {
+        return sendError(res, 401, inr.reason || '需要外部访问令牌');
+      }
+      if (!inr) {
+        /* 面板门禁（单密码，见 core/auth.js）：**只拦面板自己的接口**。
+         * `/api/auth/*` 由 auth.needsAuth 放行（不然登录不了）；`/api/emby/*` 下
+         * 只有面板自用端点要登录（名单与 auth.needsAuth 同一份），客户端协议端点
+         * 根本不在这里提供（见下面那条 404）。
+         * ⚠️ 容器健康检查**不再走这里**：它打的是上面那条 `/api/health`（本进程存活即可）。 */
+        const deny = auth.guard(req, pathname);
+        if (deny) {
+          res.setHeader('Set-Cookie', auth.cookieHeader('', req)); // 顺手清掉过期/无效的那个 cookie
+          return sendError(res, 401, deny);
+        }
       }
       /* 面板端口不再伺候 Emby 客户端协议（理由见上面 embyServedOnPanelPort）——
        * 放在门禁之后、路由之前：面板自用端点照旧要登录，客户端协议端点直接指路。 */

@@ -17,7 +17,6 @@
 const fs = require('fs');
 const contract = require('./contract');
 const store = require('./store');
-const bundle = require('./bundle');
 
 /** 插件仓库（`OWNER/REPO`）—— 与「面板自己」的仓库是**两个**仓库：这里只放插件包，不放源码 */
 const LIBRARY_REPO = String(process.env.PLUGIN_REPO || 'dlushu/media-bridge-plugins').trim();
@@ -184,22 +183,16 @@ async function download(entry) {
 }
 
 /**
- * 装一条库里的插件：下载 → 解包（第一道校验）→ 安装（第二道校验在 store 里）。
- * 与手动上传那条路走的是**同一套**（`bundle.extractToTemp` + `store.installDir`），
- * 只有 `origin` 不同（`library` / `manual`）。
+ * 从库里把一个插件包**下载下来**：找到清单条目 → 取回包字节。
+ * 解包 / 校验 / 安装由调用方走统一的 `updater.replaceInstalled`（与手动上传同一条路），
+ * 本函数只负责"从仓库拿字节"，不碰插件目录 —— 临时目录的清理也归调用方。
  */
-async function install({ type, id, version = '', enable = false }) {
+async function install({ type, id, version = '' }) {
   const entry = await find(type, id, version);
   if (!entry) throw new Error(`插件库里没有 ${type}/${id}${version ? '@' + version : ''}`);
   const { buf, url } = await download(entry);
   console.log(`  · 插件库：下载 ${entry.type}/${entry.id} v${entry.version} ← ${url}（${Math.round(buf.length / 1024)}KB）`);
-  const tmp = bundle.extractToTemp(buf, entry.md5);
-  try {
-    const out = store.installDir(tmp.root, { origin: 'library', md5: entry.md5, enabled: enable === true });
-    return { entry, installed: out };
-  } finally {
-    fs.rmSync(tmp.dir, { recursive: true, force: true });
-  }
+  return { entry, buf };
 }
 
 module.exports = {

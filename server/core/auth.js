@@ -38,6 +38,23 @@ const COOKIE = 'catpaw_panel';
 const MAX_FAILS = 5;
 const LOCK_MS = 60 * 1000;
 
+/* ---------------------------------------------------------------- 外部访问令牌
+ *
+ * 给**跑在面板进程之外的程序**用（例如装在 Forward 播放器里的 output 插件 JS）：
+ * 它们没有浏览器会话 cookie，只有自己声明的静态 HTTP 能力，访问面板必须有个凭证。
+ *
+ * 与登录密码的区别：
+ *   · 密码 = 人用浏览器登面板（换发签名会话 cookie）；
+ *   · 令牌 = 外部程序调插件 ingress 数据接口（query `?token=` 或 `Authorization: Bearer`）。
+ * 令牌只能碰到**插件自己在 plugin.json 里声明 `ingress.token` 的那些路径**，
+ * 碰不到别的面板接口（见 modules/plugin/ingress.js）。
+ *
+ * 落在同一份 auth.json（同样**不进 settings 备份明文面**的口径与密码一致；它本就是凭证）：
+ *   { …, ingressToken: "mbp_<48 字符随机>" }
+ * 懒生成：没人用就一直没有；`重置`后老令牌立即失效。
+ */
+const INGRESS_PREFIX = 'mbp_';
+
 /* ---------------------------------------------------------------- 密码哈希 */
 
 function hashPassword(pw) {
@@ -70,13 +87,18 @@ function load() {
   try {
     const raw = JSON.parse(fs.readFileSync(FILE, 'utf8'));
     if (raw && raw.passwordHash && raw.secret) {
-      cache = { passwordHash: String(raw.passwordHash), secret: String(raw.secret), updatedAt: Number(raw.updatedAt) || 0 };
+      cache = {
+        passwordHash: String(raw.passwordHash),
+        secret: String(raw.secret),
+        updatedAt: Number(raw.updatedAt) || 0,
+        ingressToken: raw.ingressToken ? String(raw.ingressToken) : '',
+      };
       return cache;
     }
   } catch {
     /* 没有 / 读坏了 → 下面按默认密码建一份 */
   }
-  cache = { passwordHash: hashPassword(DEFAULT_PASSWORD), secret: crypto.randomBytes(32).toString('hex'), updatedAt: Date.now() };
+  cache = { passwordHash: hashPassword(DEFAULT_PASSWORD), secret: crypto.randomBytes(32).toString('hex'), updatedAt: Date.now(), ingressToken: '' };
   save(cache);
   console.log(`  🔑 面板鉴权：已初始化（默认密码 ${DEFAULT_PASSWORD} —— 请尽快在「面板设置」里改掉）`);
   return cache;
@@ -103,8 +125,57 @@ function setPassword(oldPw, newPw) {
   if (next.length < MIN_LEN) return { error: `新密码至少 ${MIN_LEN} 位` };
   if (next === DEFAULT_PASSWORD) return { error: '新密码不能和默认密码一样' };
   if (verifyPassword(next, cur.passwordHash)) return { error: '新密码和当前密码一样' };
-  save({ passwordHash: hashPassword(next), secret: cur.secret, updatedAt: Date.now() });
+  save({ passwordHash: hashPassword(next), secret: cur.secret, updatedAt: Date.now(), ingressToken: cur.ingressToken || '' });
   return { ok: true };
+}
+
+/* -------------------------------------------------------- 外部访问令牌 */
+
+function mintIngressToken() {
+  return INGRESS_PREFIX + crypto.randomBytes(24).toString('hex');
+}
+
+/** 取外部访问令牌；**懒生成**（第一次要时才写进 auth.json） */
+function getIngressToken() {
+  const cur = load();
+  if (!cur.ingressToken) {
+    cur.ingressToken = mintIngressToken();
+    save(cur);
+    console.log('  🔑 已生成外部访问令牌（output 插件等外部程序用；可在插件设置页重置）');
+  }
+  return cur.ingressToken;
+}
+
+/** 重置：老令牌立即失效，回新令牌 */
+function resetIngressToken() {
+  const cur = load();
+  cur.ingressToken = mintIngressToken();
+  save(cur);
+  console.log('  🔑 外部访问令牌已重置（旧令牌立即失效）');
+  return cur.ingressToken;
+}
+
+/** 常量时间比对一个外部令牌（空令牌一律不认） */
+function verifyIngressToken(t) {
+  const want = load().ingressToken;
+  const got = String(t || '');
+  if (!want || !got) return false;
+  const a = Buffer.from(got);
+  const b = Buffer.from(want);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * 从请求里取外部令牌：`?token=` 或 `Authorization: Bearer …`（也认 `X-Access-Token`）。
+ * query 优先 —— 跑在播放器里的脚本拼 URL 最省事。
+ */
+function ingressTokenOf(req, searchParams) {
+  const q = searchParams && typeof searchParams.get === 'function' ? String(searchParams.get('token') || '') : '';
+  if (q) return q;
+  const authz = String((req.headers && req.headers.authorization) || '');
+  const m = /^Bearer\s+(.+)$/i.exec(authz.trim());
+  if (m) return m[1].trim();
+  return String((req.headers && req.headers['x-access-token']) || '').trim();
 }
 
 /* ---------------------------------------------------------------- 会话 */
@@ -278,4 +349,8 @@ module.exports = {
   cookieHeader,
   issueToken,
   COOKIE,
+  getIngressToken,
+  resetIngressToken,
+  verifyIngressToken,
+  ingressTokenOf,
 };

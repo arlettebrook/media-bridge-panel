@@ -95,6 +95,17 @@ module.exports = function routes(r) {
     return sendJson(res, 200, { ok: true });
   });
 
+  /* ---------------- 外部访问令牌（output 插件等外部程序用，见 core/auth.js）----------------
+   * 只给**已登录面板**的人看 / 重置；外部程序本身拿令牌走插件自己声明的 ingress token 路径。
+   *   GET  取（懒生成）  POST /reset 重置（老令牌立即失效）
+   */
+  r.add('GET', '/api/panel/ingress-token', (req, res) => sendJson(res, 200, { token: auth.getIngressToken() }));
+
+  r.add('POST', '/api/panel/ingress-token/reset', async (req, res) => {
+    await readBody(req);
+    return sendJson(res, 200, { token: auth.resetIngressToken() });
+  });
+
   r.add('GET', '/api/meta', (req, res) =>
     sendJson(res, 200, {
       service: 'catpaw-panel',

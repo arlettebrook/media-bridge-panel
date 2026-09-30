@@ -268,10 +268,20 @@ function normalizeItem(it) {
     }
     if (Object.keys(p).length) out.providerIds = p;
   }
-  if (it.catpaw && typeof it.catpaw === 'object' && !Array.isArray(it.catpaw)) {
-    const site = String(it.catpaw.site || '').trim();
-    const vodId = String(it.catpaw.vodId || '').trim();
-    if (site || vodId) out.catpaw = { site, vodId };
+  /* 片源定位坐标（可选）：`{source?, site, vodId}` —— 拿着它能跳过再搜索直接要详情。
+   * 规范字段名是 `sourceLoc`；`catpaw` 是旧字段名（品牌净化前的遗留），
+   * 老版本首页插件可能还在发，过渡期**读新也读旧、对外只出新字段**。 */
+  const loc =
+    it.sourceLoc && typeof it.sourceLoc === 'object' && !Array.isArray(it.sourceLoc)
+      ? it.sourceLoc
+      : it.catpaw && typeof it.catpaw === 'object' && !Array.isArray(it.catpaw)
+        ? it.catpaw
+        : null;
+  if (loc) {
+    const source = String(loc.source || '').trim();
+    const site = String(loc.site || '').trim();
+    const vodId = String(loc.vodId || '').trim();
+    if (site || vodId) out.sourceLoc = Object.assign({}, source ? { source } : {}, { site, vodId });
   }
   return out;
 }
@@ -374,6 +384,8 @@ module.exports = {
   parseViewId,
   enabledRows,
   peekRowItems,
+  /** 首页插件原始条目 → HomeItem（output 插件 hostCall home.run 复用同一口径，勿再造一份） */
+  normalizeItems,
   rowByFeed,
   listByQuery,
   warmHome,

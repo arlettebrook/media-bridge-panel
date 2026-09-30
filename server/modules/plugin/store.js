@@ -183,6 +183,11 @@ function installDir(srcDir, { origin = 'manual', md5 = '', enabled } = {}) {
     series: m.series,
     hasWebui: !!m.webui,
     webui: m.webui,
+    /* ingress 路径名单（output 插件用；见 contract.normalizeIngress）。
+     * 网关鉴权时直接读注册表里这份，不必每次请求解包 plugin.json。 */
+    ingress: m.ingress || { public: [], token: [] },
+    /* 自更新清单地址（插件自带；没有就是空串，管理页不显示更新按钮） */
+    updateUrl: m.updateUrl || '',
     depends: m.depends,
     origin,
     md5: md5 || stat.digest,

@@ -20,6 +20,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const store = require('./store');
 const contract = require('./contract');
+const hostApi = require('./host-api');
 
 /** 每次调用插件的默认超时（毫秒）。插件慢不等于坏，所以超时只影响**这一次**调用 */
 const DEFAULT_CALL_TIMEOUT_MS = 20000;
@@ -67,7 +68,7 @@ function start(type, id) {
 
   const proc = spawn(process.execPath, [path.join(__dirname, 'runner.js'), store.dirOf(type, id), manifest.main], {
     cwd: store.dirOf(type, id),
-    env: Object.assign({}, process.env, { CATPAW_PLUGIN_ID: id, CATPAW_PLUGIN_TYPE: type }),
+    env: Object.assign({}, process.env, { MBP_PLUGIN_ID: id, MBP_PLUGIN_TYPE: type }),
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
 
@@ -127,6 +128,21 @@ function start(type, id) {
       st.status = 'broken';
       st.lastError = String(msg.error || '入口报 fatal');
       log(`✘ 插件报告 fatal ${logTag(type, id)}：${st.lastError}`);
+      return;
+    }
+    /* 插件 → 宿主 的反向调用（output 插件读首页 / 聚合能力用，见 host-api.js）。
+     * 回复形状 { type:'hostCallReply', id, ok, value?, error? } —— 与正向调用同一套口径。
+     * 进程已死时 send 会抛，吞掉即可（人都走了，回信没人收）。 */
+    if (msg.type === 'hostCall') {
+      hostApi
+        .dispatch(msg)
+        .then((result) => {
+          try {
+            st.proc.send(Object.assign({ type: 'hostCallReply', id: msg.id }, result));
+          } catch {
+            /* 管道已断 */
+          }
+        });
       return;
     }
     if (msg.id && st.inflight.has(msg.id)) {

@@ -16,7 +16,7 @@ import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { refreshNav } from '../../core/shell.js';
 
-const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页' };
+const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页', output: '输出' };
 const fmtKB = (n) => (Number(n) > 0 ? `约 ${Math.max(1, Math.round(Number(n) / 1024))}KB` : '');
 
 export async function renderPluginLibrary(v) {
@@ -41,7 +41,7 @@ export async function renderPluginLibrary(v) {
     paint(d || {});
   }
 
-  /** 装完刷新「已装」清单：侧栏那三栏是按插件清单现算的，新插件的设置页入口要立刻出现 */
+  /** 装完刷新「已装」清单：侧栏那四栏是按插件清单现算的，新插件的设置页入口要立刻出现 */
   async function refreshInstalled() {
     try {
       S.plugins = await api('/api/plugins');
