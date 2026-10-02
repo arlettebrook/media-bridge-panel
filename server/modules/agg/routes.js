@@ -23,7 +23,9 @@
  * emby 层走的是同一个 api（见 api.js 的说明）。
  */
 const { sendJson, sendError, readBody } = require('../../core/http');
+const auth = require('../../core/auth');
 const api = require('./api');
+const stream = require('./stream');
 const templates = require('./templates');
 const providers = require('../../core/providers');
 const registry = require('../../core/registry');
@@ -238,5 +240,41 @@ module.exports = function routes(r) {
   r.add('POST', '/api/agg/play', async (req, res) => {
     const out = await api.play((await readBody(req)) || {});
     return sendJson(res, out.ok ? 200 : (out.error && out.error.status) || 502, out);
+  });
+
+  /**
+   * GET /api/agg/stream —— **外部客户端直接拉流**（FW/Rex widget 等）。
+   *
+   * 两种取法（同一条路径，见 `./stream.js` 头注）：
+   *   ① `?domain=&ref=&token=` —— 按版本坐标取地址。`playVia` 由**出口插件**按契约的线路声明
+   *      带过来（缺省 `client`）：`client` 非清单 302 / 清单 200 中继；`proxy` 由面板**代持鉴权头**
+   *      中继（清单里的分片地址会被改写成面板子地址，见 ②）。
+   *   ② `?seg=&sid=` —— ①里那份清单**改写出来的分片 / 子清单 / 密钥**地址，只认面板自己签的名
+   *      （`core/auth.js` 的 `signStreamPart`），所以**不要求令牌**：它是面板发出去的子地址。
+   *
+   * 这条路径在 `core/auth.js` 的 `needsAuth` 里**豁免了面板 cookie 门禁**，改由**本路由自验凭证**
+   * （① 同 `plugin/ingress.js` 的口径：query token / Bearer / X-Access-Token；② 验签名）。
+   *
+   * 搬运参数（`proxy` 档才用得上）可以在 URL 上带 `?threads=&chunkKB=` 覆盖这一次播放：
+   * 优先级 URL 参数 > 源插件 `play` 返回 > 面板设置 `streamRelay` > 默认 16 路 / 512KB
+   * （读取在 `stream.js` 的 `relayBytes` / `urlRelayParams`，这里不做转发，见 ADR-0045）。
+   */
+  r.add('GET', '/api/agg/stream', async (req, res, { query }) => {
+    const seg = String(query.get('seg') || '').trim();
+    if (seg) return stream.servePart(req, res, { seg, sid: String(query.get('sid') || '').trim() });
+
+    if (!auth.verifyIngressToken(auth.ingressTokenOf(req, query))) {
+      return sendError(res, 401, '这条流入口需要外部访问令牌（在插件设置页复制；或先登录面板）');
+    }
+    const domain = String(query.get('domain') || '').trim();
+    const ref = String(query.get('ref') || '').trim();
+    if (!domain || !ref) return sendError(res, 400, '请提供 domain 与 ref');
+    /* clientHost = 客户端访问面板用的主机名（本地实例回的是回环地址，源插件拿它换成客户端够得着的） */
+    return stream.serveByRef(req, res, {
+      domain,
+      ref,
+      playVia: String(query.get('playVia') || 'client').trim(),
+      clientHost: req.headers.host || '',
+    });
   });
 };

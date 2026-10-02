@@ -8,6 +8,8 @@
  *   · 缓存设置       面板自己那两份缓存的用量与清空（`data/emby/cache.db` 图片索引 +
  *                    `data/cache/lines.db` 线路结果 + 按插件的聚合耗时），端点 `GET|DELETE /api/panel/cache`，
  *                    策略存 `panel.json` 的 `cache.*`（见 core/cachedb.js）。⚠️ 插件自己的缓存在各自插件设置页。
+ *   · 播放中继设置   字节中继怎么搬（`panel.json` 的 `streamRelay.*`，实现见 agg/stream.js 的 relayBytes）——
+ *                    上游按 Range 形态限速，所以默认切成有界小块、多路并发（见 ADR-0045）。
  *
  * 其余按性质分在别页（同模块的侧栏子项）：
  *   · 「备份与还原」 导出 / 还原整份数据（见本文件 renderPanelBackup）
@@ -429,8 +431,9 @@ function fmtBytes(n) {
  * 为什么归面板：剩下的这两份缓存都归面板用 —— `data/emby/cache.db`（图片索引，面板替客户端取图）
  * 与 `data/cache/lines.db`（线路结果 + 按插件的聚合耗时）。用量显示、清空、上限一把抓才可能不出错，
  * 所以设置、按钮、端点在面板层（`GET|DELETE /api/panel/cache`）。
- * ⚠️ **插件自己的缓存不在这里**：元数据、源插件的取数缓存都随插件走，归插件自己管
- * （插件 → 该插件 → 设置、插件 → 源 → 设置）。
+ * ⚠️ **插件自己的缓存在插件那边**：元数据、源插件的取数缓存与首页插件的行结果都落在插件自己的
+ * 数据目录里，所以「清空面板缓存」**不碰**它们 —— 要连它们一起清用「清除全部缓存（含插件）」
+ * （`DELETE /api/panel/cache/all` → `plugin/store.js` 的 `clearCaches`）。
  */
 function cacheCard() {
   const c = (S.panel.settings || {}).cache || {};
@@ -446,7 +449,8 @@ function cacheCard() {
   const out = el('div', { class: 'hint', text: '正在读取用量…' });
   const aggLine = el('div', { class: 'note' });
   const save = el('button', { class: 'btn primary', text: '保存' });
-  const clear = el('button', { class: 'btn', text: '清空缓存' });
+  const clear = el('button', { class: 'btn', text: '清空面板缓存' });
+  const clearAll = el('button', { class: 'btn', text: '清除全部缓存（含插件）' });
 
   /** 线路结果的有效期显示：勾了长期有效就说长期有效，填 0 就说不缓存 */
   const fmtLineTtl = (r) => {
@@ -528,7 +532,7 @@ function cacheCard() {
   clear.addEventListener('click', async () => {
     if (
       !confirm(
-        '清空本地缓存？\n\n图片索引与线路结果都会重来（下一次点开会重新搜源）。\n账号在另一个库里，不受影响、不用重新登录。'
+        '清空面板缓存？\n\n图片索引与线路结果都会重来（下一次点开会重新搜源）。\n账号在另一个库里，不受影响、不用重新登录。\n插件自己的缓存在插件那边，这一下不动它们。'
       )
     ) {
       return;
@@ -536,11 +540,37 @@ function cacheCard() {
     clear.disabled = true;
     try {
       paint(await api('/api/panel/cache', { method: 'DELETE' }));
-      toast('缓存已清空');
+      toast('面板缓存已清空');
     } catch (e) {
       toast('清空失败：' + e.message, true);
     } finally {
       clear.disabled = false;
+    }
+  });
+
+  /* 清到底那一下：面板那两份 + 各插件的落盘缓存（插件设置与登录态不在缓存里，不动）。 */
+  clearAll.addEventListener('click', async () => {
+    if (
+      !confirm(
+        '清除全部缓存？\n\n' +
+          '· 面板：图片索引与线路结果（下一次点开会重新搜源）\n' +
+          '· 插件：各插件的落盘缓存（元数据的取数缓存、首页插件的行结果）\n\n' +
+          '插件的设置与登录态（网盘 Cookie、源实例清单）不在缓存里，不受影响。\n' +
+          '插件进程里还留着的那份内存缓存清不掉 —— 要等它自己的有效期过去，或重启面板。'
+      )
+    ) {
+      return;
+    }
+    clearAll.disabled = true;
+    try {
+      const r = await api('/api/panel/cache/all', { method: 'DELETE' });
+      paint(r);
+      const n = (((r || {}).plugins || {}).plugins || []).length;
+      toast(n ? `全部缓存已清除（含 ${n} 个插件的落盘缓存）` : '全部缓存已清除（插件这边没有可清的）');
+    } catch (e) {
+      toast('清除失败：' + e.message, true);
+    } finally {
+      clearAll.disabled = false;
     }
   });
 
@@ -573,15 +603,22 @@ function cacheCard() {
       el('span', { class: 'muted', text: 'MB' }),
       el('label', { class: 'chk' }, cLineForever, '长期有效'),
       save,
-      clear
+      clear,
+      clearAll
     ),
     out,
-    aggLine
+    aggLine,
+    el('p', {
+      class: 'note',
+      text:
+        '「清空面板缓存」只清上面这两份；「清除全部缓存（含插件）」连各插件自己的落盘缓存一起清' +
+        '（元数据与源插件的取数缓存、首页插件的行结果）。插件的设置与登录态不在缓存里，不受影响。',
+    })
   );
 }
 
 /** 设置要异步读一次，先占位再把卡换进去 */
-async function cacheSection(v) {
+async function settingsSection(v) {
   const holder = el('div');
   v.append(holder);
   holder.append(el('div', { class: 'card' }, el('h3', { text: '缓存设置' }), el('div', { class: 'muted', text: '正在读取面板设置…' })));
@@ -593,7 +630,78 @@ async function cacheSection(v) {
     );
     return;
   }
-  holder.replaceChildren(cacheCard());
+  holder.replaceChildren(cacheCard(), relayCard());
+}
+
+/* ------------------------------------------------------------------ 播放中继设置 */
+
+/**
+ * 播放中继设置（`streamRelay`，见 ADR-0045）。
+ *
+ * 只管"字节怎么搬"，不管选源与落法（那是聚合层的事）。默认值在后端
+ * （`panel.json` 的 `streamRelay`），这里留空 = 用默认值。
+ */
+function relayCard() {
+  const s = (S.panel.settings || {}).streamRelay || {};
+  const dflt = (v, d) => String(v === undefined || v === null ? d : v);
+  const cOn = el('input', { type: 'checkbox' });
+  cOn.checked = s.enabled !== false;
+  const cThreads = el('input', { type: 'text', value: dflt(s.threads, 16), class: 'w-sm' });
+  const cChunk = el('input', { type: 'text', value: dflt(s.chunkKB, 512), class: 'w-sm' });
+  const save = el('button', { class: 'btn primary', text: '保存' });
+
+  /* 留空发 undefined（JSON 会丢掉），后端按默认值算；填了非数字也发 undefined，不让 NaN 落盘 */
+  const num = (input) => {
+    const t = input.value.trim();
+    if (t === '') return undefined;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    try {
+      const r = await api('/api/modules/panel/settings', {
+        method: 'PUT',
+        body: {
+          settings: {
+            streamRelay: { enabled: cOn.checked, threads: num(cThreads), chunkKB: num(cChunk) },
+          },
+        },
+      });
+      S.panel.settings = r.settings;
+      toast('中继设置已保存');
+    } catch (e) {
+      toast('保存失败：' + e.message, true);
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  return el(
+    'div',
+    { class: 'card' },
+    el('h3', { text: '播放中继设置' }),
+    el('p', {
+      class: 'note',
+      text:
+        '只对"要带鉴权头、播放器自己带不了"的线路生效：这类线路的媒体字节由面板代取再转给播放器。' +
+        '上游对开放式 Range（只给起点、不给终点）限速很狠，所以默认切成有界小块、多路并发拉；' +
+        '探不出总长或上游不认 Range 会自动退回单连接。留空 = 用默认值。' +
+        '拉流地址上带 ?threads=8&chunkKB=256 可以只覆盖这一次播放。',
+    }),
+    el(
+      'div',
+      { class: 'row' },
+      el('label', { class: 'chk' }, cOn, '分块并发'),
+      el('span', { class: 'muted', text: '并发路数' }),
+      cThreads,
+      el('span', { class: 'muted', text: '路 · 每块' }),
+      cChunk,
+      el('span', { class: 'muted', text: 'KB' }),
+      save
+    )
+  );
 }
 
 /* ------------------------------------------------------------------ 面板密码 */
@@ -696,9 +804,9 @@ function speedTestSection(v) {
 }
 
 export function renderPanelSettings(v) {
-  /* 缓存卡要异步读一次设置，往 v 末尾插，不挡上面的卡。 */
+  /* 缓存与中继两张卡要异步读一次设置，往 v 末尾插，不挡上面的卡。 */
   speedTestSection(v);
-  cacheSection(v);
+  settingsSection(v);
 }
 
 /**

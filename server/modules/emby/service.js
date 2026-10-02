@@ -28,6 +28,9 @@ const crypto = require('crypto');
 const zlib = require('zlib'); // 版本 Id 的载荷要压一道（客户端对 URL 长度有硬上限，见 catpawSourceId）
 const metaBridge = require('./meta-bridge');
 const agg = require('../agg/api'); // 聚合层的进程内调用面（原来是打自己的 /api/agg/*，会撞面板门禁 → 见那个文件顶部）
+/* 拉流的**落法内核**（判 302 / 清单中继、清单改写工具）—— 与 agg 的流入口共用同一份，
+ * 别再各写一遍（曾经就是逐行两份拷贝）。见 agg/stream.js 顶部。 */
+const streamKernel = require('../agg/stream');
 const BRAND = require('../../core/branding'); // 默认服务器名（客户端「服务器列表」里显示的那个）
 const home = require('./home');
 const db = require('./db');
@@ -2051,7 +2054,10 @@ async function getItem(itemId, requestedId, host = '') {
     };
   }
 
-  const filter = lineFilter(p.domain);
+  /* 线路过滤**已在聚合层落地**（`agg/service.js` 的 `applyLineFilter`：产出前就把规则不匹配的
+   * 线路从 `detail.lines` 里去掉了）—— 所以本层不再自己滤，只把那笔账读出来写进日志/诊断字段。
+   * 这样 emby 与出口插件（FW/Rex）拿到的是同一份结果，规则也只有一个实现（见 ADR-0025 / 0043）。 */
+  const lfStat = ((d.stats || {}).lineFilter) || null;
   const bindings = [];
   const siteDigest = [];
   /* 命中涉及**多个源**时，版本行标题要带上源名 —— 不同源可能有同名站点（都叫"木偶"），
@@ -2061,8 +2067,7 @@ async function getItem(itemId, requestedId, host = '') {
    * `buildMediaSource`）。**只有「集」与「电影」可播** —— 剧/季是容器，给了会让客户端以为能播。 */
   const sources = [];
   let firstFileName = ''; // 第一条版本**定位到的那个文件**的名字（条目级 `FileName` 用，见下）
-  let totalLines = 0; // 过滤前的线路总数（日志与诊断字段要说清"源里有多少条"）
-  let afterFilter = 0; // 过了线路过滤、还没过"定位"这一关的条数
+  let totalLines = 0; // 到手的线路总数 —— **已过线路过滤**（过滤前多少条看 `lfStat.before`）
   let noTarget = 0; // 因"没定位到这一集"而不进版本列表的线路数（见下面那处 continue）
   let noRef = 0; // 插件没给 `ref` 的播放项数（正常不会发生：没它这一项点了必然播不了）
   for (const entry of entries) {
@@ -2102,17 +2107,15 @@ async function getItem(itemId, requestedId, host = '') {
        * agg 的 `fetchDetail` items 分支。 */
       const movie = found.Type === 'Movie';
       for (const line of lines) {
-        /* 线路过滤（`play.filter`）：**只匹配线路名**，不匹配的不进版本列表。
-         * ⚠️ 它只影响"列出来的版本"，**不影响播放** —— `resolveStream` 按版本 Id 回查，不查这个列表。 */
-        if (filter.re && !filter.re.test(line.flag)) continue;
-        afterFilter += 1;
+        /* ⚠️ **线路过滤不在这里**：`lines` 已经是聚合层滤过的那份（见上面 `lfStat`）——
+         * 本层只判"有没有可播目标"，即下面那处 `continue`。 */
         /* **没有可播目标的线路不进版本列表**：列出来的版本，客户端点了就得能播 ——
          * `resolveStream` 是按「线路 + 这一项」回查的，一条没有目标的线路，点了必然 404。
          * 实测（剧集）：`斗破苍穹 S5E171` 的详情是「4 线路，1 条目定位到」，
          * 也就是 4 个版本里只有 1 个真能播；客户端挑了 huban 那条（集名是
          * `[743.2MB]180x.mp4【D斗P苍q 2026/ximg】`，解析不出集号 → 没定位到）→ 拉流 404。
          * 面板**不猜**集号，所以这种线路宁可不出现在列表里（如实"少给"），也不给一条死路。
-         * ⚠️ `totalLines` 不动 —— 日志里的"源里 N 条"说的是源里有多少，不是列出来多少。 */
+         * ⚠️ `totalLines` 不动 —— 它数的是**到手**的线路数（已过线路过滤），不因为这一条没定位到就减一。 */
         const targets = movie ? line.items || [] : line.target ? [line.target] : [];
         if (!targets.length) {
           noTarget += 1;
@@ -2175,12 +2178,13 @@ async function getItem(itemId, requestedId, host = '') {
   /* 有过滤规则时，把「源里多少条 / 留下多少条」一并记进诊断字段（客户端会忽略，面板核对用）。
    * **只有可播类型（集/电影）才算得通**：剧/季根本不会展开版本列表（上面 `if (!isPlayable(...)) continue`），
    * 那种 0 条是设计，不是规则滤的 —— 别把误导写进诊断字段。 */
-  if (filter.raw && isPlayable(found.Type)) {
+  if (lfStat && lfStat.raw && isPlayable(found.Type)) {
     found.CatpawSource.LineFilter = {
-      Pattern: filter.raw,
-      Total: totalLines,
+      Pattern: lfStat.raw,
+      /* `Total` = **过滤前**源里多少条（聚合层给的那笔账）；`Kept` = 本层最终列了几个版本 */
+      Total: lfStat.before,
       Kept: sources.length,
-      Invalid: filter.invalid,
+      Invalid: lfStat.invalid,
     };
   }
   if (sources.length) found.MediaSources = sources;
@@ -2212,11 +2216,11 @@ async function getItem(itemId, requestedId, host = '') {
   /* 日志里写清「源里 N 条 → 过滤后 M 条 → 列出 K 条」；**少给要一眼看得出来**，而且要分清是
    * **哪个原因**少给的（口径：如实为空、不回退成全部 —— 否则规则写错根本发现不了）：
    *   · 非可播类型（剧/季）**不展开版本列表**，那种 0 条是设计（曾被这句误导过一轮）；
-   *   · 线路过滤（正则没匹配上）；
+   *   · 线路过滤（正则没匹配上）—— **滤在聚合层**，这里只把它那笔账念出来（过滤前多少条）；
    *   · 没定位到这一集（集名里没有集号，面板不猜 → 那条线路不列）。 */
   /* 电影的一个"版本" = 线路 × 播放项，剧集 = 一条线路 —— 日志里分开说，免得把版本数读成线路数 */
   const isMovie = found.Type === 'Movie';
-  const versionNote = isMovie ? `${sources.length} 个版本（${afterFilter} 条线路 × 播放项）` : `${sources.length} 线路`;
+  const versionNote = isMovie ? `${sources.length} 个版本（${totalLines} 条线路 × 播放项）` : `${sources.length} 线路`;
   const noTargetNote = noTarget
     ? `（另有 ${noTarget} 条线路${isMovie ? '没有播放项' : `没定位到 ${locatorLabel(found.Type, p)}`}，不进版本列表）`
     : '';
@@ -2224,9 +2228,10 @@ async function getItem(itemId, requestedId, host = '') {
   const filterNote =
     !isPlayable(found.Type)
       ? ` 非可播类型「${found.Type}」，按设计不给版本列表（源里 ${totalLines} 条线路）` /* 兜底：早返回之后正常走不到 */
-      : (filter.raw
-          ? ` 线路过滤(/${filter.raw}/)${filter.invalid ? '规则非法，已忽略' : ''}：源里 ${totalLines} 条 → 过滤后 ${afterFilter} 条` +
-            (filter.re && totalLines > 0 && afterFilter === 0 ? '（规则把线路全滤掉了）' : '')
+      : (lfStat && lfStat.raw
+          ? ` 线路过滤(/${lfStat.raw}/)${lfStat.invalid ? '规则非法，已忽略' : ''}（聚合层已滤）：` +
+            `源里 ${lfStat.before} 条 → 到手 ${totalLines} 条` +
+            (lfStat.before > 0 && totalLines === 0 ? '（规则把线路全滤掉了）' : '')
           : noTarget
             ? ` 源里 ${totalLines} 条 → 列出 ${sources.length} 条`
             : '') + noTargetNote + noRefNote;
@@ -2387,7 +2392,8 @@ function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel 
   /* 这个版本要播的那一项：电影 = 该线路下的某个播放项；剧集 = **定位到的这一集**。
    * 两者都带集名里源标的规格（容器/分辨率/编码/体积），也带**插件给它编的 `ref`**。 */
   const t = item || line.target || {};
-  const src = catpawSourceId(t.ref);
+  /* `line.playVia` 由源插件申报、聚合层原样透传（契约第五节）；编进版本 Id 供起播判档用 */
+  const src = catpawSourceId(t.ref, line.playVia);
   /* 站点标签用**完整 `name`**（`木偶|4K`）—— 带着 `|4K` 这类画质后缀，比截短的"木偶"信息更全；
    * 标题位与副标题（Path 末段）用**同一个标签**，两行格式统一。
    * 同片别名（`（臻彩）`/`（4K 偷跑）`）**必须**进标题位：同一部片的两个条目常常线路名完全一样
@@ -2513,8 +2519,15 @@ function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel 
  * **面板不解释 `ref` 的内容**（契约第八节）：里面是什么、怎么换成一个地址，都是源插件的事。
  * 这一层只做三件事：压小、编码成客户端安全的一串、播放时原样交回插件。
  */
-function catpawSourceId(ref) {
-  const payload = JSON.stringify({ r: String(ref || '') });
+function catpawSourceId(ref, playVia) {
+  const o = { r: String(ref || '') };
+  /* 线路级的 `playVia` **跟着 `ref` 一起编进 Id** —— 它决定起播时面板怎么落地址（见 `finishStream`）：
+   * `proxy` 的线路客户端带不了鉴权头，得由面板代持中继。缺省 `client` 不写（省长度、也免得老口径漂移）。
+   * 面板不解释 `ref`，但 `playVia` 是**面板自己要用的落法声明**（契约第五节），所以这里必须承载它 ——
+   * 否则 Emby 这条路上只剩 302 一条死路（与出口插件读 `detail` 的 `line.playVia` 同一份真相）。 */
+  const v = String(playVia || 'client');
+  if (v !== 'client') o.v = v;
+  const payload = JSON.stringify(o);
   return 'catpaw:' + zlib.deflateRawSync(Buffer.from(payload, 'utf8')).toString('base64url');
 }
 
@@ -2545,7 +2558,10 @@ function parseCatpawSourceId(src) {
   try {
     const o = JSON.parse(plain);
     const ref = String(o.r || '');
-    return ref ? { ref } : null;
+    if (!ref) return null;
+    /* `v` 是线路级的落法声明（见 `catpawSourceId`）：缺席 = 老 Id / 缺省 `client`。
+     * 原样带出去交给 `finishStream` 判档，这里不解释、不校验取值（`planStream` 只认 `proxy`）。 */
+    return { ref, playVia: String(o.v || 'client') };
   } catch {
     return null;
   }
@@ -2685,10 +2701,15 @@ async function getPlaybackInfo(itemId, requestedId, host = '', token = '') {
  * 这里只做三件事：拆出 `ref` → 连**客户端访问用的主机名**一起交给插件 → 拿回地址 302。
  * 现取、不缓存（地址会过期；缓存在插件自己那边，它自己管有效期）。
  *
- * `clientHost` = 客户端访问本面板用的 `Host` 头：本地部署的实例回的是回环地址，
- * 插件要拿它拼成"客户端够得着的那台机器"（这一步归源插件）。
+ * `req` = 本跳的请求：面板从它的 `Host` 头得到 `clientHost`（客户端访问用的主机名；本地部署的实例
+ * 回的是回环地址，插件要拿它拼成"客户端够得着的那台机器"）；另取一份 `origin`（协议 + Host）
+ * 给 `proxy` 档的清单改写用 —— 改出来的子地址必须是**绝对**的，且要落在客户端正在打的那个端口上
+ * （见 `finishStream`）。
  */
-async function resolveStream(itemId, src, requestedId, clientHost) {
+async function resolveStream(itemId, src, requestedId, req) {
+  const clientHost = (req && req.headers && req.headers.host) || '';
+  /* 清单改写用的绝对来源（协议 + Host）—— `proxy` 档的子地址必须落在这个上面 */
+  const origin = req ? streamKernel.originOf(req) : '';
   /* 有 UserId 就校验，没有也不拦（客户端拉流不保证带上它） */
   if (requestedId) {
     const denied = assertUser(requestedId);
@@ -2724,20 +2745,29 @@ async function resolveStream(itemId, src, requestedId, clientHost) {
       log: `${locatorLabel(p.type === 'movie' ? 'Movie' : 'Episode', p)} 解析地址失败（${e.code}：${e.message || ''}）`,
     };
   }
-  return await finishStream({ p, pr });
+  /* 拉流地址上可以带 `?threads=&chunkKB=` 覆盖搬运参数（见 stream.js 的 urlRelayParams）：
+   * 非清单档由 `relayBytes` 自己再读一遍；**清单档**得在这一跳就定下来（跟着 sid 存），
+   * 所以这里要先读出来带下去。 */
+  return await finishStream({ p, pr, playVia: parsed.playVia, origin, over: streamKernel.urlRelayParams(req) });
 }
 
 /**
- * 拉流的**共同尾段**：拿到地址之后怎么跳。请求头提醒与日志口径只此一处。
+ * 拉流的**共同尾段**：拿到地址之后怎么落。请求头提醒与日志口径只此一处。
  *
  * ⚠️ 地址**不再由面板改写**：回环地址换成"客户端够得着的那台机器"这一步随 `ref` 转交
- * 搬进了源插件 —— 面板已经不知道实例端口，
- * 插件给回来的就是最终地址。这里只做"能不能 302"的如实判断。
+ * 搬进了源插件 —— 面板已经不知道实例端口，插件给回来的就是最终地址。
  *
- * 唯一的例外是 **HLS 清单**（见下面 `isPlaylistUrl` 那段）：那种地址不能 302，
- * 得由面板取回来改写一次再回（ADR-0040）。
+ * 落法由**内核**判（`../agg/stream.js` 的 `planStream`，四档），`playVia` 从版本 Id 载荷里取
+ * （编进 Id 时读的是 `detail.lines[].playVia`，见 `catpawSourceId`）：
+ *   · `client` 非清单 → **302**（字节全在源与客户端之间跑）；
+ *   · `client` 清单   → **200 清单中继**（相对补绝对，ADR-0040）；
+ *   · `proxy` 非清单  → **面板代持请求头中继**（字节经面板，Range 透传，ADR-0042）；
+ *   · `proxy` 清单    → **200 清单中继**，且每个地址改写成落在**本端口** `/api/emby/stream` 上的签名子地址。
+ *
+ * ⚠️ Emby 客户端带不了请求头，所以 `proxy` 线路只能由面板代持 —— 这正是 ADR-0042 当初记下
+ * "Emby 层暂不接这一档"的那件事，现在补上了（见后继 ADR）。
  */
-async function finishStream({ p, pr }) {
+async function finishStream({ p, pr, playVia, origin, over }) {
   const play = pr.play || {};
   const url = (play.urls || [])[0] || '';
   const headers = play.header || {};
@@ -2755,150 +2785,77 @@ async function finishStream({ p, pr }) {
    * 「非可播类型：tv」这种误导日志（早期一直这么打）。 */
   const label = locatorLabel(p.type === 'movie' ? 'Movie' : 'Episode', p);
   /* 该线路要求请求头（头是源自己内嵌在 proxy URL 里的例外，那种 header 是空的）。
-   * 两条路上的"带不了"不是一回事，所以分开说，别让它变成"点了播放没反应"的无头案。 */
+   * 各档"带得了带不了"不是一回事，所以分开说，别让它变成"点了播放没反应"的无头案。 */
   const reqHeaders = Object.keys(headers || {});
   const headerNote302 = reqHeaders.length ? ` ⚠️ 该线路要求请求头 ${reqHeaders.join('/')}，302 后客户端带不了` : '';
+  /* 三档的提醒口径各不相同，别互相借用 —— `client` 档的清单这一格最容易说岔：
+   * 面板只带头发了"取清单"那一跳，**分片仍是客户端直连**，它照样带不了头。 */
   const headerNoteRelay = reqHeaders.length
-    ? ` ⚠️ 该线路要求请求头 ${reqHeaders.join('/')}：取清单这一跳由面板带了，之后客户端直连、带不了`
+    ? ` ⚠️ 该线路要求请求头 ${reqHeaders.join('/')}，由面板代持中继`
     : '';
+  const headerNotePlaylist = reqHeaders.length
+    ? ` ⚠️ 该线路要求请求头 ${reqHeaders.join('/')}，分片仍由客户端直连、带不了头`
+    : '';
+  const mode = streamKernel.planStream({ url, playVia });
 
-  if (!isPlaylistUrl(url)) {
+  if (mode === 'redirect') {
     return { status: 200, log: `${label} parse=${play.parse} → 302` + headerNote302, stream: { url, headers, parse: play.parse } };
   }
 
-  /* HLS 清单**不能 302** —— 理由见 `serveStream` 那段注释。取不回来就退回 302（与改前一致，至少不变差）。 */
-  const got = await fetchPlaylist(url, headers);
-  if (got.error) {
+  /* `proxy` 的非清单地址：**直接开搬**（别先去"取清单" —— 那会把一个分片当清单读满 256KB 再判错）。
+   * 落响应归路由层（`serveStream` 的第三形态），这里只把取流所需的选择交出去。
+   * 搬运参数：拉流 URL 上的 > 源插件在 `play` 里带的 > 面板设置 > 默认（见 `relayParams`）。 */
+  if (mode === 'relay') {
     return {
       status: 200,
-      log: `${label} parse=${play.parse} → 302（清单中继失败：${got.error}）` + headerNote302,
-      stream: { url, headers, parse: play.parse },
+      log: `${label} parse=${play.parse} → 200 面板中继（字节经面板，分块并发搬运）` + headerNoteRelay,
+      relay: Object.assign({ url, headers, label }, streamKernel.mergeRelayOverrides(over, play)),
     };
   }
-  const fixed = absolutizePlaylist(got.text, got.url);
+
+  /* 剩下两档都要取回清单：`client` 档补绝对即可；`proxy` 档每个地址还要改写成面板子地址。
+   * 取不回来：`client` 档如实退回 302（与改前一致，至少不变差）；`proxy` 档退回 302 等于把
+   * "要头的地址"丢给带不了头的客户端 —— 必然播不了的死路，不如如实报错（同 agg 层口径）。 */
+  const got = await streamKernel.fetchPlaylist(url, headers);
+  if (got.error) {
+    if (mode === 'playlist') {
+      return {
+        status: 200,
+        log: `${label} parse=${play.parse} → 302（清单中继失败：${got.error}）` + headerNote302,
+        stream: { url, headers, parse: play.parse },
+      };
+    }
+    return {
+      status: 502,
+      body: { error: `中继取清单失败：${got.error}` },
+      log: `${label} 中继取清单失败：${got.error}`,
+    };
+  }
+
+  if (mode === 'playlist') {
+    const fixed = streamKernel.absolutizePlaylist(got.text, got.url);
+    return {
+      status: 200,
+      log: `${label} parse=${play.parse} → 200 清单中继（${fixed.count} 个地址补成绝对，${fixed.text.length} 字节）` + headerNotePlaylist,
+      playlist: { text: fixed.text, contentType: streamKernel.PLAYLIST_MIME },
+    };
+  }
+
+  /* `proxy` 的清单：每个地址改成面板**签名子地址**，落在客户端正在打的这个端口上的 `/api/emby/stream`
+   * （Emby 实例端口只收 `/api/emby/` 前缀，绝不能指到 `/api/agg/stream`）。客户端照清单取分片时
+   * 由面板带头发给上游 —— 不给分片带头，清单拿回来也播不了。
+   * 搬运参数跟着 `sid` 存下来（见 stream.js 的 `relayPlaylist`），分片那几十发共用这一份。 */
+  const fixed = streamKernel.relayPlaylist(got.text, got.url, {
+    origin,
+    headers,
+    path: '/api/emby/stream',
+    over: streamKernel.mergeRelayOverrides(over, play),
+  });
   return {
     status: 200,
-    log: `${label} parse=${play.parse} → 200 清单中继（${fixed.count} 个地址补成绝对，${fixed.text.length} 字节）` + headerNoteRelay,
-    playlist: { text: fixed.text, contentType: PLAYLIST_MIME },
+    log: `${label} parse=${play.parse} → 200 清单中继（${fixed.count} 个地址改成面板子地址）` + headerNoteRelay,
+    playlist: { text: fixed.text, contentType: streamKernel.PLAYLIST_MIME },
   };
-}
-
-/* ----------------------------------------------------------- HLS 清单中继 */
-
-/** 清单单次最多读多少字节 —— 正常清单（master 或媒体）都只有几 KB，分片则是兆级的，超了就不是清单 */
-const PLAYLIST_MAX_BYTES = 256 * 1024;
-/** 取清单的超时（客户端在等这一跳，不能久留） */
-const PLAYLIST_TIMEOUT_MS = 15000;
-/** 回给客户端的清单 MIME（HLS 规范写的那个；客户端据此认它是清单而非文件） */
-const PLAYLIST_MIME = 'application/vnd.apple.mpegurl';
-
-/**
- * 这份地址是不是 HLS 清单。**只看路径后缀**（`.m3u8`，query 里带 token 的照样算）——
- * 不依赖源插件声明 `Container`，也不依赖响应体（要判响应体就得先把分片拉下来）。
- */
-function isPlaylistUrl(u) {
-  try {
-    return /\.m3u8$/i.test(new URL(u).pathname);
-  } catch {
-    return false;
-  }
-}
-
-/** 相对 → 绝对。已经是绝对的（含 `data:` 那类）返回空串，表示"不用动" */
-function absoluteUri(uri, base) {
-  const s = String(uri || '').trim();
-  if (!s || /^[a-z][a-z0-9+.-]*:/i.test(s)) return '';
-  try {
-    return new URL(s, base).toString();
-  } catch {
-    return '';
-  }
-}
-
-/**
- * 把清单里所有**地址**补成绝对地址，其余一行不动。
- *
- * 两种都算地址：
- *   · 非 `#` 开头的整行（master 的变体行、媒体清单的分片行）；
- *   · 标签里 `URI="…"` 的值（`#EXT-X-KEY` / `#EXT-X-MAP` / `#EXT-X-MEDIA` /
- *     `#EXT-X-I-FRAME-STREAM-INF` / `#EXT-X-PART` …）—— 规范里这些 URI 都带引号。
- * 其它标签（`#EXT-X-TOKEN` 这种非标准的也在内）**原样保留**；认不出的地址原样留着，
- * 不猜、不把清单改坏。
- *
- * @param base 清单**最终**的地址（跟随过跳转的那个）—— 相对地址是相对它算的
- * @returns `{ text, count }`：`count` 是补掉几处（只进日志）
- */
-function absolutizePlaylist(text, base) {
-  let count = 0;
-  const lines = String(text).split('\n').map((raw) => {
-    const line = raw.replace(/\r$/, '');
-    const s = line.trim();
-    if (!s) return line;
-    if (s.startsWith('#')) {
-      return line.replace(/URI="([^"]*)"/g, (m, uri) => {
-        const abs = absoluteUri(uri, base);
-        if (!abs) return m;
-        count++;
-        return `URI="${abs}"`;
-      });
-    }
-    const abs = absoluteUri(s, base);
-    if (!abs) return line;
-    count++;
-    return abs;
-  });
-  return { text: lines.join('\n'), count };
-}
-
-/**
- * 取回清单原文。**不落地、不缓存**：这一跳只为改写，改完就扔。
- *
- * 三条硬约束（地址是源给的，面板只是照取）：
- *   ① 超时 `PLAYLIST_TIMEOUT_MS`；
- *   ② 边读边数，超过 `PLAYLIST_MAX_BYTES` 立刻断开（免得被一个"看着像清单其实是大分片"的地址拖住）；
- *   ③ 取回来必须真以 `#EXTM3U` 开头 —— 不是清单就如实说，让调用方退回 302。
- */
-async function fetchPlaylist(url, headers) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), PLAYLIST_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { headers, redirect: 'follow', signal: ctrl.signal });
-    if (!res.ok) return { error: `上游 HTTP ${res.status}` };
-    const chunks = [];
-    let size = 0;
-    for await (const chunk of res.body) {
-      size += chunk.length;
-      if (size > PLAYLIST_MAX_BYTES) {
-        ctrl.abort();
-        return { error: `响应超过 ${PLAYLIST_MAX_BYTES} 字节，不像是清单` };
-      }
-      chunks.push(Buffer.from(chunk));
-    }
-    const text = Buffer.concat(chunks).toString('utf8');
-    if (!/^\s*#EXTM3U/.test(text)) return { error: '取回的不是清单' };
-    return { text, url: res.url || url };
-  } catch (e) {
-    const msg = e && e.name === 'AbortError' ? `取清单超时（${PLAYLIST_TIMEOUT_MS / 1000} 秒）` : String((e && e.message) || e);
-    return { error: msg };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * 线路过滤（面板「Emby → 播放设置」→ `play.filter`）：一个正则，**只匹配线路名**（`line.flag`）——
- * 匹配上的线路才进客户端的版本列表。站点维度的取舍不在这里（那是聚合层的 `agg.enabled` / `agg.order`）。
- *
- * 留空 = 不过滤（`re:null`）。**非法正则在保存时就已被拒绝**（见 index.js 的 validate），这里是运行时
- * 兜底：真碰上就按「不过滤」走，并在日志里点名 —— 规则坏了不该把版本列表整个清空。
- *
- * 返回值：`{ raw, re, invalid }`，`raw` 也用于日志与诊断字段。
- */
-function lineFilter(domain) {
-  /* **设置已搬到模板**：线路过滤跟着模板走，而模板由**域**决定（见 docs/adr/0033）。
-   * 线路是聚合层产出的东西，规则跟它放一起才不"配置在 A、生效在 B"。这里只转发
-   * （实现见 `agg/api.js` → `agg/service.js` 的 `lineFilter`）。 */
-  return agg.lineFilter(agg.paramsFor(domain));
 }
 
 /** 条目公共字段拼装（BaseItemDto 最小公共集）；类型特有字段由调用方续写 */

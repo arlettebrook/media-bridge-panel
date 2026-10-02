@@ -40,7 +40,7 @@ const LOCK_MS = 60 * 1000;
 
 /* ---------------------------------------------------------------- 外部访问令牌
  *
- * 给**跑在面板进程之外的程序**用（例如装在 Forward 播放器里的 output 插件 JS）：
+ * 给**跑在面板进程之外的程序**用（例如装在 FW/Rex 播放器里的 output 插件 JS）：
  * 它们没有浏览器会话 cookie，只有自己声明的静态 HTTP 能力，访问面板必须有个凭证。
  *
  * 与登录密码的区别：
@@ -189,6 +189,32 @@ function sign(payload) {
   return crypto.createHmac('sha256', load().secret).update(payload).digest('base64url');
 }
 
+/**
+ * 给**面板自己发出去的子地址**签名（与上面会话签名的用途完全不同，故加前缀隔离）。
+ *
+ * 用在哪：`playVia:'proxy'` 的 HLS 清单要中继，而清单里的分片地址**得改成面板自己的地址**
+ * 才能给每一发分片带上鉴权头（见 modules/agg/stream.js）。这一发**不看会话 cookie、也不认 token** ——
+ * 唯一的凭证就是这道签名；没有它，那个端点就是一个人人可用的**开放代理**（拿别人的面板当跳板）。
+ *
+ * ⚠️ 签名过了只是第一关：面板还得凭地址里的 `sid` 去**内存**那份 `sid → 鉴权头` 表里取头
+ * （见 modules/agg/stream.js 的 `getPart`）。那张表是进程内的，所以面板重启后旧子地址取不到头、
+ * 按 410 回 —— 客户端重取一次清单即可。
+ *
+ * 密钥用面板自己的 `secret`，重启不换、改密码不换。
+ */
+function signStreamPart(payload) {
+  return crypto.createHmac('sha256', load().secret).update('seg:' + String(payload)).digest('base64url');
+}
+
+/** 验上面那道签名（长度不等直接否，再常量时间比对） */
+function verifyStreamPart(payload, mac) {
+  const want = signStreamPart(payload);
+  const a = Buffer.from(String(mac || ''));
+  const b = Buffer.from(want);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
 function issueToken() {
   const payload = Buffer.from(JSON.stringify({ exp: Date.now() + TTL_MS, pv: pvOf() }), 'utf8').toString('base64url');
   return payload + '.' + sign(payload);
@@ -267,6 +293,10 @@ const EMBY_PANEL_RE = [/^\/api\/emby\/accounts\b/, /^\/api\/emby\/instances\b/, 
 
 function needsAuth(pathname) {
   if (pathname.startsWith('/api/auth/')) return false; // 登录本身（还有 status/logout）
+  /* 外部播放器的流入口（FW/Rex widget 等）**豁免 cookie 门禁** —— 它只有插件 ingress 令牌，
+   * 没有浏览器会话；凭证由路由**自己验**：按坐标取地址那一发验 ingress 令牌，清单改写出来的
+   * 子地址（`?seg=`）验面板签名（`signStreamPart`）。见 agg/routes.js 的 `/api/agg/stream`。 */
+  if (pathname.startsWith('/api/agg/stream')) return false;
   if (pathname.startsWith('/api/emby/')) return EMBY_PANEL_RE.some((re) => re.test(pathname));
   /* ⚠️ 原先这里还带 `/website`：那是"配置中心同源代理"的路径，随源插件化去掉了
    * （配置中心现在由插件的设置页直连实例端口，不再过面板）。 */
@@ -353,4 +383,6 @@ module.exports = {
   resetIngressToken,
   verifyIngressToken,
   ingressTokenOf,
+  signStreamPart,
+  verifyStreamPart,
 };

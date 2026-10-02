@@ -27,7 +27,7 @@ const bridge = require('./source-bridge');
 const cache = require('./cache');
 const templates = require('./templates');
 const siteStats = require('./site-stats');
-const { aggregateSearch, aggregateDetail, playEpisode, selectSites, matchDefaults, searchTimeoutMs, detailTimeoutMs, lineFilter: serviceLineFilter } = require('./service');
+const { aggregateSearch, aggregateDetail, playEpisode, selectSites, matchDefaults, searchTimeoutMs, detailTimeoutMs } = require('./service');
 
 /** 失败的统一形状（不抛异常：调用方可能是路由，也可能是 emby 层，各自决定怎么呈现） */
 function fail(code, status, message) {
@@ -119,14 +119,9 @@ async function loadSites() {
 /** 参与聚合的源（拉得到站点的那些）—— 用来把"源都不可用"和"没勾选站点"两种空区分开报 */
 const liveSources = (sources) => (sources || []).filter((s) => s.ok);
 
-/**
- * Emby **版本列表的线路过滤**（正则，**只匹配线路名** `line.flag`）。
- *
- * ⚠️ **实现已搬到 `service.js`**：它现在有两处用途、必须同一套判据 ——
- * emby 层拼版本列表时，与聚合层判断"这条详情对客户端有没有用"时（见 ADR-0025）。
- * 这里只转发，emby 层照旧调这个入口（`emby/service.js` 的 `lineFilter()` 一行转发）。
- */
-const lineFilter = (params) => serviceLineFilter(params);
+/* ⚠️ 线路过滤**不再从这里转发**：规则由 `service.js` 在产出线路时就用掉了
+ *（`applyLineFilter`），消费方（emby / 出口插件）拿到的 `lines` 已经是滤过的那份 ——
+ * 原先 emby 层那个"读规则、拼版本列表时自己滤"的口子已删（见 ADR-0043）。 */
 
 /* ============================================================
  * 线路结果缓存 + 同键并发合并（表与库见 modules/agg/cache.js）
@@ -160,7 +155,10 @@ function detailCacheKey({ name, year, season, episode, scoped, sources, cfg, par
   const pair = (x) => `${(x && x.source) || ''}/${(x && x.key) || ''}`;
   const dim = (v) => (v === undefined || v === null || v === '' ? '' : String(v));
   return [
-    'aggdetail',
+    /* ⚠️ `aggdetail` 后面那个 `2` 是**产出口径的版本号**：线路过滤从"客户端各自滤"改成了"聚合层产出时就滤"
+     *（ADR-0043），同一份 key 下的旧快照是按旧口径算的（`lines` 是全量）—— 不换 key 就会一直
+     * 命中旧快照，看起来像"改完没生效"。以后只要"这份结果的内容口径"变了，这里就 +1。 */
+    'aggdetail2',
     String(name || ''),
     String(year || ''),
     dim(season),
@@ -580,9 +578,6 @@ module.exports = {
   ensureTemplate,
   /** 作用域：`tpl`（web 按模板选）或 `domain`（客户端按域选）二选一，见函数说明 */
   scopeOf,
-  /** 某个域的参数（emby 层拼版本列表时要按同一套规则过滤线路，见 docs/adr/0025） */
-  paramsFor: (domain) => templates.paramsFor(String(domain || '').trim()),
-  lineFilter,
   loadSites,
   liveSources,
   detail,

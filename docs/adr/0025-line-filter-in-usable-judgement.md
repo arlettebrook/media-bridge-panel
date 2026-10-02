@@ -1,7 +1,7 @@
 # ADR-0025 线路过滤参与"这条详情对客户端有没有用"的判据（并进快照 key）
 
 - 状态：已采纳
-- 相关：[agg/service.js](../../server/modules/agg/service.js) · [agg/api.js](../../server/modules/agg/api.js) · [emby/service.js](../../server/modules/emby/service.js) · [0020](0020-detail-snapshot.md) · [0005](0005-continuation-fetch.md) · [0008](0008-no-fabricated-data.md)
+- 相关：[agg/service.js](../../server/modules/agg/service.js) · [agg/api.js](../../server/modules/agg/api.js) · [emby/service.js](../../server/modules/emby/service.js) · [0020](0020-detail-snapshot.md) · [0005](0005-continuation-fetch.md) · [0008](0008-no-fabricated-data.md) · [0043](0043-line-filter-at-aggregate-output.md)（局部取代本文的「转发口径」一节）
 
 ## 背景
 
@@ -28,7 +28,11 @@
 ## 决定
 
 1. 线路过滤的**实现在 `agg/service.js`（只此一处）**：`lineFilter()` 产出 `{raw, re, invalid}`；
-   emby 层经 `agg/api.js` 转发（`emby/service.js` 一行），聚合层判断"能不能用"时用同一个正则。
+   ~~emby 层经 `agg/api.js` 转发（`emby/service.js` 一行）~~，聚合层判断"能不能用"时用同一个正则。
+   ⚠️ **本条的"转发口径"已被 [ADR-0043](0043-line-filter-at-aggregate-output.md) 局部取代**：
+   过滤现在**落到产出上**（`applyLineFilter`，返回前就把不匹配的线路从 `detail.lines` 去掉），
+   消费方（emby / 出口插件）拿到的就是滤过的那份 —— emby 不再自己滤、也不再经 `agg/api.js` 转发读规则；
+   下面第 2 条的**判据**（`detailUsable` 带 `re`）仍然有效：它跑在产出过滤**之前**，那时 `lines` 还是全量。
 2. **"能用"的判据 = 有线路 + 过了线路过滤 + 有可播目标**（剧集定位到这一集 / 电影有播放项）——
    即 `lineVisible()` / `detailUsable(d, need, re)`，统计在 `stats.usable`。
    这就是"客户端真能列出至少一条版本"。

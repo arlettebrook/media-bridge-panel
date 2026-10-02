@@ -14,12 +14,17 @@
  *   POST|DELETE /api/emby/Users/{UserId}/PlayedItems/{ItemId}    「标记已看 / 未看」（POST=已看、DELETE=未看）
  *   POST /api/emby/Sessions/Playing[/Progress|/Stopped]  客户端播放上报（落库，见下面「播放进度上报」）
  *   POST /api/emby/Items/{ItemId}/PlaybackInfo   播放信息（版本清单 = 线路，Path 指向下面的 Stream）
- *   GET  /api/emby/Items/{ItemId}/Stream         拉流（现取地址后**一律 302**；本地部署的源会把回环地址换成客户端域名）
+ *   GET  /api/emby/Items/{ItemId}/Stream         拉流（现取地址后按版本 Id 里的 `playVia` **分档落法**：
+ *                                                `client` 302 / 清单 200 中继；`proxy` 面板代持请求头中继，
+ *                                                见 ADR-0042。本地部署的源会把回环地址换成客户端域名）
  *   GET  /api/emby/videos|Videos/{ItemId}/stream[.{ext}]  直连播放（**Emby 标准端点**：实测客户端播直连时
  *                                                走的是这条 + MediaSourceId，而不是上面那条 Path；
  *                                                两种大小写都注册 —— 小写是早期日志实录，大写是 Emby 官方路径）
- *   GET  /api/emby/Items/{ItemId}/Download       下载（与拉流**同一条链路**：MediaSourceId → 现取地址 → 302；
- *                                                302 之后文件名/断点续传归源站，面板不扛流量）
+ *   GET  /api/emby/stream                         `proxy` 档清单改写出的分片子地址（验签名，不校验 token；
+ *                                                与 /api/agg/stream?seg= 同一实现，只是必须落在实例端口收的
+ *                                                /api/emby/ 前缀下）
+ *   GET  /api/emby/Items/{ItemId}/Download       下载（与拉流**同一条链路**：MediaSourceId → 现取地址 → 落法；
+ *                                                `client` 档 302 之后文件名/断点续传归源站，面板不扛流量）
  *   GET  /api/emby/Shows/{Id}/Seasons        剧的季列表（**占位**：插件的 seasons[]；UserId 在 query 里）
  *   GET  /api/emby/Shows/{Id}/Episodes       某一季的分集（**占位**：插件的取季动作；UserId/SeasonId 在 query 里）
  *   GET  /api/emby/Items/{Id}/Images/{type}  图片（**豁免 token**；tag = `cpimg.<base64url(URL)>.<签名>`，验签不过 404；**一律 302** 到原图；支持 `/Images/{type}/{index}`）
@@ -55,6 +60,8 @@
  */
 const { sendJson, sendBuffer, readBody, readRawBody } = require('../../core/http');
 const service = require('./service');
+/* 流内核（agg 拥有）：`proxy` 档的清单子地址与字节中继都共用那一份，别再各写一遍 */
+const streamKernel = require('../agg/stream');
 const log = require('./log');
 const metaBridge = require('./meta-bridge');
 const db = require('./db');
@@ -87,20 +94,23 @@ function notImplemented(req, res, { pathname, query, body }) {
 }
 
 /**
- * 把 `resolveStream` 的结果落到响应上。**两种形态**：
+ * 把 `resolveStream` 的结果落到响应上。**三种形态**（由内核的 `planStream` 分档，见 ADR-0042）：
  *
- *   · `out.stream`   —— 302，只回一个 `Location`，字节全在源与客户端之间跑（绝大多数线路走这条）
- *   · `out.playlist` —— 200，回一份**改写过的 HLS 清单**（地址已补成绝对，见 ADR-0040）：
+ *   · `out.stream`   —— 302，只回一个 `Location`，字节全在源与客户端之间跑（`client` 档的非清单线路）
+ *   · `out.playlist` —— 200，回一份**改写过的 HLS 清单**（`client` 补绝对 / `proxy` 换成面板签名子地址）：
  *     清单**不能 302** —— 里面的地址是相对的，客户端按"自己最初请求的那条 URL"拼，
  *     一跳过去它就拼到面板身上了（实测 VidHub 的 ffmpeg 去打 `/videos/{Id}/360p/video.m3u8` → 501）。
  *     ⚠️ 面板搬的是**一份清单**（几百字节），不是媒体流量。
+ *   · `out.relay`    —— 200，**面板代持请求头**去取字节并搬到客户端（`proxy` 档的非清单线路）：
+ *     客户端带不了那串鉴权头，只能由面板带头发给上游。搬运是**分块并发**的（有界 Range 切块，
+ *     参数见面板设置 `streamRelay`），实现在 `../agg/stream.js` 的 `relayBytes`（与 agg 流端点同一份）。
  *
  * 本地部署的源回的地址是回环地址，这里拿到的已经是**换过域名**的那份（见源插件的地址改写）。
  *
  * `verb` 只进日志那行（拉流 / 下载）：两个端点共用这一段，日志里得能分清是哪条在跑。
  */
 function serveStream(req, res, out, label, verb = '拉流') {
-  if (!out.stream && !out.playlist) {
+  if (!out.stream && !out.playlist && !out.relay) {
     /* 失败时把**客户端原始 URL** 一起打出来 —— 光看状态行根本不知道它回传了什么
      * `MediaSourceId`（排查"缺少 vod"时就卡在这）。**只在失败时打**，所以并成一行。 */
     log.logResult(req, `${verb} ${label}`, out, out.status >= 400 ? ` 原始请求: ${req.url}` : '');
@@ -108,6 +118,8 @@ function serveStream(req, res, out, label, verb = '拉流') {
   }
   log.logResult(req, `${verb} ${label}`, { status: out.status, log: out.log });
   if (out.playlist) return sendBuffer(res, 200, Buffer.from(out.playlist.text, 'utf8'), out.playlist.contentType);
+  /* 字节中继：搬运函数自己写响应头与状态行，这里不要再碰 `res` */
+  if (out.relay) return streamKernel.relayBytes(req, res, out.relay);
   /* ⚠️ `Location` 里的**非 ASCII 必须先编码**：HTTP 头的值只认 ASCII，Node 碰上中文会直接抛
    * `Invalid character in header content ["Location"]` —— 那时状态行已经写了一半，
    * 客户端看到的是一个莫名其妙的 500（实测：源回的地址里带中文站名时会这样）。
@@ -377,7 +389,7 @@ module.exports = function routes(r) {
         error: '路径里的 token 认不出（应是 base64url 的、以 catpaw: 开头的版本 Id）',
       });
     }
-    const out = await service.resolveStream(params.itemId, src, query.get('UserId'), req.headers.host || '');
+    const out = await service.resolveStream(params.itemId, src, query.get('UserId'), req);
     return serveStream(req, res, out, `Items/${params.itemId}/Stream`);
   };
   r.add('GET', '/api/emby/Items/:itemId/Stream/:token', streamByPath);
@@ -392,7 +404,7 @@ module.exports = function routes(r) {
       return sendJson(res, denied.status, denied.body);
     }
 
-    const out = await service.resolveStream(params.itemId, query.get('src'), query.get('UserId'), req.headers.host || '');
+    const out = await service.resolveStream(params.itemId, query.get('src'), query.get('UserId'), req);
     return serveStream(req, res, out, `Items/${params.itemId}/Stream`);
   });
 
@@ -420,7 +432,7 @@ module.exports = function routes(r) {
       params.itemId,
       query.get('MediaSourceId'),
       query.get('UserId'),
-      req.headers.host || '' // 客户端访问用的主机名：本地实例回的是回环地址，插件拿它拼成客户端够得着的
+      req // 由本跳的 Host 推 clientHost / origin：本地实例回的是回环地址，插件拿它拼成客户端够得着的
     );
     return serveStream(req, res, out, `videos/${params.itemId}/${params.file}`);
   };
@@ -429,6 +441,25 @@ module.exports = function routes(r) {
    * 先白吃一个 501，随后才退回小写拿到 302）。同一条实现，不复制逻辑。 */
   r.add('GET', '/api/emby/videos/:itemId/:file', serveDirectVideo);
   r.add('GET', '/api/emby/Videos/:itemId/:file', serveDirectVideo);
+
+  /**
+   * `GET /api/emby/stream?seg=…&sid=…` —— **`proxy` 档 HLS 清单改写出来的子地址**（分片 / 子清单 / 密钥）。
+   *
+   * 与 agg 那条 `/api/agg/stream?seg=` 是**同一条实现**（`relayBytes` + 签名子地址），只是路径不同：
+   * Emby 实例端口的监听**只收 `/api/emby/` 前缀**（见 `listener.js`），清单是客户端在**实例端口**上
+   * 取回去的，里面改写出的分片地址也只会打回实例端口 —— 指到 `/api/agg/stream` 必吃 404。
+   *
+   * **不走面板 cookie 门禁**（`core/auth.js` 的 `needsAuth` 对非面板自用的 `/api/emby/*` 放行），
+   * 也不校验 Emby token：这是**面板自己发出去的子地址**，唯一的凭证是那道 HMAC 签名
+   * （`core/auth.js` 的 `signStreamPart`）。没有它，这个端点就是个人人可用的开放代理。
+   *
+   * ⚠️ **必须注册在通配 `ANY /api/emby/*rest` 之前**。
+   */
+  r.add('GET', '/api/emby/stream', async (req, res, { query }) => {
+    const seg = String(query.get('seg') || '').trim();
+    if (!seg) return notImplemented(req, res, { pathname: '/api/emby/stream', query });
+    return streamKernel.servePart(req, res, { seg, sid: String(query.get('sid') || '').trim() });
+  });
 
   /**
    * 下载：`GET /api/emby/Items/{ItemId}/Download?MediaSourceId=<版本 Id>&DeviceId=…`。
@@ -456,7 +487,7 @@ module.exports = function routes(r) {
       params.itemId,
       query.get('MediaSourceId'),
       query.get('UserId'),
-      req.headers.host || '' // 客户端访问用的主机名：本地实例回的是回环地址，插件拿它拼成客户端够得着的
+      req // 由本跳的 Host 推 clientHost / origin：本地实例回的是回环地址，插件拿它拼成客户端够得着的
     );
     return serveStream(req, res, out, `Items/${params.itemId}/Download`, '下载');
   });

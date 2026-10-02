@@ -32,7 +32,7 @@
 | [0023](0023-playback-progress.md) | 观看进度：客户端 `Sessions/Playing*` 上报落库，「继续观看 / 接下来看 / 已看」出真数据 | 已采纳 |
 | [0022](0022-movie-all-play-items.md) | 电影取法：每条线路列出全部播放项（剧集仍按集号定位） | 已采纳（版本 Id 的载荷形状描述随 0039 作废） |
 | [0024](0024-site-speed-test.md) | 站点测速：服务端任务、打 `/search`、随机片名、只留最近一次 | 已采纳 |
-| [0025](0025-line-filter-in-usable-judgement.md) | 线路过滤参与"有没有用"的判据（并进快照 key） | 已采纳（局部取代 0020） |
+| [0025](0025-line-filter-in-usable-judgement.md) | 线路过滤参与"有没有用"的判据（并进快照 key） | 已采纳（局部取代 0020；转发口径被 0043 局部取代） |
 | [0026](0026-seconds-and-detail-timeout.md) | 聚合超时：搜索与取详情分开，时间单位统一为秒 | 已采纳 |
 | [0027](0027-extra-fetch-only-when-zero.md) | 补打只在"一条能用的都没有"时触发（并发批、拿到即停） | 已采纳（局部取代 0005） |
 | [0028](0028-plugin-system.md) | 插件体系：包安装、不沙箱、每个插件一个常驻子进程 | 已采纳（崩溃重启部分被 0037 取代） |
@@ -49,6 +49,10 @@
 | [0039](0039-compressed-source-id.md) | 版本 Id：编码前先 deflate（客户端 URL 有硬上限） | 已采纳（局部取代 0022 的载荷形状描述） |
 | [0040](0040-hls-playlist-relay.md) | HLS 清单由面板中继一次：把相对地址补成绝对 | 已采纳（0006 的局部例外） |
 | [0041](0041-any-provider-id-multi-value.md) | `AnyProviderIdEquals` 支持多值：逐条试、认不出的跳过 | 已采纳 |
+| [0042](0042-auth-line-byte-relay.md) | `proxy` 线路：面板代持鉴权头中继（字节转发） | 已采纳（0006 针对要鉴权头线路的局部例外；Emby 层那一格由 0044 补上） |
+| [0043](0043-line-filter-at-aggregate-output.md) | 线路过滤下沉到聚合层产出处：客户端拿到的就是滤过的那份 | 已采纳（局部取代 0025 的转发口径） |
+| [0044](0044-emby-stream-playvia-relay.md) | Emby 层也接 `proxy` 档：`playVia` 编进版本 Id | 已采纳（延伸 0042） |
+| [0045](0045-relay-chunked-concurrent.md) | 字节中继改分块并发：把开放式 Range 换成有界 Range | 已采纳（改 0042 第 3 条约束的实现） |
 
 ## 新增一条 ADR
 

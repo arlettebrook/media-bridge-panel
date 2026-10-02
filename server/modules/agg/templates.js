@@ -240,12 +240,6 @@ function templateFor(domain) {
   return tid ? read(tid) : null;
 }
 
-/** 某个域的参数。**没配模板 ⇒ null**（让调用方明确处理"没配"，而不是拿到一份看起来正常的默认值） */
-function paramsFor(domain) {
-  const t = templateFor(domain);
-  return t ? t.params : null;
-}
-
 /** 某个域的站点集合（按模板里的顺序）。没配模板 ⇒ null */
 function sitesFor(domain) {
   const t = templateFor(domain);
@@ -276,7 +270,6 @@ module.exports = {
   domains,
   setDomain,
   templateFor,
-  paramsFor,
   sitesFor,
   domainsUsing,
 };

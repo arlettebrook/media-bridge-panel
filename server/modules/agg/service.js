@@ -38,7 +38,7 @@ function needSource(byId, id) {
 /**
  * 打分参数：调用方给的优先，没给就用**这套模板**的参数。
  *
- * ⚠️ 模板参数由域决定（`templates.paramsFor(domain)`，见 docs/adr/0033）——
+ * ⚠️ 模板参数由域决定（`templates.templateFor(domain).params`，见 docs/adr/0033）——
  * 所以这里的 `params` 是必传的：调用方必须先把域解析成模板，再进来。
  */
 function matchDefaults(params, opts) {
@@ -305,13 +305,17 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
 }
 
 /**
- * Emby **版本列表的线路过滤**（正则，**只匹配线路名** `line.flag`）。
+ * **线路过滤**（模板参数，一个正则，**只匹配线路名** `line.flag`）—— 读它的实现只此一处。
  *
- * 实现放在本层（而不是 `api.js`）是因为它**有两处用途，且必须同一套判据**：
- *   ① emby 层拼版本列表时（经 `api.lineFilter()` 转发，`emby/service.js` 一行转发）；
+ * 三处用途，必须是同一套判据：
+ *   ① **产出**：`aggregateDetail` 返回前，把不匹配的线路从 `detail.lines` 里去掉
+ *      （`applyLineFilter`）—— 这是"客户端能看到什么"的**唯一来源**，emby 与出口插件
+ *      （FW/Rex）拿到的就是滤过的那份，谁都不必自己再实现一遍规则（见 docs/develop.md
+ *      的「能力的设计不参照已有插件角色」：规则属于模板，线路是聚合层产出的东西）；
  *   ② 本层判断"这条详情对客户端有没有用"时（`detailUsable` 的 `re` 参数，见 ADR-0025）——
  *      不然就会出现"聚合以为这条有用、客户端却列出 0 条"（实测踩过：4 条线路全被规则滤掉，
- *      客户端 0 个版本，而快照照样存了下来）。
+ *      客户端 0 个版本，而快照照样存了下来）；
+ *   ③ 详情快照的 key（`api.js` 的 `cacheKey`）：规则变了就该重算，不能命中按旧规则算的结论。
  *
  * ⚠️ 语义不变：**只影响"列出来的版本"，不影响播放**（`resolveStream` 按版本 Id 回查，不查这个列表）。
  * 规则写错时**不抛**（保存时已校验；这里是运行时兜底）：`re:null + invalid:true`，调用方按"不过滤"走。
@@ -327,14 +331,15 @@ function lineFilter(params) {
 }
 
 /**
- * 「这条线路能不能被客户端列出来」—— 与 emby 层 `getItem` 里那两处 `continue` **是同一个判据**
+ * 「这条线路能不能被客户端列出来」—— 与 emby 层 `getItem` 里那处 `continue` **是同一个判据**
  *（只在这里实现一次，改一处就得改另一处）：
  *
- *   `if (filter.re && !filter.re.test(line.flag)) continue;`     规则不匹配 → 不进版本列表
  *   `const targets = movie ? line.items || [] : line.target ? [line.target] : [];`
  *   `if (!targets.length) continue;`                             没有可播目标 → 不进版本列表
  *
- * `re` = 编译好的线路过滤正则（`null` = 不过滤）。
+ * `re` = 编译好的线路过滤正则（`null` = 不过滤）。**这里是在"账"上判的**：`detailUsable`
+ * 拿它算"过滤后还剩几条能用的"（`usableItems`，决定要不要接续补打），这时 `lines` 还是全量 ——
+ * 产出上那次过滤在 `applyLineFilter`，跑在这一步之后。
  */
 function lineVisible(line, need, re) {
   if (re && !re.test(String((line && line.flag) || ''))) return false;
@@ -362,6 +367,45 @@ function detailUsable(d, need, re) {
   const lines = (d && d.lines) || [];
   if (!lines.length) return false;
   return lines.some((l) => lineVisible(l, need, re));
+}
+
+/**
+ * 把线路过滤**落到产出上**：规则不匹配的线路直接从 `detail.lines` 里去掉。
+ *
+ * 为什么放在这一层：规则是**模板**的一部分、线路是**聚合层产出**的东西 —— 在这里滤一次，
+ * 后面谁都拿到同一份结果（emby、出口插件）。反过来"各客户端拼版本列表时自己滤"会让同一份
+ * 模板在不同客户端有两种口径，且每接一个客户端就得再实现一遍（见 docs/develop.md 的
+ * 「能力的设计不参照已有插件角色」）。
+ *
+ * 只动 `lines`：`target` / `items` 本来就挂在各自线路的对象上。整站的线路被滤空时那条站项
+ * **留着**（如实为空、不回退成全部 —— 否则规则写错根本发现不了）。
+ *
+ * 返回**过滤前后的条数**，供日志与诊断字段说清"源里多少条 → 留下多少条"。
+ */
+function filterDetailLines(detail, re) {
+  const lines = (detail && detail.lines) || [];
+  if (!re || !lines.length) return { before: lines.length, kept: lines.length };
+  const kept = lines.filter((l) => re.test(String((l && l.flag) || '')));
+  detail.lines = kept;
+  return { before: lines.length, kept: kept.length };
+}
+
+/**
+ * 对一份聚合结果里**所有条目**跑一遍线路过滤，并把账记进 `out.stats.lineFilter`。
+ *
+ * 一个站可能有多条条目：代表在 `site.detail`，同片变体在 `site.variants[].detail` —— 各有各的
+ * `lines`，**都要滤**（变体的线路同样会进客户端的版本列表）。
+ */
+function applyLineFilter(out, lf) {
+  const st = { raw: lf.raw, invalid: lf.invalid, before: 0, kept: 0 };
+  for (const site of out.sites || []) {
+    for (const item of [site].concat(site.variants || [])) {
+      const r = filterDetailLines(item.detail, lf.re);
+      st.before += r.before;
+      st.kept += r.kept;
+    }
+  }
+  out.stats.lineFilter = st;
 }
 
 /* ============================================================
@@ -632,8 +676,9 @@ async function aggregateDetail(sources, sites, opts = {}) {
   /* 取法：`items` = 电影（每条线路列出**全部播放项**），缺省 = 剧集（按季集号定位一条）。
    * 两者互斥地决定"什么算可播目标"，判据与理由见 `fetchDetail` 顶部。 */
   const pick = opts.pick === 'items' ? 'items' : '';
-  /* 线路过滤规则：**参与"能用"的判据**（见 `detailUsable` 与 ADR-0025）——
-   * 否则会出现"命中 3 条、客户端 0 个版本"，而接续补打还以为已经有能用的了。 */
+  /* 线路过滤规则：一笔两用 —— **产出时滤掉**（`applyLineFilter`，返回前那一步）与
+   * **参与"能用"的判据**（见 `detailUsable` 与 ADR-0025）。后者不能省：否则会出现
+   * "命中 3 条、客户端 0 个版本"，而接续补打还以为已经有能用的了。 */
   const lf = lineFilter(cfg);
 
   /* ---- 快路径：已知绑定（source + site + vodId），跳过搜索 ---- */
@@ -649,6 +694,8 @@ async function aggregateDetail(sources, sites, opts = {}) {
     out.picked = { source: s.source, key: s.key, vodId: opts.vodId, matchedBy: 'given', sameNameCount: 1 };
     if (r.ok) out.stats.detailOk += 1; else out.stats.detailFailed += 1;
     out.stats.sources = 1;
+    /* 产出前滤掉规则不匹配的线路（快路径与正常路径**都要做**，见 `applyLineFilter`） */
+    if (lf.raw) applyLineFilter(out, lf);
     out.elapsedMs = Date.now() - t0;
     return out;
   }
@@ -926,6 +973,9 @@ async function aggregateDetail(sources, sites, opts = {}) {
      * 在 `bySite`（代表+变体混装）上直接 `.length` 会把变体也算进去（已知的错误来源）。 */
     sameNameCount: (bySite.get(sid(pickedFinal.source, pickedFinal.siteKey)) || []).length || (out.stats.extraHit ? 1 : 0),
   };
+  /* 产出前滤掉规则不匹配的线路 —— **这一步之后 `lines` 才是"客户端能看到什么"**。
+   * 账（过滤前后条数）记进 `stats.lineFilter`，日志与 emby 的诊断字段读它。 */
+  if (lf.raw) applyLineFilter(out, lf);
   /* 「这份详情对客户端有没有用」= **过滤后**至少有一条能列出来 ——
    * `api.js` 的 `cacheableLines` 读它决定存不存这份线路结果（见 ADR-0025 / ADR-0032）。 */
   out.stats.usable = usableItems;
@@ -1010,7 +1060,6 @@ module.exports = {
   searchTimeoutMs,
   detailTimeoutMs,
   playTimeoutMs,
-  lineFilter,
   fetchDetail,
   aggregateDetail,
   playEpisode,

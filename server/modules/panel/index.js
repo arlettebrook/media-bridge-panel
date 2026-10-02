@@ -49,6 +49,12 @@ module.exports = {
        *                token），实测几十~几百 KB 一条。
        * **上限一律按字节不按条数**：lean 1.9KB vs rich 119KB 差 60 倍，按条数算不准。 */
       cache: Object.assign({}, cachedb.DEFAULTS),
+      /* 字节中继的搬运方式（实现见 agg/stream.js 的 relayBytes）。
+       * ⚠️ 网盘 CDN **按 Range 的形态限速**：开放式 `bytes=0-` 实测 ~0.1MB/s，有界 Range ~3.5MB/s ——
+       * 所以中继默认**切块 + 多路并发**（默认值与猫爪引擎的网盘档对齐：16 路 / 512KB）。
+       * `enabled: false` 退回"单连接、Range 原样透传"（排查与对比用）。
+       * 源插件也可以在 `play` 返回里带 `threads` / `chunkKB` 覆盖这一组（那一路优先）。 */
+      streamRelay: { enabled: true, threads: 16, chunkKB: 512 },
     }),
     fields: [
       { key: 'port', label: '面板端口', type: 'number', min: 1, max: 65535 },
@@ -59,6 +65,9 @@ module.exports = {
       { key: 'cache.linesTtlDays', label: '线路结果天数', type: 'text', placeholder: '1（0 = 不缓存）' },
       { key: 'cache.linesMaxMB', label: '线路结果上限 MB', type: 'text', placeholder: '32（0 = 不限）' },
       { key: 'cache.linesNeverExpire', label: '线路结果长期有效', type: 'boolean', hint: '勾上就不按天数过期（只要你不动设置，源里有什么就一直用那份）' },
+      { key: 'streamRelay.enabled', label: '中继分块并发', type: 'boolean', hint: '勾上：按块切、多路并发发有界 Range（默认）。关掉退回单连接原样透传，用于对比排查' },
+      { key: 'streamRelay.threads', label: '中继并发路数', type: 'number', min: 1, max: 32, hint: '同时在飞的有界 Range 请求数（默认 16，对齐猫爪引擎网盘档）' },
+      { key: 'streamRelay.chunkKB', label: '中继分块 KB', type: 'number', min: 64, max: 8192, hint: '每块大小（默认 512KB）' },
     ],
     validate: (o) => {
       if (!(Number(o.port) >= 1 && Number(o.port) <= 65535)) return 'port 取值 1~65535';
@@ -71,6 +80,17 @@ module.exports = {
         if (v === undefined || v === null || v === '') continue;
         const n = Number(v);
         if (!Number.isFinite(n) || n < 0) return `cache.${key} 必须是不小于 0 的数字（当前：${v}）`;
+      }
+      /* 中继搬运参数只在"填了"时校验（空 = 用默认），且必须落在实现能接受的范围内
+       * （上限见 agg/stream.js 的 RELAY_MAX_THREADS / RELAY_MAX_CHUNK_KB） */
+      const sr = (o && o.streamRelay) || {};
+      for (const [key, lo, hi] of [['threads', 1, 32], ['chunkKB', 64, 8192]]) {
+        const v = sr[key];
+        if (v === undefined || v === null || v === '') continue;
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < lo || n > hi) {
+          return `streamRelay.${key} 取值 ${lo}~${hi}（当前：${v}）`;
+        }
       }
       return null;
     },

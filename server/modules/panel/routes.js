@@ -16,6 +16,9 @@ const BRAND = require('../../core/branding'); // 备份文件名前缀（品牌�
  * 那份账写在 `agg_stat`（agg/cache.js），所以这里直接读它。方向是单向的：
  * agg 层不 require panel（只 require core），不会转圈。 */
 const cache = require('../agg/cache');
+/* 「清除全部缓存」要**连插件的落盘缓存一起清** —— 那些路径只有插件模块知道
+ * （`data/plugins/<类型>/<id>/data/` 是它管的），所以借它那一处，不在这里各拼一遍。 */
+const pluginStore = require('../plugin/store');
 const logbus = require('../../core/logbus');
 const auth = require('../../core/auth');
 const { sendJson, sendError, sendBuffer, readBody, readRawBody } = require('../../core/http');
@@ -207,13 +210,14 @@ module.exports = function routes(r) {
   });
 
   /**
-   * GET    /api/panel/cache —— 缓存用量（面板「缓存设置」显示「已用 x / 上限 y」）
-   * DELETE /api/panel/cache —— **清空所有缓存**
+   * GET    /api/panel/cache     —— 缓存用量（面板「缓存设置」显示「已用 x / 上限 y」）
+   * DELETE /api/panel/cache     —— 清空**面板那两份**缓存
+   * DELETE /api/panel/cache/all —— 上面那份 **+ 各插件的落盘缓存**（见下面那条的说明）
    *
    * 建这个端点时缓存已跨两个库（原 `/api/emby/cache` 只有 emby 那张库）——
    *   core  `data/cache/lines.db`    line_cache（面板侧的**线路结果**）+ agg_stat（按插件的聚合耗时）
    *   emby  `data/emby/cache.db`     image_index（图片索引）
-   * ⚠️ 插件自己的缓存不归这里（元数据插件、源插件各自的都在自己的数据目录里）。
+   * ⚠️ 插件自己的缓存不归这里（元数据插件、源插件各自的都在自己的数据目录里）—— 那是 `/all` 那条。
    * "清空"与"用量"**只能有一个入口**，否则以后加一张表就会漏清一处 —— 所以收敛到面板层，
    * 走 `core/cachedb.js` 的 `statsAll()` / `clearAll()`（各 store 自己登记，见那个文件）。
    * 清它**永远不动账号**（账号在 emby.db）—— 缓存出问题就删掉重建，这是当初分库的理由之一。
@@ -256,6 +260,23 @@ module.exports = function routes(r) {
     cachedb.clearAll();
     console.log('  ✔ 缓存已清空（lines.db 线路结果、cache.db 图片索引；账号不受影响。插件自己的缓存在各自那边）');
     return sendJson(res, 200, cacheView());
+  });
+
+  /**
+   * DELETE /api/panel/cache/all —— **清到底**：面板那两份 + 各插件的**落盘缓存**
+   * （`plugin/store.js` 的 `clearCaches`：元数据/源插件的 `data/cache/`、首页插件的行结果
+   * `data/storage.json`；设置与凭据不在这两处，清完不用重新登录）。
+   *
+   * 与上面那条分成两个入口的理由：清插件缓存要**删进插件的目录**，而缓存位置由插件自己定
+   * （契约第十节）—— 只想清面板那份、不惊动插件时仍然用上面那条。
+   * ⚠️ 插件进程里的内存态清不掉（如实：那要等它自己的有效期过去或重启那个插件）。
+   */
+  r.add('DELETE', '/api/panel/cache/all', (req, res) => {
+    cachedb.clearAll();
+    const pc = pluginStore.clearCaches();
+    const which = pc.plugins.map((x) => `${x.type}/${x.id}`).join(' / ') || '（没有可清的）';
+    console.log(`  ✔ 全部缓存已清空（面板：lines.db 线路结果、cache.db 图片索引；插件落盘缓存：${which}）`);
+    return sendJson(res, 200, Object.assign({ plugins: pc }, cacheView()));
   });
 
   /* ---- 版本与更新（见 docs/adr/0019-self-update-from-release.md）----

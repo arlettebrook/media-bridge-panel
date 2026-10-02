@@ -201,6 +201,54 @@ function installDir(srcDir, { origin = 'manual', md5 = '', enabled } = {}) {
   return upsert(entry);
 }
 
+/** 一个路径占的字节（目录递归；不存在就是 0） */
+function sizeOf(p) {
+  let st;
+  try {
+    st = fs.statSync(p);
+  } catch {
+    return 0;
+  }
+  if (!st.isDirectory()) return st.size;
+  let n = 0;
+  for (const ent of fs.readdirSync(p, { withFileTypes: true })) n += sizeOf(path.join(p, ent.name));
+  return n;
+}
+
+/**
+ * 清掉**已装插件**的落盘缓存（面板「清除全部缓存」按钮用）。
+ *
+ * 两份位置都由**插件自己**定的（契约第十节"缓存归插件"），所以这里只认当前这几种写法：
+ *   · 元数据 / 源 / 输出插件：`<插件>/data/cache/`
+ *   · 首页插件：`<插件>/data/storage.json`（行结果缓存，见 home 插件自己的 `lib/storage.js`）
+ * 这两处都是**可丢弃**数据 —— 设置与凭据（网盘 Cookie、源实例清单、`auth.json`）不在这两处，
+ * 所以这个动作**不动它们**，清完不用重新登录。
+ *
+ * ⚠️ **只清落盘的那一份。** 插件进程里可能还留着自己的内存态（首页插件的行结果就是
+ * 先读内存快照），那一份要等它自己的有效期过去、或重启那个插件才散 —— 如实说，不假装清干净了。
+ */
+function clearCaches() {
+  const plugins = [];
+  for (const m of list()) {
+    if (!m || !m.type || !m.id) continue;
+    const data = dataDirOf(m.type, m.id);
+    const targets = [path.join(data, 'cache')];
+    if (m.type === 'home') targets.push(path.join(data, 'storage.json'));
+    let bytes = 0;
+    for (const p of targets) {
+      const n = sizeOf(p);
+      try {
+        fs.rmSync(p, { recursive: true, force: true });
+      } catch {
+        continue; // 删不掉就不记它，别把没清掉的算进账里
+      }
+      bytes += n;
+    }
+    if (bytes > 0) plugins.push({ type: m.type, id: m.id, bytes });
+  }
+  return { plugins, bytes: plugins.reduce((n, x) => n + x.bytes, 0) };
+}
+
 module.exports = {
   ROOT,
   REGISTRY,
@@ -215,6 +263,7 @@ module.exports = {
   patch,
   remove,
   installDir,
+  clearCaches,
   copyDir,
   ensureRoot,
 };
