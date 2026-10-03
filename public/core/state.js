@@ -13,7 +13,8 @@ export const S = {
   aggLoadedFor: null,   // 上面两个的缓存指纹（源集合变了才重拉）；`null` = 还没拉过（空源清单的指纹是空串，别拿它当"没拉过"）
   siteFilter: '',
   siteSort: '',         // 站点表的显示顺序：'' = 原顺序 / 'fast' = 延迟快→慢 / 'slow' = 慢→快
-  siteGroup: '',        // 站点表当前打开的那个来源（模板页把来源做成页签，一次只画一组）
+  siteGroup: '',        // 站点表当前打开的那个来源（模板页把来源做成页签，一次只画一组）；'' = 还没选过，默认落到「全部站点」
+  tplTab: 'params',     // 模板编辑器当前看哪一页签：'params' = 填参数 / 'sites' = 选站点
   page: 'agg-templates', // 当前页；启动时若地址栏有 #/模块/页 会被它覆盖（见 shell.applyHash）
 
   aggKeyword: '',

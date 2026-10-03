@@ -81,16 +81,25 @@ export async function renderAgg(v) {
    * 分数线、最多几条、超时、并发、线路过滤**这一页都不填** —— 它们属于模板，
    * 在「聚合设置 · 模板」里改一处（读一份模板就能拿到全部调优项，见 docs/adr/0033）。
    * 季 / 集 / 年份是"这次要哪一部"的坐标，与关键字同属搜索参数，留在这一行。
-   * 宽度档位见 style.css 的 `.chk > input.w-*`：季 / 集 / 年份只要小框（w-xs）。 */
-  const numInput = (key, fallback, min, max, title, cls) => {
+   * 宽度档位见 style.css 的 `.fld > input.w-*`：季 / 集 / 年份只要小框（w-xs）。 */
+  const numInput = (key, fallback, min, max, title, cls, ph) => {
     const cur = S[key] === undefined || S[key] === null ? fallback : S[key];
-    const inp = el('input', { type: 'number', class: cls || 'w-sm', value: String(cur), min: String(min), max: String(max), title: title || '' });
+    const inp = el('input', {
+      type: 'number',
+      class: cls || 'w-sm',
+      value: String(cur),
+      min: String(min),
+      max: String(max),
+      title: title || '',
+      placeholder: ph || '',
+    });
     inp.addEventListener('input', () => (S[key] = inp.value));
     return inp;
   };
-  const seasonInput = numInput('aggSeason', '', 0, 99, '剧集必填：客户端是按上游的季号来要片子的；源里集名的季号对不上会判「季不同」', 'w-xs');
-  const episodeInput = numInput('aggEpisode', '', 0, 9999, '剧集必填：想让这一集「能定位到」就必须填它（客户端是按上游的集号来要片子的）', 'w-xs');
-  const yearInput = numInput('aggYear', '', 1900, 2100, '打分用：年份权重最低（0.1），填错也不会一票否决', 'w-xs');
+  /* 三个框并排，里面靠占位字说明各是哪个（标签写"剧集定位"就够，不必再重复一遍"季/集/年份"） */
+  const seasonInput = numInput('aggSeason', '', 0, 99, '剧集必填：客户端是按上游的季号来要片子的；源里集名的季号对不上会判「季不同」', 'w-xs', '季');
+  const episodeInput = numInput('aggEpisode', '', 0, 9999, '剧集必填：想让这一集「能定位到」就必须填它（客户端是按上游的集号来要片子的）', 'w-xs', '集');
+  const yearInput = numInput('aggYear', '', 1900, 2100, '打分用：年份权重最低（0.1），填错也不会一票否决', 'w-xs', '年份');
 
   /**
    * 输入框取值 → 数字（留空 = 不传这一项）。
@@ -225,17 +234,24 @@ export async function renderAgg(v) {
     renderPage();
   });
 
+  /* 每个字段收进一个 `.fld`（见 style.css）：标签在上一行、控件在下一行 —— 同一行里所有字段的
+   * 控件都从**同一条左边缘**起排，不会因为标签长短不一而忽左忽右。窄屏换行的最小单位是**整个字段**。
+   * 季与集只在「剧集」下出现 —— 选电影时它们既不参与打分也不参与定位，摆着只会让人以为要填。 */
   const searchRow = el(
     'div',
     { class: 'toolbar' },
-    el('label', { class: 'chk', title: '用哪套模板：站点与参数（分数线 / 条数 / 超时 / 并发 / 线路过滤）都来自它' }, tplSel, ''),
-    el('label', { class: 'chk', title: kindSel.getAttribute('title') }, kindSel, ''),
-    wdInput,
-    /* 季 / 集只在「剧集」下出现 —— 选电影时它们既不参与打分也不参与定位，摆着只会让人以为要填。 */
-    isMovie ? null : el('label', { class: 'chk', title: seasonInput.getAttribute('title') }, seasonInput, '季'),
-    isMovie ? null : el('label', { class: 'chk', title: episodeInput.getAttribute('title') }, episodeInput, '集'),
-    el('label', { class: 'chk', title: yearInput.getAttribute('title') }, yearInput, '年份'),
-    el('button', { class: 'btn primary', text: S.aggBusy ? '聚合中…' : '聚合搜索', disabled: S.aggBusy, onclick: run })
+    el('div', { class: 'fld', title: tplSel.getAttribute('title') }, el('span', { class: 'lbl', text: '模板' }), el('div', { class: 'ctl' }, tplSel)),
+    el('div', { class: 'fld', title: kindSel.getAttribute('title') }, el('span', { class: 'lbl', text: '类型' }), el('div', { class: 'ctl' }, kindSel)),
+    el('div', { class: 'fld grow' }, el('span', { class: 'lbl', text: '关键字' }), el('div', { class: 'ctl' }, wdInput)),
+    isMovie
+      ? el('div', { class: 'fld', title: yearInput.getAttribute('title') }, el('span', { class: 'lbl', text: '年份' }), el('div', { class: 'ctl' }, yearInput))
+      : el(
+          'div',
+          { class: 'fld', title: '按季集定位到这一集：季 / 集 / 年份都要对得上才命中' },
+          el('span', { class: 'lbl', text: '剧集定位' }),
+          el('div', { class: 'ctl' }, seasonInput, episodeInput, yearInput)
+        ),
+    el('button', { class: 'btn primary go', text: S.aggBusy ? '聚合中…' : '聚合搜索', disabled: S.aggBusy, onclick: run })
   );
 
   /* 调试开关：低频，另起一行。
@@ -250,16 +266,27 @@ export async function renderAgg(v) {
     el('span', { class: 'spacer' })
   );
 
+  /* 表单与结果各占**一张卡**（与其它页同一个形状）。早先是直接往页面容器上摊元素的：
+   * 输入行与结果框都贴着页面底色，跟别处一比像少了一层，看着就"不是一页"。 */
+  const formCard = el('div', { class: 'card' }, searchRow, optRow);
+
   if (!S.aggResult) {
-    v.append(searchRow, optRow, el('div', { class: 'muted', text: '输入关键字开始聚合搜索。选「剧集」要填季与集（详情按季集定位到这一集），选「电影」不问季集、只按片名与年份打分。' }));
+    v.append(el('div', { class: 'grid' }, formCard));
     return;
   }
   if (S.aggResult.loading) {
-    v.append(searchRow, optRow, el('div', { class: 'muted', text: `正在并发搜索 ${S.aggResult.keyCount || tplSites.length} 个站源…` }));
+    v.append(
+      el(
+        'div',
+        { class: 'grid' },
+        formCard,
+        el('div', { class: 'card' }, el('span', { class: 'muted', text: `正在并发搜索 ${S.aggResult.keyCount || tplSites.length} 个站源…` }))
+      )
+    );
     return;
   }
   if (S.aggResult.error) {
-    v.append(searchRow, optRow, el('div', { class: 'hint warn', text: '聚合失败：' + S.aggResult.error }));
+    v.append(el('div', { class: 'grid' }, formCard, el('div', { class: 'card' }, el('div', { class: 'hint warn', text: '聚合失败：' + S.aggResult.error }))));
     return;
   }
 
@@ -280,22 +307,24 @@ export async function renderAgg(v) {
     el('span', { class: 'badge', text: `${r.elapsedMs} ms` })
   );
 
-  v.append(searchRow, optRow, bar);
+  const resultCard = el('div', { class: 'card' });
+  v.append(el('div', { class: 'grid' }, formCard, resultCard));
+  resultCard.append(bar);
   /* 上次**请求失败**的站这次被**跳过**了（勾选没变、只跳过，见 agg/site-stats.js 的 shouldSkip）——
    * 明说一句：不然"某站没进结果"看着像它坏了或没勾选。 */
   const skipped = (r.sites || []).filter((x) => x && x.skipped);
   if (skipped.length) {
-    v.append(
+    resultCard.append(
       el('div', {
         class: 'hint warn',
         text:
-          `这次跳过了 ${skipped.length} 个「最近一次测速失败」的站点（勾选没动，只跳过这几个）：` +
+          `跳过了 ${skipped.length} 个「上次测速失败」的站点（勾选没动）：` +
           skipped.map((x) => `${x.name || x.key}（${x.error}）`).join(' / ') +
-          ' —— 想立刻再试就在「站点与参数」点该站的「测速」，下一轮自动测速也会重试；不想跳过就取消这套模板里的「跳过测速失败的站点」。',
+          ' —— 点该站的「测速」可立刻重试，或取消模板里的「跳过测速失败的站点」。',
       })
     );
   }
-  renderMerged(v, r, showItemVersions);
+  renderMerged(resultCard, r, showItemVersions);
 }
 
 /**
@@ -319,7 +348,7 @@ function openVersionsModal(title, d, opts = {}) {
     body.push(
       el('div', {
         class: 'hint',
-        text: '电影取法：每条线路的全部播放项各列成一个版本（同一部片的多个压制版本都会出现）。',
+        text: '电影取法：每条线路的每个播放项各成一个版本。',
       })
     );
   }
@@ -364,16 +393,16 @@ function openVersionsModal(title, d, opts = {}) {
         let why;
         if (opts.pickItems) {
           why = items.length
-            ? `✔ 这条线路有 ${items.length} 个播放项 → 列 ${items.length} 个版本（规格不同的各占一个版本行）`
-            : '✘ 这条线路没有播放项（不会进客户端的版本列表）';
-          if (items.length && dropped) why += ` —— 但线路名不匹配 /${opts.filterRaw}/，不会进客户端的版本列表`;
+            ? `✔ 有 ${items.length} 个播放项 → 列 ${items.length} 个版本`
+            : '✘ 没有播放项，不进版本列表';
+          if (items.length && dropped) why += ` —— 但线路名不匹配 /${opts.filterRaw}/，不进版本列表`;
         } else if (l.target) {
           why = `✔ 定位到：${l.target.name}（${l.target.matchedBy || ''}）` +
-            (dropped ? ` —— 但线路名不匹配 /${opts.filterRaw}/，不会进客户端的版本列表` : '');
+            (dropped ? ` —— 但线路名不匹配 /${opts.filterRaw}/，不进版本列表` : '');
         } else if (dropped) {
-          why = `✘ 线路名不匹配 /${opts.filterRaw}/ —— 不会进客户端的版本列表`;
+          why = `✘ 线路名不匹配 /${opts.filterRaw}/，不进版本列表`;
         } else {
-          why = '✘ 这一集在这条线路里没定位到（不会进客户端的版本列表）';
+          why = '✘ 这一集在这条线路里没定位到，不进版本列表';
         }
         box.append(
           el(
@@ -413,10 +442,10 @@ function aggDupMap(r) {
   return m;
 }
 
-function renderMerged(v, r, onVersions) {
+function renderMerged(host, r, onVersions) {
   const sites = r.sites || [];
   if (!sites.length) {
-    v.append(el('div', { class: 'muted', text: '没有任何站点返回结果。' }));
+    host.append(el('div', { class: 'muted', text: '没有任何站点返回结果。' }));
     return;
   }
   const dupMap = aggDupMap(r);
@@ -444,7 +473,7 @@ function renderMerged(v, r, onVersions) {
 
     if (!list.length) {
       box.append(el('div', { class: 'note', text: s.ok ? '无结果' : '请求失败' }));
-      v.append(box);
+      host.append(box);
       continue;
     }
 
@@ -456,9 +485,18 @@ function renderMerged(v, r, onVersions) {
         el(
           'div',
           { class: 'agg-item' + (m.matched ? ' matched' : '') },
+          /* 没图的时候**也要占位**：列表是一行一行齐的，缺一块图会让这一行的名字、
+           * 备注整体左移、上下错位。所以拿不到图（没有地址，或者地址加载失败）都换成
+           * 同一块灰底占位，宽度与真图完全一致。 */
           m.vod_pic
-            ? el('img', { class: 'agg-pic', src: m.vod_pic, loading: 'lazy', referrerpolicy: 'no-referrer', onerror: (e) => e.target.remove() })
-            : el('div', { class: 'agg-pic empty' }),
+            ? el('img', {
+                class: 'agg-pic',
+                src: m.vod_pic,
+                loading: 'lazy',
+                referrerpolicy: 'no-referrer',
+                onerror: (e) => e.target.replaceWith(el('div', { class: 'agg-pic ph' })),
+              })
+            : el('div', { class: 'agg-pic ph' }),
           el(
             'div',
             { class: 'agg-body' },
@@ -499,7 +537,7 @@ function renderMerged(v, r, onVersions) {
       );
     }
     box.append(ul);
-    v.append(box);
+    host.append(box);
   }
 }
 

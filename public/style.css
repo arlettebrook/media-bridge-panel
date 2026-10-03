@@ -1,4 +1,17 @@
+/* ---------------- 主题令牌 ----------------
+ * 两套令牌：这里（`:root`）是暗色那份，亮色在下面 `html[data-theme='light']` 里整体覆盖。
+ *
+ * 规矩：**凡是两套主题下取值不同的颜色，一律走令牌**。原来直接写死在选择器里的那十几处
+ * （页顶那抹光、实心按钮上的字、代码块底、配置中心外壳、白/黑半透明的"薄面"、磨砂顶栏、
+ * 转圈轨道、提示框文字…）都收进来了 —— 不收进来，另一档里它们要么瞎白一片、要么糊成一团。
+ *
+ * ⚠️ 哪一档生效**只认 `<html data-theme>`**：core/theme.js 一进页面就把它写死（默认 light，
+ *    首屏那一刻由 index.html 里那段内联小脚本先写一遍），所以 CSS 这边只管两套静态值。
+ *    `:root` 这份只是"属性还没写上"时的兜底。 */
 :root {
+  /* 原生控件与滚动条跟着主题走（文件选择框那颗按钮、数字框的上下箭头、下拉展开列表、
+   * 以及各滚动区的条）—— 不写这条，暗色界面上它们由浏览器按亮色画，白得刺眼。 */
+  color-scheme: dark;
   --bg: #0e1210;
   --bg-2: #151a17;
   --bg-3: #1c2320;
@@ -10,19 +23,125 @@
   --accent: #8cda60;
   --accent-2: #5fae3a;
   --accent-dim: #2b4a1e;
+  --accent-soft: rgba(140, 218, 96, .10); /* 选中项的淡绿底（侧栏 / 页签 / 药丸） */
+  --accent-ring: rgba(140, 218, 96, .12); /* 输入框聚焦那圈光 */
   --warn: #ffb84d;
   --err: #ff7a6b;
   --blue: #6fb6ff;
   --radius: 12px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  /* 下面这批是"亮暗两套差得远、各自单立门户"的 */
+  --page-glow: #1b2a1c;               /* body 右上角那抹光 */
+  --btn-primary-fg: #0f1a09;          /* 实心绿按钮上的字 */
+  --code-bg: #0a0d0b;                 /* pre.json / 代码块底 */
+  --frame-bg: #0a0f1c;                /* 「配置中心」内嵌框的外壳底 */
+  --wash: rgba(255, 255, 255, .012);  /* 比底色亮一丝的"薄面"（来源组、手机版表格行） */
+  --sticky-bg: rgba(14, 18, 16, .92); /* 窄屏顶栏那层磨砂底 */
+  --spinner-track: rgba(255, 255, 255, .25);
+  --hint-fg: #cfe3ff;
+  --hint-warn-fg: #ffe3b8;
+  --err-border: #4a2320;
+  --toast-err-fg: #ffd9d4;
+  /* 输入框单独一套底与描边（不用 --bg-3 / --line-2）：那两档是"次级面"的通用色，
+   * 当字段用时跟卡片、跟背景都太近 —— 实测在亮色下几乎看不出这里可以填字。 */
+  --field-bg: #212a26;
+  --field-line: #46554d;
+  --panel-inset: #101613;             /* 卡片里"内嵌的一块"（筛选区这类），比卡片面暗一档 */
+}
+
+/* ---------------- 亮色令牌组 ----------------
+ * ⚠️ 换主题**不是把色值一律换成浅的**就完事：暗色那套的层次靠"四档表面明度差"——
+ *   页面 --bg 最暗 → 侧栏/卡片 --bg-2 亮一档 → 输入框/按钮 --bg-3 再亮一档，
+ *   卡片正是靠"比底色亮一档"浮起来的。亮色里必须重建同一条梯度，否则层级会塌
+ *   （之前手写档亮色糊掉就是这个原因）：这里页面最暗（#e9edf3）→ 卡片纯白浮起 →
+ *   输入框/按钮用比卡片略暗的 #eef2f7，才看得出那是"可填的格"。
+ *
+ * 语义色也要重挑：品牌绿在深色上能"发光"，搁白底上会糊 —— 亮色档整体压深一档；
+ * 黄（--warn）与红（--err）同理，原来那两档在白底上几乎读不出来。 */
+html[data-theme='light'] {
+  color-scheme: light; /* 亮色档把这些原生控件交回浏览器按亮色画 */
+  --bg: #e9edf3;
+  --bg-2: #ffffff;
+  --bg-3: #eef2f7;
+  --line: #e2e7ee;
+  --line-2: #c6d0dc;
+  --fg: #1b2430;
+  --fg-dim: #57616f;
+  --fg-dim-2: #8792a1;
+  --accent: #2b8a3e;
+  --accent-2: #237032;
+  --accent-dim: #b2ddab;
+  --accent-soft: rgba(43, 138, 62, .10);
+  --accent-ring: rgba(43, 138, 62, .18);
+  --warn: #a16207;
+  --err: #c0392b;
+  --blue: #2f6fb5;
+  --page-glow: #dfead9;
+  --btn-primary-fg: #ffffff;
+  --code-bg: #f5f7fa;
+  --frame-bg: #ffffff;
+  --wash: rgba(15, 23, 42, .02);
+  --sticky-bg: rgba(255, 255, 255, .92);
+  --spinner-track: rgba(15, 23, 42, .16);
+  --hint-fg: #1d4e79;
+  --hint-warn-fg: #7a4a06;
+  --err-border: #efb3ad;
+  --toast-err-fg: #8f2a20;
+  --field-bg: #ffffff;                /* 白底 + 清楚的灰描边：一眼看出哪里能填 */
+  --field-line: #b6c2d0;
+  --panel-inset: #f1f4f8;
+}
+/* 提示框那两层蓝/黄底是按深色底调的透明度 —— 白底上太淡，亮色档单独给一遍 */
+html[data-theme='light'] .hint { background: rgba(47, 111, 181, .08); border-color: rgba(47, 111, 181, .28); }
+html[data-theme='light'] .hint.warn { background: rgba(161, 98, 7, .07); border-color: rgba(161, 98, 7, .28); }
+/* 下拉那颗自画的小箭头是**内嵌 SVG**（颜色写死在里面，吃不到令牌）—— 亮色档另画一支深一点的 */
+html[data-theme='light'] select {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5l5-5' fill='none' stroke='%23616e7c' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 * { box-sizing: border-box; }
 
+/* ---------------- daisyUI 桥接（见 public/vendor/daisyui.css） ----------------
+ * 那份包里所有组件（btn / card / badge / alert / menu / table…）只读 `--color-*`、
+ * `--radius-*`、`--size-*` 这几组变量。这里把本项目的令牌接到那套变量上：
+ * 组件的形状与交互走 daisyUI，配色仍是本项目两个主题里那套 —— 主题层因此一行都不用改。
+ *
+ * ⚠️ daisyui.css 整个包在 @layer 里，而本文件**不叠层**：不叠层的规则天然压得过叠层的，
+ *    所以最终生效的是这里这一份。将来若引 Tailwind，得把本项目这层也放进 @layer，
+ *    否则会出现"Tailwind 的类不生效"这种怪事。 */
+html {
+  --color-base-100: var(--bg-2);  /* 卡片 / 面板那层面 */
+  --color-base-200: var(--bg-3);  /* 控件 / 次级面 */
+  --color-base-300: var(--line);  /* 描边 */
+  --color-base-content: var(--fg);
+  --color-primary: var(--accent-2);
+  --color-primary-content: var(--btn-primary-fg);
+  --color-neutral: var(--bg-3);
+  --color-neutral-content: var(--fg);
+  --color-info: var(--blue);
+  --color-info-content: var(--hint-fg);
+  --color-success: var(--accent-2);
+  --color-success-content: var(--btn-primary-fg);
+  --color-warning: var(--warn);
+  --color-warning-content: var(--hint-warn-fg);
+  --color-error: var(--err);
+  --color-error-content: var(--toast-err-fg);
+  --radius-box: var(--radius);
+  --radius-field: 9px;
+  --radius-selector: 8px;
+  /* 控件高 = 34px：输入框 / 下拉 / 按钮一行里三者对齐。
+   * ⚠️ 这里写 px 而不是 .25rem —— 本项目的根字号是 14px（见下面 `html, body` 的 font），
+   * 拿 daisyUI 默认的 .25rem 去算会得到 35px 而不是它以为的 40px，按钮就跟输入框错开一截。 */
+  --size-field: 3.4px;      /* ×10 → 34px */
+  --size-selector: 3px;     /* ×6 → 18px（徽章） */
+  --depth: 0;               /* 不要 daisyUI 那层拟物投影 —— 本项目是扁平档 */
+  --noise: 0;
+}
+
 html, body {
   margin: 0;
   height: 100%;
-  background: radial-gradient(1200px 600px at 80% -10%, #1b2a1c 0%, var(--bg) 55%);
+  background: radial-gradient(1200px 600px at 80% -10%, var(--page-glow) 0%, var(--bg) 55%);
   color: var(--fg);
   font: 14px/1.55 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
@@ -46,12 +165,15 @@ html, body {
  * ⚠️ 选择器写得**宽**是有意的：原来只写 `input[type=text], input[type=number]`，
  * 于是 `type=password`（账号管理 / 元数据 Token）、`type=url`、`type=search` **一点样式都没有** ——
  * 在暗色界面上就是一块浏览器默认的白框。除 checkbox / radio / file 外一律纳入。
- * 高度统一 34px：**输入框、下拉、按钮三者对齐**，同一行里不再高低不齐。 */
-input:not([type='checkbox']):not([type='radio']):not([type='file']),
+ * 高度统一 34px：**输入框、下拉、按钮三者对齐**，同一行里不再高低不齐。
+ * ⚠️ 三个 `:not` 串着写权重是 (0,3,1)，比 `.fld > .ctl > input.w-xs` 这类宽度档还高 ——
+ * 那样写了 `width:64px` 也会被这条压回"随内容"。合成**一个** `:not(列表)` 后权重降到 (0,1,1)，
+ * 下面的宽度档与弹性规则才真正说了算。 */
+input:not([type='checkbox'], [type='radio'], [type='file']),
 select,
 textarea {
-  background: var(--bg-3);
-  border: 1px solid var(--line-2);
+  background: var(--field-bg);
+  border: 1px solid var(--field-line);
   color: var(--fg);
   border-radius: 9px;
   padding: 0 10px;
@@ -61,9 +183,9 @@ textarea {
   height: 34px;
   transition: border-color .15s, box-shadow .15s;
 }
-input:not([type='checkbox']):not([type='radio']):not([type='file']):focus,
+input:not([type='checkbox'], [type='radio'], [type='file']):focus,
 select:focus,
-textarea:focus { border-color: var(--accent-2); box-shadow: 0 0 0 2px rgba(140, 218, 96, .12); }
+textarea:focus { border-color: var(--accent-2); box-shadow: 0 0 0 2px var(--accent-ring); }
 input::placeholder, textarea::placeholder { color: var(--fg-dim-2); }
 input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
 
@@ -89,7 +211,7 @@ select {
   background-size: 10px 7px;
 }
 /* 展开的原生列表由系统绘制，但能染色的地方染一下（Firefox/部分 Chrome 生效） */
-select option { background: var(--bg-3); color: var(--fg); }
+select option { background: var(--field-bg); color: var(--fg); }
 
 /* 文件选择框（首页插件上传）：让那个原生按钮看起来像本项目的 .btn */
 input[type='file'] { width: 100%; font: inherit; color: var(--fg-dim); }
@@ -99,14 +221,17 @@ input[type='file']::file-selector-button {
   height: 30px;
   padding: 0 12px;
   border-radius: 9px;
-  background: var(--bg-3);
-  border: 1px solid var(--line-2);
+  background: var(--field-bg);
+  border: 1px solid var(--field-line);
   color: var(--fg);
   cursor: pointer;
 }
 
 .chk { display: flex; align-items: center; gap: 6px; color: var(--fg-dim); font-size: 13px; white-space: nowrap; }
 .chk input[type='checkbox'], .chk input[type='radio'] { accent-color: var(--accent-2); width: 14px; height: 14px; }
+/* 直接摆在卡里的一颗勾选（没进 `.row` / `.fset`）：它自己不带间距，下面紧跟的说明就会贴上去。
+ * 补一条块级下边距；它是最后一块时由下面的 `.card > :last-child` 收掉（那条在后，权重相同、后来居上）。 */
+.card > .chk { margin-bottom: 12px; }
 
 /* ---------------- 表单布局原语 ----------------
  * 之前**没有这些**：每个页面自己写 `style:'flex:1;min-width:240px'`、`'font-size:12px;margin-top:10px'`，
@@ -126,6 +251,10 @@ input[type='file']::file-selector-button {
  *  只出现在模态框里（纵向排），行里没有，所以不必为它让步。） */
 .row,
 .toolbar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+/* 行里既有字段（标签一在上、控件在下，比如 55px 高）又有裸按钮（34px）时：让按钮与**控件行**对齐。
+ * 居中对齐会把按钮摆在"标签与输入框中间"那个高度上 —— 看着就像没对齐。 */
+.row:has(.fld),
+.toolbar:has(.fld) { align-items: flex-end; }
 .row > .field,
 .toolbar > .field { flex: 1 1 200px; } /* 弹性宽度 + 自动换行；页面里不再写 min-width */
 /* 控件直接放进行里也行（省一层 wrapper）：同样弹性、同样不撑破。
@@ -165,6 +294,72 @@ input[type='file']::file-selector-button {
 .chk > input[type='number'].w-md { width: 120px; }
 .chk > input[type='number'].w-lg { width: 180px; }
 .actions { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-bottom: 12px; }
+
+/* ---------------- 原子字段（"标签 + 控件 + 单位"不再被拆散） ----------------
+ * 这类组合原来是撒在 `.row` 里的裸 `span`：`span(图片索引) + input + span(天 · 上限) + input + span(MB)`。
+ * 换行的最小单位因此是**单个元素** —— 窄屏上就出现"MB 自己占一行"、"季 孤零零跟在框后面"
+ * 这种散架（实测 390px：三行里挂着两个没有归属的标签）。
+ * 收进一个 `.fld` 之后，换行的最小单位是**整个字段**，窄屏就是一字段一行。
+ *
+ * 用法：`el('div', { class: 'fld' }, el('span', { class: 'lbl', text: '上限' }), el('div', { class: 'ctl' }, input, el('span', { class: 'unit', text: 'MB' })))`
+ * 定宽数字框加 `w-xs/w-sm/w-md/w-lg`；要占满剩余宽度的输入框加 `.grow`。 */
+.fld { display: flex; flex-direction: column; gap: 5px; flex: 1 1 190px; min-width: 0; }
+.fld > .lbl { font-size: 12.5px; color: var(--fg-dim); }
+/* 控件行：输入框 + 单位，或一排小框。标签在**上一行** —— 所有字段的控件因此从同一条左边缘起排。
+ * 原来是"标签在左、控件紧跟"，标签长短不一（`单站超时` vs `一条都没拿到时再往下打几条`）
+ * 就把输入框推得忽左忽右，整块看着就是"乱"。 */
+.fld > .ctl { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.fld > .ctl > .unit { flex: none; font-size: 12.5px; color: var(--fg-dim-2); white-space: nowrap; }
+/* 裸控件在字段里按剩余空间伸缩（基础规则那条 `width:100%` 会把它在窄屏撑破字段）。
+ * **不设长度上限**：一字段一框的地方，框就铺满自己那一格 —— 同一排的框左右边缘都对齐，
+ * 不再出现"这个框 88px、那个框 220px"的参差。确实要小框的地方（季 / 集 / 年份那种
+ * **几个小框并排**的格子）用下面的 `w-xs` 等定宽档显式声明。 */
+.fld > .ctl > :is(input, select) { flex: 1 1 auto; width: auto; min-width: 56px; }
+/* 关键字这种"越宽越好"的：给它更多份额 */
+.fld.grow { flex: 2 1 260px; }
+.fld > .btn, .fld > .ctl > .btn { flex: none; }
+/* 定宽档：`flex:0 0 auto` + 明确宽度。给「季 / 集 / 年份」这种**几个小框并排**的位置用
+ * （并排时不该各自按剩余空间长，否则三个框都在抢宽度）。一字段一框的地方不用它 —— 让框铺满。
+ * 最小那档给 72px 而不是 64px：数字框右边那颗上下箭头要占掉近 20px，64px 时
+ * 「年份」这种两字占位字会被裁掉半个。 */
+.fld > .ctl > input.w-xs, .fld > .ctl > select.w-xs { flex: 0 0 auto; width: 72px; }
+.fld > .ctl > input.w-sm, .fld > .ctl > select.w-sm { flex: 0 0 auto; width: 88px; }
+.fld > .ctl > input.w-md, .fld > .ctl > select.w-md { flex: 0 0 auto; width: 120px; }
+.fld > .ctl > input.w-lg, .fld > .ctl > select.w-lg { flex: 0 0 auto; width: 180px; }
+/* 进到行里时不留块级下边距（行内间距由行给） */
+.row > .fld,
+.toolbar > .fld { margin-bottom: 0; }
+/* 一组字段排成栅格：宽屏并排、窄屏自动落到一列（设置页那几张卡用它，不必再手工排换行） */
+.fset { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px 18px; margin-bottom: 12px; }
+.fset > .field { margin-bottom: 0; }
+
+/* 筛选区：卡片里**框出来的一块**，把"筛什么/看什么"的控件与"点一下干什么"的按钮分开。
+ * 不框的话两类东西挤在同一条 toolbar 里，窄屏一折行就分不清哪个是筛选项、哪个是动作。 */
+.filter-bar {
+  background: var(--panel-inset);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.filter-bar > .row:last-child,
+.filter-bar > .toolbar:last-child { margin-bottom: 0; }
+/* 筛选区底下那行状态（勾了几个 / 测速进度）：两块并排、窄屏自己折行。
+ * ⚠️ 名字不能叫 `status` —— daisyUI 里有个 `.status` 是"一颗小圆点"（宽高各 0.5rem），
+ *    本文件不叠层、只压得住自己写了的属性；那个宽高是**没写**的，会被对方的 8px 卡成一条竖排文字。 */
+.status-line { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--fg-dim); }
+.filter-bar > .status-line:last-child { margin-bottom: 0; }
+/* 分段控件：一排短选项，当前那档高亮。用于"只是换个看法"的开关（看哪一页签、按什么排）——
+ * 这类开关不用 `.btn`：按钮那身样式是在说"点一下会做事"，跟刷新 / 测速挤在一排时分不出主次，
+ * 三态循环的按钮更看不出此刻停在哪一档。高亮在这里只表示"当前是这档"，不表示动作。
+ * 高度凑到 34px（26 + 上下 3 + 边框 2），与同排的输入框、下拉齐平。 */
+.seg { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line-2); border-radius: 9px; }
+.seg > .seg-item {
+  border: 0; background: transparent; color: var(--fg-dim); font: inherit; font-size: 12.5px;
+  line-height: 26px; padding: 0 11px; border-radius: 6px; cursor: pointer; white-space: nowrap;
+}
+.seg > .seg-item:hover { color: var(--fg); }
+.seg > .seg-item.active { background: var(--bg-3); color: var(--fg); font-weight: 600; }
 /* 行**放进字段块里**时不留自己的下边距（间距由 .field 的 gap 给）—— 否则
  * 「标签 + 输入行」这种写法会在行下面多出 10px 的空当（`.card > :last-child` 只收得掉最后一块）。 */
 .field > .row,
@@ -197,6 +392,8 @@ input[type='file']::file-selector-button {
 /* 行尾的操作（按钮 / 勾选）固定宽度、顺序排 —— 它们永远贴右边同一条线上 */
 .file-row > .btn,
 .file-row > .chk { flex: none; }
+/* （`.file-row > .row` 那组"行尾按钮成组"的规则已删掉：按钮组不再搁 `.file-row` 里 ——
+ *   它是 `.plugin-row` 整块的最后一件东西，见上面 `.plugin-row > .file-acts`。） */
 /* 日志页：日志列表本体（原来是内联的 margin:0;max-height:62vh） */
 .log-list { margin: 0; max-height: 62vh; }
 /* 工具栏里那条竖分隔线 */
@@ -213,29 +410,16 @@ input[type='file']::file-selector-button {
 /* `.kv` 是紧排的定义列表、自己没有下边距 —— 它后面跟说明文字时补一个（别处不用） */
 .kv + .note { margin-top: 8px; }
 
-.btn {
-  background: var(--bg-3);
-  border: 1px solid var(--line-2);
-  color: var(--fg);
-  border-radius: 9px;
-  padding: 0 12px;
-  height: 34px; /* 与输入框/下拉同高 —— 一行里三者对齐 */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  font: inherit;
-  cursor: pointer;
-  transition: .15s;
-  white-space: nowrap;
-}
-.btn:hover { border-color: var(--accent-2); color: #fff; }
-.btn:disabled { opacity: .45; cursor: not-allowed; }
-.btn.primary { background: linear-gradient(180deg, var(--accent), var(--accent-2)); border-color: transparent; color: #0f1a09; font-weight: 600; }
-.btn.primary:hover { filter: brightness(1.08); }
-.btn.danger:hover { border-color: var(--err); color: var(--err); }
-.btn.mini { height: 26px; padding: 0 8px; font-size: 12px; border-radius: 7px; }
-.btn.active { border-color: var(--accent); color: var(--accent); }
+/* ---------------- 按钮 ----------------
+ * 形状、悬停、按下、禁用全交给 daisyUI 的 `.btn`（vendor/daisyui.css），这里只补两件事：
+ *   · `.primary` / `.danger` / `.mini` 是本项目沿用的旧类名 —— 接到 daisyUI 的颜色与尺寸档上，
+ *     页面里那几百处 `btn primary` 不必逐个改；
+ *   · 尺寸档跟着 `--size-field` 走（见上面的桥接），窄屏那份在上面的媒体查询里另有调整。 */
+.btn.primary { --btn-color: var(--color-primary); --btn-fg: var(--color-primary-content); }
+.btn.danger { --btn-color: var(--color-error); --btn-fg: var(--color-error-content); }
+.btn.mini { --fontsize: 12px; --btn-p: 10px; --size: calc(var(--size-field) * 8); }
+/* 「当前选中的那一颗」（页签型按钮）：描边与字用品牌色，底留空 */
+.btn.active { --btn-bg: #0000; --btn-border: var(--accent); --btn-fg: var(--accent); }
 
 .add-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
 .add-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -245,15 +429,21 @@ input[type='file']::file-selector-button {
 .dot.error { background: var(--err); }
 @keyframes pulse { 50% { opacity: .3; } }
 
+/* 徽章：形状与配色变量走 daisyUI 的 `.badge`，只是把字号压回本项目这一档 ——
+ * 它紧挨着 12~13px 的表格与说明文字，用 daisyUI 默认的 14px 会比正文还大。
+ * `.ok` / `.err` / `.warn` 是沿用的旧类名，同样接到达 daisyUI 的徽章变量上。 */
 .badge {
-  font-size: 10.5px; padding: 1.5px 6px; border-radius: 6px;
-  background: var(--bg-3); border: 1px solid var(--line-2); color: var(--fg-dim);
+  --badge-bg: var(--bg-3);
+  --badge-fg: var(--fg-dim);
+  --badge-color: var(--line-2);
+  height: 18px; padding-inline: 6px; font-size: 10.5px; border-radius: 6px;
   /* 徽章是**药丸**：折行会把"视频"拆成"视\n频"（站点表的能力列实测被挤成这样）。
    * 短标签一律不折；真放不下就让外层容器去换行/横向滚动。 */
   white-space: nowrap;
 }
-.badge.ok { color: var(--accent); border-color: var(--accent-dim); }
-.badge.err { color: var(--err); border-color: #4a2320; }
+.badge.ok { --badge-fg: var(--accent); --badge-color: var(--accent-dim); }
+.badge.err { --badge-fg: var(--err); --badge-color: var(--err-border); }
+.badge.warn { --badge-fg: var(--warn); --badge-color: rgba(255, 184, 77, .35); }
 
 .main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .empty { flex: 1; display: grid; place-items: center; padding: 24px; }
@@ -270,6 +460,9 @@ input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor:
 
 /* ---------------- 模板页：左挑模板 / 右编辑 ---------------- */
 .tpl-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 16px; align-items: start; }
+/* 编辑器顶部那行：左边"正在编哪一套"，右边"看它的哪一半"（页签）。窄屏折行。 */
+.tpl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.tpl-head > h3 { margin: 0; }
 .tpl-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
 .tpl-list .tpl-item {
   display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
@@ -277,7 +470,7 @@ input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor:
   padding: 7px 10px; border-radius: 8px; cursor: pointer; font: inherit; transition: .15s;
 }
 .tpl-list .tpl-item:hover { background: var(--bg-3); color: var(--fg); }
-.tpl-list .tpl-item.active { background: rgba(140, 218, 96, .10); border-color: var(--accent-dim); color: var(--accent); font-weight: 600; }
+.tpl-list .tpl-item.active { background: var(--accent-soft); border-color: var(--accent-dim); color: var(--accent); font-weight: 600; }
 .tpl-list .tpl-item .tpl-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tpl-list .tpl-item .tpl-meta { font-size: 11px; color: var(--fg-dim-2); font-weight: 400; }
 
@@ -289,7 +482,7 @@ input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor:
   padding: 6px 10px; border-radius: 8px; cursor: pointer; font: inherit; font-size: 12.5px; transition: .15s;
 }
 .src-tab:hover { background: var(--bg-3); color: var(--fg); }
-.src-tab.active { background: rgba(140, 218, 96, .10); border-color: var(--accent-dim); color: var(--accent); font-weight: 600; }
+.src-tab.active { background: var(--accent-soft); border-color: var(--accent-dim); color: var(--accent); font-weight: 600; }
 .src-tab .src-tab-meta { font-size: 11px; color: var(--fg-dim-2); font-weight: 400; }
 .src-head { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
 .src-head b { font-size: 13px; font-weight: 600; }
@@ -304,15 +497,10 @@ input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor:
 .param-title { font-size: 12px; color: var(--fg-dim-2); margin-bottom: 7px; }
 .param-block > .row { margin-bottom: 0; }
 
-/* ---------------- 模块导航 ---------------- */
-.nav-toggle {
-  flex: none; width: 34px; height: 34px; border-radius: 9px;
-  display: inline-flex; align-items: center; justify-content: center;
-  background: var(--bg-3); border: 1px solid var(--line-2); color: var(--fg-dim);
-  font-size: 15px; line-height: 1; cursor: pointer; transition: .15s;
-}
-.nav-toggle:hover { background: var(--bg-2); color: var(--fg); }
-
+/* ---------------- 侧栏 ----------------
+ * 侧栏的行外观**归 daisyUI 的 menu**（悬停底色、选中态、子项缩进与那条竖导引线都由它给，
+ * 结构见 core/shell.js 的 renderNavButtons：`ul.menu > li > button`，子项是嵌套的 ul）。
+ * 这里只留 daisyUI 不管的那部分：栏宽与滚动、品牌行、折叠态、以及"长名字走省略号"。 */
 .nav {
   width: 220px; flex: none;
   border-right: 1px solid var(--line);
@@ -320,51 +508,46 @@ input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor:
   overflow-y: auto; overflow-x: hidden;
   background: var(--bg-2);
 }
-/* 品牌行：侧栏顶上那行名字，下面一条分隔线把品牌与栏目分开（对齐 OpenList 那种
- * "品牌 → 分隔线 → 扁平行"）。⚠️ 名字的**权威**在 core/branding.js（启动后覆盖这里那份兜底文本）。 */
+/* 品牌行：侧栏顶上那行名字，下面一条分隔线把品牌与栏目分开。
+ * ⚠️ 名字的**权威**在 core/branding.js（启动后覆盖这里那份兜底文本）。
+ * 左边名字弹性占满（长了走省略号），右边那颗是**主题切换**（见 core/theme.js）。 */
 .nav-brand {
+  display: flex; align-items: center; gap: 8px;
   padding: 16px 12px 13px;
   margin-bottom: 10px;
   border-bottom: 1px solid var(--line);
   font-size: 15px; letter-spacing: .3px; white-space: nowrap;
 }
-.nav-brand b { font-weight: 700; }
+.nav-brand b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 700; }
 
 /* 遮罩：只有窄屏、且侧栏展开（抽屉开着）时才出现 */
 .nav-scrim { display: none; }
-.nav button {
-  display: flex; align-items: center; gap: 10px;
-  width: 100%; text-align: left;
-  background: none; border: 1px solid transparent; color: var(--fg-dim);
-  padding: 9px 12px; border-radius: 9px; cursor: pointer;
-  font: inherit; transition: .15s;
-  /* 一行一行排（长插件名不折行、由 `.nav-label` / 按钮自身裁掉）—— 侧栏是扁平行，不该有高矮不一的两行项 */
-  white-space: nowrap; overflow: hidden;
+
+/* 选中态用 daisyUI 那两个变量定色：底是品牌绿的那层淡底，字用品牌绿（它的默认是中性的灰底） */
+.nav-menu {
+  --menu-active-bg: var(--accent-soft);
+  --menu-active-fg: var(--accent);
+  padding: 0; width: auto; font-size: 13.5px; flex-wrap: nowrap; gap: 2px;
 }
-.nav button:hover { background: var(--bg-3); color: var(--fg); }
-.nav button.active { background: rgba(140, 218, 96, .10); border-color: var(--accent-dim); color: var(--accent); font-weight: 600; }
-/* 树：父节点是**文件夹**（点一下收起 / 展开这一栏），子节点缩进一级。
- * ⚠️ 父节点按**常规行**画（图标 + 常规字号 + 右侧折叠箭头），不是小灰标题 ——
- * 小灰标题 + 缩进子项那套一眼就像"页签底下的次级列表"，而侧栏该是扁平行（对齐 OpenList）。 */
-.nav-group { margin-bottom: 2px; }
+/* 行的栅格：图标（随内容）· 文字（占满、可缩可省略）· 箭头（随内容） */
+.nav-menu :is(button) { grid-template-columns: auto minmax(0, 1fr) auto; border-radius: 9px; }
+/* 未选中的行压暗一档（daisyUI 的 menu 不压，它默认是正文色）—— 侧栏是一列导航，
+ * 全部用正文色的话，选中那一项就只剩"底色不同"这一个信号了 */
+.nav-menu :is(button):not(.menu-active) { color: var(--fg-dim); }
+.nav-menu :is(button):not(.menu-active):hover { color: var(--fg); }
+.nav-menu .nav-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.nav-menu .nav-head { font-weight: 600; }
+.nav-menu .nav-caret { font-size: 9px; line-height: 1; color: var(--fg-dim-2); }
+.nav-menu .nav-child.menu-active { font-weight: 600; }
 .nav-ico-wrap { flex: none; width: 16px; height: 16px; display: inline-flex; }
 .nav-ico { width: 16px; height: 16px; display: block; }
-.nav button.nav-head { font-size: 13.5px; }
-.nav button.nav-head:hover { color: var(--fg); }
-.nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.nav .nav-caret { flex: none; margin-left: auto; font-size: 9px; line-height: 1; color: var(--fg-dim-2); }
 .nav-group.collapsed .nav-kids { display: none; }
-.nav-kids { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
-/* 子项文字与父节点文字**左对齐**：父节点文字起点 = padding 12 + 图标 16 + 间距 10 = 38px */
-.nav button.nav-child { padding: 7px 12px 7px 38px; font-size: 13px; }
-.nav-badge { margin-left: auto; font-size: 10.5px; color: var(--fg-dim-2); font-weight: 400; }
-.nav button.active .nav-badge { color: var(--accent); }
+.nav-kids { margin-bottom: 6px; }
 .soon {
   font-size: 10px; color: var(--fg-dim-2);
   border: 1px solid var(--line-2); border-radius: 5px;
   padding: 1px 5px; margin-left: 6px;
 }
-.nav-sep { height: 1px; background: var(--line); margin: 10px 12px; }
 
 
 /* ---------------- 间距尺度（全站一处定） ----------------
@@ -388,13 +571,23 @@ input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor:
 /* ---------------- 插件管理页：一个插件一块 ----------------
  * 原来是「名称 · 一长串状态明细 · 五颗按钮」全塞在一条 `.kv` 里：状态串折成两三行、按钮跟着飘，
  * 每行都不知从哪开始到哪结束。改成"名称 + 状态徽章 + 操作"一行、状态明细另起一行，块间给分隔线。 */
-.plugin-row { padding: 12px 0; }
+.plugin-row { padding: 14px 0; }
 .plugin-row + .plugin-row { border-top: 1px solid var(--line); }
-.plugin-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 7px; }
+/* 末行不留尾部内边距（卡自己已经有 16px 下边距），否则列表底部比别的卡多出一截空白 */
+.plugin-row:last-child { padding-bottom: 0; }
+/* 名称行与下面几行说明之间用**同一条 12px**（原来是 7px —— 一屏里三种间距，
+ * 手机上每块 3~4 行文字堆在一起，看着就是"挤"）；换行时行间距也给足。 */
+.plugin-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .plugin-name { font-size: 13.5px; font-weight: 600; }
-.plugin-acts { margin-bottom: 0; }
+/* 按钮组是整块（`.plugin-row`）的最后一件东西、靠右 —— 整块的**右下角**，而不是名称行的行尾。
+ * 名字长短不一、按钮颗数不一（有「更新」的多一颗），挂标题行会让每行按钮的位置全不一样。
+ * （权重写成两段：480px 档里 `.row { margin-bottom:10px }` 与 `.plugin-acts` 同权重且更靠后，
+ *   单类选择器压不过它，按钮组下面会多出一截空当。） */
+.plugin-row > .plugin-acts,
+.plugin-row > .file-acts { justify-content: flex-end; margin-bottom: 0; }
+/* `.plugin-row` 里嵌的 `.file-row`（Emby 实例 / 账号行）：内边距由外层插件行统一给，里面不再叠 */
+.plugin-row > .file-row { padding: 0; }
 .plugin-row > .note:last-child { margin-bottom: 0; }
-.badge.warn { color: var(--warn); border-color: rgba(255, 184, 77, .35); }
 
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }
@@ -403,6 +596,13 @@ th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--lin
  * 这样列不用为了"一行放下 3 枚徽章"而把整张表撑到横滚，也不会出现"视\n频"那种断字。 */
 .sites-table th { white-space: nowrap; }
 .sites-table td:last-child .badge { margin: 1px 4px 1px 0; }
+/* 站点表的**高度上限**：一个源动辄几十上百个站，整表摊开会把这张卡拉到两三屏长 ——
+ * 下面的「保存这套模板」和别的源都够不着（用户实测的"分组多了会拉很长"）。
+ * 给一个按视口算的内部滚动区，表头跟着滚在顶部（sticky 相对的就是这个滚动盒）。 */
+/* ⚠️ 用后代选择器（不能写 `>`）：宿主里还夹着一层 `.src-group`（组头 + 表），
+ *    早先写成 `#siteTableHost > .table-wrap` 时一条都没匹配上，上限等于没写。 */
+#siteTableHost .table-wrap { max-height: min(58vh, 560px); overflow: auto; }
+#siteTableHost .sites-table thead th { position: sticky; top: 0; z-index: 1; background: var(--bg-2); }
 th { color: var(--fg-dim-2); font-weight: 500; font-size: 12px; }
 tbody tr:hover { background: var(--bg-3); }
 td.mono, th.mono, .mono { font-family: var(--mono); font-size: 12px; }
@@ -410,10 +610,10 @@ td.mono, th.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .sec-title { margin: 24px 0 12px; font-size: 14px; color: var(--accent); font-weight: 600; }
 .sec-title:first-child { margin-top: 0; }
 
-.hint { background: rgba(111, 182, 255, .07); border: 1px solid rgba(111, 182, 255, .25); color: #cfe3ff; border-radius: 10px; padding: 12px 14px; font-size: 12.5px; margin-bottom: 16px; }
+.hint { background: rgba(111, 182, 255, .07); border: 1px solid rgba(111, 182, 255, .25); color: var(--hint-fg); border-radius: 10px; padding: 12px 14px; font-size: 12.5px; margin-bottom: 16px; }
 /* 空的提示框（结果区还没填内容时）不该占一块空白 —— 直接不显示 */
 .hint:empty { display: none; }
-.hint.warn { background: rgba(255, 184, 77, .08); border-color: rgba(255, 184, 77, .3); color: #ffe3b8; }
+.hint.warn { background: rgba(255, 184, 77, .08); border-color: rgba(255, 184, 77, .3); color: var(--hint-warn-fg); }
 
 /* ---------------- 配置中心内嵌 ---------------- */
 .frame-wrap {
@@ -421,7 +621,7 @@ td.mono, th.mono, .mono { font-family: var(--mono); font-size: 12px; }
   border: 1px solid var(--line);
   border-radius: var(--radius);
   overflow: hidden;
-  background: #0a0f1c;
+  background: var(--frame-bg);
 }
 iframe.embed { display: block; width: 100%; height: calc(100vh - 250px); border: 0; }
 
@@ -430,7 +630,7 @@ iframe.embed { display: block; width: 100%; height: calc(100vh - 250px); border:
 .ep-title { font-size: 12px; color: var(--fg-dim); margin-bottom: 6px; }
 
 /* ---------------- 其他 ---------------- */
-pre.json { background: #0a0d0b; border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow: auto; font-family: var(--mono); font-size: 12px; max-height: 60vh; }
+pre.json { background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow: auto; font-family: var(--mono); font-size: 12px; max-height: 60vh; }
 
 /* 面板「日志」页：等宽、一行一条 —— 长行**折行**而不是横向滚（日志经常很长） */
 .log-line { font-family: var(--mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; padding: 1px 0; }
@@ -444,10 +644,10 @@ pre.json { background: #0a0d0b; border: 1px solid var(--line); border-radius: 10
   box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
   animation: slidein .18s ease-out;
 }
-.toast.err { border-color: var(--err); color: #ffd9d4; }
+.toast.err { border-color: var(--err); color: var(--toast-err-fg); }
 @keyframes slidein { from { transform: translateY(10px); opacity: 0; } }
 
-.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.25); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; }
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--spinner-track); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---------------- 当前源 / 聚合搜索 ---------------- */
@@ -463,17 +663,19 @@ pre.json { background: #0a0d0b; border: 1px solid var(--line); border-radius: 10
 .agg-item.matched { box-shadow: inset 3px 0 0 var(--accent); border-color: var(--accent-dim); }
 .site-group {
   border: 1px solid var(--line); border-radius: var(--radius);
-  background: rgba(255, 255, 255, .012); padding: 10px 12px; margin-bottom: 12px;
+  background: var(--wash); padding: 10px 12px; margin-bottom: 12px;
 }
 .site-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; }
 .chip.tag {
-  background: rgba(140, 218, 96, .10); border-color: var(--accent-dim); color: var(--accent);
+  background: var(--accent-soft); border-color: var(--accent-dim); color: var(--accent);
   font-weight: 600; cursor: default;
 }
 .chip.tag:hover { border-color: var(--accent-dim); color: var(--accent); }
 pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
 .agg-pic { width: 58px; height: 82px; object-fit: cover; border-radius: 7px; background: var(--bg-3); flex: none; }
-.agg-pic.empty { display: block; }
+/* 没图时的占位块：**不能叫 `.empty`** —— 全站那个 `.empty` 是"整页空态"（flex:1 + padding:24px），
+ * 撞上以后占位块会被撑宽、被 padding 顶偏。这里单独一个 `.ph`，尺寸与真图完全一致。 */
+.agg-pic.ph { display: block; }
 .agg-body { flex: 1; min-width: 0; }
 .agg-name { font-weight: 600; margin-bottom: 2px; }
 .agg-sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
@@ -502,6 +704,9 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
 
 @media (max-width: 860px) {
   html, body { height: 100%; }
+  /* 触控档：控件整体放大一档（34 → 40px）。daisyUI 那些组件的高度都从 `--size-field` 算，
+   * 所以改这一处，按钮 / 徽章 / 勾选框跟着一起变。 */
+  html { --size-field: 4px; --size-selector: 3px; }
 
   /* 宽屏那条 `.appbar { display: none }` 在这里恢复：窄屏侧栏是抽屉，栏外得留一颗 ☰ */
   .appbar {
@@ -509,7 +714,7 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
     padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
     position: sticky; top: 0; z-index: 20;
     border-bottom: 1px solid var(--line);
-    background: rgba(14, 18, 16, .92); backdrop-filter: blur(8px);
+    background: var(--sticky-bg); backdrop-filter: blur(8px);
     flex: none;
   }
 
@@ -547,14 +752,11 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
   .view.nopad { padding: 0; }
 
   /* 触控友好：输入框 16px 可避免 iOS 聚焦时自动放大（选择器与上面那条保持同一个范围） */
-  input:not([type='checkbox']):not([type='radio']):not([type='file']),
+  input:not([type='checkbox'], [type='radio'], [type='file']),
   select,
   textarea { font-size: 16px; height: 40px; padding-left: 12px; padding-right: 12px; }
   select { padding-right: 32px; }
   textarea { height: auto; padding-top: 10px; padding-bottom: 10px; }
-  .btn { height: 40px; }
-  .btn { padding: 10px 14px; }
-  .btn.mini { padding: 7px 10px; font-size: 12.5px; }
   .chk { font-size: 13px; }
   .chk input { width: 17px; height: 17px; }
 
@@ -609,26 +811,31 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
   iframe.embed { height: calc(100dvh - 160px); }
 }
 
-/* ---------------- 模态框（添加源那类"填几个字段就提交"的操作） ---------------- */
-.modal-mask {
+/* ---------------- 模态框（添加源那类"填几个字段就提交"的操作） ----------------
+ * ⚠️ 类名一律用 `.mbox*` 而不是 `.modal*`：daisyUI 里有一支 `.modal`（`position:fixed; inset:0;
+ *    z-index:999; visibility:hidden; pointer-events:none`）。本文件不叠层，**只在声明了的属性上**
+ *    压得过它 —— 「可见性 / 命中测试 / 定位」这几样这里没声明，就照它的算，结果是整个弹窗框
+ *    visible:hidden、掩码点不动（实测 computed `visibility:hidden`）。撞名还有 `.status`（见上文
+ *    `.status-line`），同类问题一律用改名避开，不去逐条"补声明"跟它对赌。 */
+.mbox-mask {
   position: fixed; inset: 0; z-index: 60;
   background: rgba(0, 0, 0, .58);
   display: flex; align-items: center; justify-content: center;
   padding: 16px; animation: fadein .12s ease-out;
 }
 @keyframes fadein { from { opacity: 0; } }
-.modal {
+.mbox {
   background: var(--bg-2); border: 1px solid var(--line-2); border-radius: var(--radius);
   width: min(560px, 100%); max-height: 88vh; display: flex; flex-direction: column;
   box-shadow: 0 18px 50px rgba(0, 0, 0, .55);
 }
-.modal-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--line); }
-.modal-head h3 { margin: 0; font-size: 15px; flex: 1; }
-.modal-x { background: none; border: 0; color: var(--fg-dim); font-size: 14px; cursor: pointer; padding: 3px 7px; border-radius: 7px; }
-.modal-x:hover { background: var(--bg-3); color: var(--fg); }
-.modal-body { padding: 14px 16px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
-.modal-body > .field { margin-bottom: 0; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+.mbox-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--line); }
+.mbox-head h3 { margin: 0; font-size: 15px; flex: 1; }
+.mbox-x { background: none; border: 0; color: var(--fg-dim); font-size: 14px; cursor: pointer; padding: 3px 7px; border-radius: 7px; }
+.mbox-x:hover { background: var(--bg-3); color: var(--fg); }
+.mbox-body { padding: 14px 16px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.mbox-body > .field { margin-bottom: 0; }
+.mbox-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
 
 /* （`.file-row.centered` 那组"名称/状态居中"的规则已删掉：
  *   居中会让每行的名字起点各不相同，反而更乱 —— 现在统一成固定列宽 + 左对齐。） */
@@ -649,7 +856,7 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
 .auth-tip { color: var(--err); margin: 0; min-height: 18px; }
 
 /* ---------------- 手机（≤480px）：再收一档 + 宽表改卡片 ----------------
- * ⚠️ 这一档放在**文件最后**：它要压过上面 `.modal-*` 那几条基础规则（媒体查询不加权重，
+ * ⚠️ 这一档放在**文件最后**：它要压过上面 `.mbox-*` 那几条基础规则（媒体查询不加权重，
  * 靠的就是"后来居上"）。860px 那一档解决的是"抽屉侧栏 + 单列"，到 375px 级的屏上还是挤：
  * 内边距与卡片再收一档、按钮整宽，最要紧的是**站点表不再横滚** —— 五行宽的表格在手机上
  * 只能左右扒着看，这里改成一张张卡片（勾选 · 站名 · 延迟，下面两行挂"别的模板 / 能力"）。 */
@@ -662,7 +869,16 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
   .row, .toolbar { gap: 8px; margin-bottom: 10px; }
   .note { font-size: 12px; }
   .hint { padding: 10px 12px; margin-bottom: 12px; }
-  .btn.mini { height: 30px; padding: 0 10px; }
+  /* 主操作那颗（搜索）：窄屏整宽 —— 和上面的输入框同宽，不再缩在角落 */
+  .toolbar > .btn.go { flex: 1 1 100%; }
+  /* 操作行（保存 / 清空这几颗）：窄屏上下排、整宽 —— 三四颗宽窄不一的按钮挤一行最显乱 */
+  .row.btn-row > .btn { flex: 1 1 100%; }
+  /* 一排短按钮（刷新 / 测速 / 排序那类）：窄屏按内容铺满换行，既不整宽也不散着飘 */
+  .row.btn-fan > .btn { flex: 1 1 auto; }
+  /* 窄屏去掉"把内容推到右边"的弹簧：折行后弹簧还占着整行，会留下一大片空白 + 孤零零靠右的按钮 */
+  .row > .spacer, .toolbar > .spacer { display: none; }
+  /* 卡片右下角的操作组（`.actions`）：窄屏改左对齐 —— 折行后靠右会在左边留一条空白 */
+  .actions { justify-content: flex-start; flex-wrap: wrap; }
 
   /* 站点表：宽表 → 卡片 */
   #siteTableHost .table-wrap { overflow-x: visible; }
@@ -673,7 +889,7 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
     display: grid; grid-template-columns: 24px minmax(0, 1fr) auto;
     gap: 4px 8px; align-items: center;
     border: 1px solid var(--line); border-radius: 10px;
-    padding: 9px 10px; margin-bottom: 8px; background: rgba(255, 255, 255, .012);
+    padding: 9px 10px; margin-bottom: 8px; background: var(--wash);
   }
   .sites-table tr:hover { background: var(--bg-2); }
   .sites-table td { display: block; padding: 0; border: 0; }
@@ -687,13 +903,12 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
   .sites-table td:last-child .badge { margin: 2px 4px 2px 0; }
 
   /* 模态框：贴底的抽屉、按钮整宽（窄屏上两颗小按钮挨在一起最容易点错） */
-  .modal-mask { padding: 0; align-items: flex-end; }
-  .modal { width: 100%; max-height: 92dvh; border-radius: 14px 14px 0 0; }
-  .modal-body { padding: 14px; }
-  .modal-actions { flex-direction: column-reverse; padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); }
-  .modal-actions .btn { width: 100%; }
+  .mbox-mask { padding: 0; align-items: flex-end; }
+  .mbox { width: 100%; max-height: 92dvh; border-radius: 14px 14px 0 0; }
+  .mbox-body { padding: 14px; }
+  .mbox-actions { flex-direction: column-reverse; padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); }
+  .mbox-actions .btn { width: 100%; }
 
   .src-tabs { gap: 4px; }
-  .file-row > .name { flex: 1 1 100%; }
   .kv .v { max-width: 100%; }
 }

@@ -47,14 +47,15 @@ export function renderPanelLogs(v) {
   let missed = 0; // 因缓冲覆盖而漏掉的条数
 
   const listEl = el('pre', { class: 'json log-list' });
-  const statEl = el('span', { class: 'muted', text: '加载中…' });
+  const statEl = el('span', { class: 'muted', text: '正在加载…' });
   const noteEl = el('span', { class: 'note' });
 
   /* ---------------- 工具条 ---------------- */
   const pauseBtn = el('button', { class: 'btn mini', text: '暂停' });
   const clearBtn = el('button', { class: 'btn mini danger', text: '清空' });
 
-  /** 级别过滤：全部（含 info/log）/ 警告以上 / 仅错误 */
+  /* 级别过滤：全部（含 info/log）/ 警告以上 / 仅错误。
+   * 用分段控件而不是一排按钮 —— 它只换"看哪些"，不产生动作，按钮样式会让人以为点了会执行什么。 */
   const LEVELS = [
     ['all', '全部'],
     ['warn', '警告以上'],
@@ -62,7 +63,7 @@ export function renderPanelLogs(v) {
   ];
   const levelBtns = LEVELS.map(([key, label]) =>
     el('button', {
-      class: 'chip' + (key === level ? ' active' : ''),
+      class: 'seg-item' + (key === level ? ' active' : ''),
       text: label,
       'data-level': key,
       onclick: () => {
@@ -72,6 +73,7 @@ export function renderPanelLogs(v) {
       },
     })
   );
+  const levelSeg = el('div', { class: 'seg' }, ...levelBtns);
 
   function applyFilter() {
     const ok = (lv) => level === 'all' || (level === 'warn' && (lv === 'warn' || lv === 'error')) || (level === 'error' && lv === 'error');
@@ -143,13 +145,14 @@ export function renderPanelLogs(v) {
     el(
       'div',
       { class: 'card' },
+      el('h3', { text: '日志' }),
       el(
         'div',
         { class: 'toolbar' },
         pauseBtn,
         clearBtn,
         el('span', { class: 'sep' }),
-        ...levelBtns,
+        levelSeg,
         el('span', { class: 'spacer' }),
         statEl
       ),

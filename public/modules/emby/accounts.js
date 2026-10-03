@@ -93,11 +93,10 @@ function instanceCard(list, inst) {
     el('h3', { text: '账号' }),
     el(
       'div',
-      { class: 'row' },
-      el('span', { class: 'muted', text: '实例' }),
+      { class: 'field' },
+      el('label', { text: '实例' }),
       sel,
-      el('span', { class: 'muted', text: '客户端填：' }),
-      el('code', { class: 'mono', text: inst.url })
+      el('div', {}, el('span', { class: 'muted', text: '客户端填：' }), el('code', { class: 'mono', text: inst.url }))
     ),
     inst.running
       ? null
@@ -115,7 +114,7 @@ function accountsCard(inst, accounts) {
     el('div', { class: 'actions' }, el('button', { class: 'btn primary', text: '＋ 添加账号', onclick: () => openAddAccount(inst) }))
   );
   if (!accounts.length) {
-    card.append(el('div', { class: 'muted', text: '这个实例还没有账号 —— 客户端登录会返回 401，点上面的「＋ 添加账号」加一个。' }));
+    card.append(el('div', { class: 'muted', text: '还没有账号 —— 客户端登录会返回 401，点上面「＋ 添加账号」。' }));
     return card;
   }
   for (const a of accounts) card.append(accountRow(inst, a));
@@ -124,75 +123,101 @@ function accountsCard(inst, accounts) {
 
 function accountRow(inst, a) {
   const when = a.lastLoginAt ? '最近登录 ' + fmtTime(a.lastLoginAt) + (a.lastClient ? ' · ' + a.lastClient : '') : '还没登录过';
+  /* 与实例行同一个形状：信息一行在上，按钮组是整块的最后一件东西、靠右 */
   const row = el(
     'div',
-    { class: 'file-row' },
-    el('span', { class: 'dot running' }),
-    el('span', { class: 'name', text: a.username }),
-    el('span', { class: 'note', text: when }),
-    a.userId
-      ? el('span', {
-          class: 'badge mono',
-          title: `这个实例里的 UserId（md5(serverId|用户名)）—— 客户端日志里只出现它，排查时对得上：${a.userId}`,
-          text: 'UserId ' + String(a.userId).slice(0, 8),
-        })
-      : null
-  );
-
-  const pw = el('input', { type: 'password', autocomplete: 'new-password', placeholder: '新密码（≥6 位）', style: 'display:none' });
-  const editBtn = el('button', { class: 'btn mini', text: '改密' });
-  const saveBtn = el('button', { class: 'btn mini primary', text: '保存', style: 'display:none' });
-  const cancelBtn = el('button', { class: 'btn mini', text: '取消', style: 'display:none' });
-  const editing = (on) => {
-    for (const n of [pw, saveBtn, cancelBtn]) n.style.display = on ? '' : 'none';
-    editBtn.style.display = on ? 'none' : '';
-  };
-  editBtn.addEventListener('click', () => editing(true));
-  cancelBtn.addEventListener('click', () => {
-    pw.value = '';
-    editing(false);
-  });
-  saveBtn.addEventListener('click', async () => {
-    if (pw.value.length < 6) return toast('密码至少 6 位', true);
-    saveBtn.disabled = true;
-    try {
-      await api(`/api/emby/instances/${encodeURIComponent(inst.id)}/accounts/${encodeURIComponent(a.id)}`, {
-        method: 'PUT',
-        body: { password: pw.value },
-      });
-      await afterChange('已改密：' + a.username + '（该账号的客户端需重新登录）');
-    } catch (e) {
-      toast('改密失败：' + e.message, true);
-      saveBtn.disabled = false;
-    }
-  });
-
-  row.append(
-    pw,
-    editBtn,
-    saveBtn,
-    cancelBtn,
-    el('button', {
-      class: 'btn mini danger',
-      text: '删除',
-      onclick: async () => {
-        const go = await confirmModal({
-          title: '删除账号',
-          text: `删除「${inst.name}」里的账号 ${a.username}？该账号的客户端会立刻失效（要重新建一个才能登）。`,
-          okLabel: '删除',
-          primary: false,
-        });
-        if (!go) return;
-        try {
-          await api(`/api/emby/instances/${encodeURIComponent(inst.id)}/accounts/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
-          await afterChange('已删除账号：' + a.username);
-        } catch (e) {
-          toast('删除失败：' + e.message, true);
-        }
-      },
-    })
+    { class: 'plugin-row' },
+    el(
+      'div',
+      { class: 'file-row' },
+      el('span', { class: 'name', text: a.username }),
+      el('span', { class: 'note', text: when }),
+      a.userId
+        ? el('span', {
+            class: 'badge mono',
+            title: `这个实例里的 UserId（md5(serverId|用户名)）—— 客户端日志里只出现它，排查时对得上：${a.userId}`,
+            text: 'UserId ' + String(a.userId).slice(0, 8),
+          })
+        : null
+    ),
+    el(
+      'div',
+      { class: 'row file-acts' },
+      /* 改密走弹窗：行里展开一个密码框时，这一行的宽度会整个变一下（别的行跟着错位），
+       * 而且窄屏那点地方塞不下"新密码 + 保存 + 取消"。与「添加账号」同一个形状。 */
+      el('button', { class: 'btn mini', text: '改密', onclick: () => openChangePassword(inst, a) }),
+      el('button', {
+        class: 'btn mini danger',
+        text: '删除',
+        onclick: async () => {
+          const go = await confirmModal({
+            title: '删除账号',
+            text: `删除「${inst.name}」里的账号 ${a.username}？该账号的客户端会立刻失效（要重新建一个才能登）。`,
+            okLabel: '删除',
+            primary: false,
+          });
+          if (!go) return;
+          try {
+            await api(`/api/emby/instances/${encodeURIComponent(inst.id)}/accounts/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+            await afterChange('已删除账号：' + a.username);
+          } catch (e) {
+            toast('删除失败：' + e.message, true);
+          }
+        },
+      })
+    )
   );
   return row;
+}
+
+/* ------------------------------------------------------------------ 改密 */
+
+/**
+ * 改密弹窗：与「添加账号」同一个形状（密码框 + 显示密码 + 提示 + 取消/保存）。
+ *
+ * 改完服务端会把该账号已签发的 token 全部作废（见 `db.updateAccount`），
+ * 所以在说明里点明"客户端要重新登录一次"，免得改完以为客户端坏了。
+ */
+function openChangePassword(inst, a) {
+  const pass = el('input', { type: 'password', autocomplete: 'new-password', placeholder: '新密码（≥6 位）' });
+  const show = el('input', { type: 'checkbox' });
+  show.addEventListener('change', () => {
+    pass.type = show.checked ? 'text' : 'password';
+  });
+  const tip = el('div', { class: 'note' });
+
+  modal({
+    title: `改密 · ${a.username}`,
+    body: [
+      el('div', { class: 'field' }, el('label', { text: '新密码' }), pass),
+      el('label', { class: 'chk' }, show, '显示密码'),
+      el('p', { class: 'note', text: `改完「${a.username}」已签发的登录凭证全部作废 —— 它的客户端要重新登录一次。` }),
+      tip,
+    ],
+    actions: [
+      { label: '取消' },
+      {
+        label: '保存',
+        primary: true,
+        onclick: async () => {
+          if (pass.value.length < 6) {
+            tip.textContent = '密码至少 6 位';
+            return false;
+          }
+          try {
+            await api(`/api/emby/instances/${encodeURIComponent(inst.id)}/accounts/${encodeURIComponent(a.id)}`, {
+              method: 'PUT',
+              body: { password: pass.value },
+            });
+          } catch (e) {
+            tip.textContent = '改密失败：' + e.message;
+            return false; // 窗口留着，让改一次重来
+          }
+          await afterChange('已改密：' + a.username + '（该账号的客户端需重新登录）');
+        },
+      },
+    ],
+  });
 }
 
 /* ------------------------------------------------------------------ 添加账号 */
@@ -212,7 +237,7 @@ function openAddAccount(inst) {
       el('div', { class: 'field' }, el('label', { text: '用户名' }), name),
       el('div', { class: 'field' }, el('label', { text: '密码' }), pass),
       el('label', { class: 'chk' }, show, '显示密码'),
-      el('p', { class: 'note', text: `账号加在「${inst.name}」（:${inst.port}）里 —— 它在别的实例上登不了。` }),
+      el('p', { class: 'note', text: `加在「${inst.name}」（:${inst.port}）—— 别的实例登不了。` }),
       tip,
     ],
     actions: [

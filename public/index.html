@@ -3,26 +3,49 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0e1210" />
+  <meta name="theme-color" content="#e9edf3" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <!-- ⚠️ 名字的**权威**在 core/branding.js（启动后 JS 会覆盖标题与侧栏品牌）；这里这份只是首屏兜底 -->
   <title>媒体桥面板</title>
+  <!-- ⚠️ 顺序不能反：daisyui.css 整包在 @layer 里，而 style.css 不叠层 ——
+       不叠层的规则天然压得过叠层的，本项目那份必须排在后面才说了算。 -->
+  <link rel="stylesheet" href="/vendor/daisyui.css" />
   <link rel="stylesheet" href="/style.css" />
+  <!-- 主题首屏兜底：**必须在 body 之前**跑完，否则刷新时会先闪一帧另一套色
+       （样式层只认 html[data-theme] 这一个属性，而它是 JS 写上去的）。这里只管"第一帧别闪"，
+       真正的切换逻辑在 core/theme.js（那颗按钮的点击在那边）。默认亮色。 -->
+  <script>
+    (function () {
+      try {
+        document.documentElement.setAttribute(
+          'data-theme',
+          localStorage.getItem('mbp-theme') === 'dark' ? 'dark' : 'light'
+        );
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+    })();
+  </script>
 </head>
 <body>
   <div class="app">
     <!-- ⚠️ 宽屏这整条**不显示**（品牌在侧栏顶部，见下面的 .nav-brand）——
          它只在窄屏出现，因为那时侧栏是盖在内容上的抽屉，需要栏外的一颗触发按钮。 -->
     <header class="appbar">
-      <button id="navToggle" class="nav-toggle" aria-label="展开导航" aria-expanded="false" title="展开导航">☰</button>
+      <button id="navToggle" class="btn btn-ghost btn-sm btn-square" aria-label="展开导航" aria-expanded="false" title="展开导航">☰</button>
+      <span class="spacer"></span>
+      <!-- 主题切换：窄屏侧栏收在抽屉里，栏外也留一颗（不然手机上得先拉开抽屉才切得动主题）。
+           与侧栏品牌行那颗同一份状态，见 core/theme.js。 -->
+      <button id="themeBtnTop" class="btn btn-ghost btn-sm btn-square" type="button" title="主题" aria-label="主题">
+        <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 1.2v1.7M8 13.1v1.7M1.2 8h1.7M13.1 8h1.7M3.2 3.2l1.2 1.2M11.6 11.6l1.2 1.2M12.8 3.2l-1.2 1.2M4.4 11.6l-1.2 1.2"/></svg>
+      </button>
     </header>
 
     <div id="empty" class="empty">
       <div class="empty-inner">
         <div class="empty-icon"><span class="spinner" style="width:22px;height:22px;border-width:3px"></span></div>
-        <h2>正在连接后端服务…</h2>
-        <p class="muted">如果长时间停在这里，说明没连上后端：请在项目目录执行 <code>npm start</code>，再用它启动后打印的地址打开面板。</p>
+        <h2>正在加载…</h2>
       </div>
     </div>
 
@@ -33,8 +56,16 @@
              现画成树（一栏一个父节点，栏里的页是子节点）—— 加一栏只改 MODULES 一处；
              没有子项的栏目不画（三类插件栏里一个插件都没启用时，侧栏不留空栏目）。 -->
         <nav class="nav" id="nav">
-          <div class="nav-brand"><b>媒体桥面板</b></div>
-          <div class="nav-groups" id="navGroups"></div>
+          <div class="nav-brand">
+            <b>媒体桥面板</b>
+            <!-- 主题切换：一颗图标按钮（亮色太阳 / 暗色月亮），点一下在 亮 ⇄ 暗 之间切。
+                 点击与图标替换都在 core/theme.js。 -->
+            <button id="themeBtn" class="btn btn-ghost btn-xs btn-square" type="button" title="主题" aria-label="主题">
+              <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 1.2v1.7M8 13.1v1.7M1.2 8h1.7M13.1 8h1.7M3.2 3.2l1.2 1.2M11.6 11.6l1.2 1.2M12.8 3.2l-1.2 1.2M4.4 11.6l-1.2 1.2"/></svg>
+            </button>
+          </div>
+          <!-- daisyUI 的 menu：行外观（悬停 / 选中 / 子项缩进）由它给，侧栏骨架在 style.css -->
+          <ul class="menu nav-menu" id="navGroups"></ul>
         </nav>
         <div class="content">
           <section id="view" class="view"></section>

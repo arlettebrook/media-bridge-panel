@@ -60,10 +60,7 @@ function restartCard() {
   btn.addEventListener('click', async () => {
     const yes = await confirmModal({
       title: '重启面板？',
-      text:
-        '会重起面板的应用进程（容器不动，版本不变）：几秒内打不开页面、正在进行的请求会断，' +
-        '重启后照旧。插件进程也会跟着重起一轮（启用的会自动拉起来）。' +
-        '设置、模板、插件与账号数据都不受影响。',
+      text: '只重起面板进程（容器与版本不动）：几秒内打不开页面、正在进行的请求会断；插件也会跟着重起一轮。设置、模板、插件与账号数据都不受影响。',
       okLabel: '重启',
     });
     if (!yes) return;
@@ -98,10 +95,10 @@ function restartCard() {
   return el(
     'div',
     { class: 'card' },
-    el('h3', { text: '面板重启' }),
+    el('h3', { text: '整机动作' }),
     el(
       'div',
-      { class: 'row' },
+      { class: 'row btn-fan' },
       btn,
       el('button', { class: 'btn', text: '退出登录', onclick: () => logout() })
     ),
@@ -111,7 +108,8 @@ function restartCard() {
 
 export function renderPanelOverview(v) {
   const card = el('div', { class: 'card' }, el('h3', { text: '运行环境' }));
-  const body = el('div');
+  /* 先占一句"正在加载…"：数据是异步取的，不占位的话这张卡会先空着（看着像坏了） */
+  const body = el('div', {}, el('div', { class: 'muted', text: '正在加载…' }));
   card.append(body);
   v.append(card, restartCard());
 
@@ -124,11 +122,15 @@ export function renderPanelOverview(v) {
         ['设置目录', info.settingsDir],
         ['当前地址', location.origin],
       ];
+      body.textContent = '';
       for (const [k, val] of rows) {
         body.append(el('div', { class: 'kv' }, el('span', { class: 'k', text: k }), el('span', { class: 'v', text: val || '-' })));
       }
     })
-    .catch((e) => body.append(el('div', { class: 'note err-note', text: '取运行环境失败：' + e.message })));
+    .catch((e) => {
+      body.textContent = '';
+      body.append(el('div', { class: 'note err-note', text: '取运行环境失败：' + e.message }));
+    });
 
   /* 还在用默认密码 → 页顶插一条警告（改密码在「安全」页，这里只指路） */
   authStatus().then((st) => {

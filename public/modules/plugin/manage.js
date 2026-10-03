@@ -11,10 +11,10 @@
  * 状态每 2 秒拉一次（只在这一页活着）：**状态与已跑时长**都在上面。
  * 插件崩了**不会自动重启**，只留一个「已启用（没在跑）」与退出原因在那儿（见 docs/adr/0037）。
  *
- * **自更新**（插件自带 `updateUrl` 时，见 docs/plugin-contract）：进页面自动查一遍
- * 「有没有新版」，之后每 5 分钟默默再查（页面关掉就停）；带新版的插件在行里标出来，
- * 行里那颗钮变成「更新到 vX」，卡头另有一颗「全部更新」一次把有新版的都装上。
- * 装完由服务端自动重启进程（见 updater.replaceInstalled）。
+ * **自更新**（插件自带 `updateUrl` 时，见 docs/plugin-contract）：**只在进这一页时查一遍**
+ * 「有没有新版」（不再按点轮询远端）；带新版的插件在行里标出来，行里那颗钮变成
+ * 「更新到 vX」，卡头那颗钮则跟着查到的结果变脸 —— 查到更新是「全部更新（N）」，
+ * 没查到是「检查更新」（点它就是再查一遍）。装完由服务端自动重启进程（见 updater.replaceInstalled）。
  */
 import { $, el, toast } from '../../core/dom.js';
 import { api } from '../../core/api.js';
@@ -36,7 +36,9 @@ const fmtDuration = (ms) => {
 };
 
 export async function renderPluginManage(v) {
-  const host = el('div', { id: 'pluginListHost' });
+  /* ⚠️ 宿主**本身就是那张卡**（不是套在卡外面的一层 div）：套一层的话，
+   * 它与上面「装一个插件」那张卡之间就没有 `.card + .card` 那条 16px 间距，两张卡会贴在一起。 */
+  const host = el('div', { class: 'card', id: 'pluginListHost' });
   /* 轮询句柄先声明再调用 startPolling()：它下面就用到了这个变量（声明在后会踩 TDZ） */
   let timer = null;
   /* 自更新检查结果：`type/id` → `{ ok, hasUpdate, current, latest, changelog, error? }` */
@@ -71,35 +73,30 @@ export async function renderPluginManage(v) {
 
     if (!(d.plugins || []).length) {
       box.append(
-        el(
-          'div',
-          { class: 'card' },
-          el('h3', { text: '插件' }),
-          el('div', {
-            class: 'hint',
-            /* 插件不随面板发行：全新安装这里就是空的，所以空态得指路（见 docs/adr/0035） */
-            text: '还没有装任何插件。插件不随面板发行 —— 到「插件库」页从插件仓库里挑一个装，或者在下面选一个 .tar.gz 手动装。',
-          })
-        )
+        el('h3', { text: '插件' }),
+        el('div', {
+          class: 'hint',
+          /* 插件不随面板发行：全新安装这里就是空的，所以空态得指路（见 docs/adr/0035） */
+          text: '还没有装任何插件 —— 到「插件库」页挑一个装，或在上面选一个 .tar.gz 手动装。',
+        })
       );
       return;
     }
 
     /* ---- 已装的 ---- */
-    const card = el('div', { class: 'card' }, el('h3', { text: '已装插件' }));
+    box.append(el('h3', { text: '已装插件' }));
     /* 一颗按钮管所有插件，按钮上带"当前查到几个有新版本"：插件一多，
      * 挨个点「更新」很烦（而且大多点开都是"已是最新"）。 */
     const withUpdate = (d.plugins || []).filter((p) => p.updateUrl);
-    if (withUpdate.length) card.append(updateBar(withUpdate));
+    if (withUpdate.length) box.append(updateBar(withUpdate));
     for (const p of d.plugins || []) {
-      card.append(pluginRow(p));
+      box.append(pluginRow(p));
     }
-    box.append(card);
   }
 
   /* ------------------------------------------------------------------ 自更新 */
 
-  /** 查一遍所有插件的自更新清单（开页 / 每 5 分钟 / 点「全部更新」前都走这里）。
+  /** 查一遍所有插件的自更新清单（开页 / 点「检查更新」/ 点「全部更新」前都走这里）。
    *  失败**不弹提示**（清单在远端，离线时管理页照样得能用），除非 `loud`。
    *  同一次检查里再有人来就**复用那一趟**（不并发打远端）。 */
   function checkUpdates({ force = false, loud = false } = {}) {
@@ -128,17 +125,24 @@ export async function renderPluginManage(v) {
     const fresh = found.filter((u) => u.ok && u.hasUpdate);
     const failed = found.filter((u) => !u.ok);
 
+    /* 这颗钮跟着"查到的结果"变脸：查到有新版的（`fresh`）就是「全部更新（N）」，
+     * 一个都没查到就是「检查更新」—— 点了再查一遍。**不再让它装作能更新**：
+     * 没更新可装的时候，一颗写着「全部更新」的钮点下去只弹一句"已是最新"，白点一次。 */
     const btn0 = el('button', { class: 'btn mini' + (fresh.length ? ' primary' : '') });
-    btn0.title = '按各插件自己声明的更新地址查一遍，有新版的都装上（装完自动重启）';
     if (updatingAll) {
       btn0.textContent = `更新中…（${updatingAll.i}/${updatingAll.total}）`;
       btn0.disabled = true;
     } else if (checking) {
       btn0.textContent = '检查中…';
       btn0.disabled = true;
-    } else {
-      btn0.textContent = fresh.length ? `全部更新（${fresh.length}）` : '全部更新';
+    } else if (fresh.length) {
+      btn0.title = '按各插件自己声明的更新地址查一遍，有新版的都装上（装完自动重启）';
+      btn0.textContent = `全部更新（${fresh.length}）`;
       btn0.onclick = () => updateAll(list);
+    } else {
+      btn0.title = '按各插件自己声明的更新地址查一遍有没有新版';
+      btn0.textContent = '检查更新';
+      btn0.onclick = () => checkUpdates({ force: true, loud: true });
     }
 
     const bits = [];
@@ -148,7 +152,6 @@ export async function renderPluginManage(v) {
     else if (found.length) bits.push('都已是最新版本');
     else bits.push('还没查到更新信息');
     if (failed.length) bits.push(`${failed.length} 个检查失败`);
-    bits.push('每 5 分钟自动查一次');
 
     return el('div', { class: 'row' }, btn0, el('span', { class: 'note', text: bits.join(' · ') }));
   }
@@ -168,7 +171,7 @@ export async function renderPluginManage(v) {
       const u = updates.get(sidOf(p));
       return `${p.name || p.id}：v${u.current} → v${u.latest}`;
     });
-    if (!confirm(`把下面 ${targets.length} 个插件更新到最新版？\n\n${lines.join('\n')}\n\n包从各插件自己声明的地址下载，仍会经过两道校验，装完自动重启。`)) return;
+    if (!confirm(`把下面 ${targets.length} 个插件更新到最新版？\n\n${lines.join('\n')}\n\n包从各插件声明的地址下载，仍会经过两道校验。`)) return;
 
     updatingAll = { i: 0, total: targets.length };
     const failed = [];
@@ -214,13 +217,15 @@ export async function renderPluginManage(v) {
     const statusText =
       p.status === 'running' ? '运行中' : p.status === 'starting' ? '启动中…' : p.status === 'broken' ? '起不来' : p.enabled ? '已启用（没在跑）' : '已停用';
     const statusCls = p.status === 'running' ? ' ok' : p.status === 'broken' ? ' err' : p.status === 'starting' ? ' warn' : '';
-    /* 状态明细单独一行：跟名称、几颗按钮挤在一条线上时，它会被折成两三截，一屏看下来对不上号 */
-    const bits = [
+    /* 版本与作者单独一行、紧跟标题下面；已跑时长与来路另起一行。
+     * 跟名称、几颗按钮挤在一条线上时会被折成两三截，一屏看下来对不上号 */
+    const headBits = [
       `${TYPE_LABEL[p.type] || p.type} · ${p.id}`,
       `v${p.version}`,
       p.domain ? `域 ${p.domain}` : '',
       p.author ? `作者 ${p.author}` : '',
-      p.updateUrl ? '支持自更新' : '',
+    ].filter(Boolean);
+    const restBits = [
       p.status === 'running' ? `已跑 ${fmtDuration(p.uptimeMs)}` : '',
       /* 只有两条来路（见 docs/adr/0035）：插件库装的 / 手动上传的。
          历史条目里写过的 `builtin` / `upload` 按同一口径归并显示，不做数据迁移。 */
@@ -239,6 +244,7 @@ export async function renderPluginManage(v) {
       if (rowBusy) updateBtn.disabled = true;
     }
 
+    /* 按钮组不搁标题行：它是这一整块的最后一件东西（右下角），标题行只留名称与状态徽章 */
     return el(
       'div',
       { class: 'plugin-row' },
@@ -247,23 +253,23 @@ export async function renderPluginManage(v) {
         { class: 'plugin-head' },
         el('span', { class: 'plugin-name', text: p.name || p.id }),
         el('span', { class: 'badge' + statusCls, text: statusText }),
-        canUpdate ? el('span', { class: 'badge warn', text: `可更新 v${u.latest}` }) : null,
-        el('span', { class: 'spacer' }),
-        el(
-          'div',
-          { class: 'row plugin-acts' },
-          p.enabled
-            ? btn('停用', '停掉它的进程（它自己起的东西由它自己清理）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/disable`, { method: 'POST' })))
-            : btn('启用', '起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/enable`, { method: 'POST' })), 'btn mini primary'),
-          updateBtn,
-          btn('重启', '重起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/restart`, { method: 'POST' }))),
-          btn('卸载', '卸载它 —— 它的 data/ 目录也会一起删掉', () => uninstall(p))
-        )
+        canUpdate ? el('span', { class: 'badge warn', text: `可更新 v${u.latest}` }) : null
       ),
-      el('div', { class: 'note', text: bits.join(' · ') }),
+      el('div', { class: 'note', text: headBits.join(' · ') }),
+      restBits.length ? el('div', { class: 'note', text: restBits.join(' · ') }) : null,
       p.lastError ? el('div', { class: 'note err-note', text: '最近一次错误：' + p.lastError }) : null,
       u && !u.ok ? el('div', { class: 'note', text: '更新检查失败：' + u.error }) : null,
-      (p.actions || []).length ? el('div', { class: 'note', text: '实现了这些动作：' + p.actions.join(' / ') }) : null
+      (p.actions || []).length ? el('div', { class: 'note', text: '实现了这些动作：' + p.actions.join(' / ') }) : null,
+      el(
+        'div',
+        { class: 'row plugin-acts' },
+        p.enabled
+          ? btn('停用', '停掉它的进程（它自己起的东西由它自己清理）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/disable`, { method: 'POST' })))
+          : btn('启用', '起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/enable`, { method: 'POST' })), 'btn mini primary'),
+        updateBtn,
+        btn('重启', '重起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/restart`, { method: 'POST' }))),
+        btn('卸载', '卸载它 —— 它的 data/ 目录也会一起删掉', () => uninstall(p))
+      )
     );
   }
 
@@ -278,7 +284,7 @@ export async function renderPluginManage(v) {
     if (!u.hasUpdate) return toast(`已是最新版本（v${u.current}）`);
 
     const note = u.changelog ? `\n\n更新说明：\n${u.changelog}` : '';
-    if (!confirm(`「${p.name || p.id}」有新版本：v${u.current} → v${u.latest}，现在更新？\n\n包从插件声明的地址下载，仍会经过两道校验，装完自动重启。${note}`)) return;
+    if (!confirm(`「${p.name || p.id}」有新版本：v${u.current} → v${u.latest}，现在更新？\n\n包从插件声明的地址下载，仍会经过两道校验。${note}`)) return;
 
     busy.add(sid);
     paint();
@@ -306,18 +312,13 @@ export async function renderPluginManage(v) {
 
   function startPolling() {
     if (timer) return;
-    let tick = 0;
     timer = setInterval(async () => {
       if (!$('#pluginListHost')) {
         clearInterval(timer);
-        timer = null; // 页面走了就停：状态与自更新都不再拉
+        timer = null; // 页面走了就停：状态不再拉
         return;
       }
       await load();
-      tick += 1;
-      /* 每 5 分钟默默再查一遍有没有新版（150 × 2s）。服务端有 60 秒缓存，
-       * 这里不加 force —— 到点缓存早过了，查的就是最新的。 */
-      if (tick % 150 === 0) await checkUpdates();
     }, 2000);
   }
 }
@@ -338,7 +339,7 @@ function installCard(onInstalled = () => {}) {
   go.addEventListener('click', async () => {
     const f = (file.files || [])[0];
     if (!f) return toast('先选一个 .tar.gz 包', true);
-    if (!confirm(`装插件「${f.name}」？\n\n⚠️ 插件能读写数据、能联网、能起进程 —— 装了就等于在这台机器上跑它的代码。只装你信得过的包。`)) return;
+    if (!confirm(`装插件「${f.name}」？\n\n插件能读写数据、能联网、能起进程 —— 装了就等于在这台机器上跑它的代码，只装信得过的包。`)) return;
     go.disabled = true;
     out.textContent = '正在上传并校验…';
     try {
@@ -371,10 +372,6 @@ function installCard(onInstalled = () => {}) {
        这里拆成"选包一行、动作一行"，每行最多两件东西，眼睛有落点。 */
     el('div', { class: 'row' }, file, md5In),
     el('div', { class: 'row' }, el('label', { class: 'chk', title: '装完立刻启用（起它的进程）' }, enableCb, '装完就启用'), go),
-    out,
-    el('div', {
-      class: 'note',
-      text: '包是一个 .tar.gz',
-    })
+    out
   );
 }

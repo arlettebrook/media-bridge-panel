@@ -63,19 +63,21 @@ export function modal({ title, body = [], actions = [], onClose } = {}) {
     if (e.key === 'Escape') close();
   };
 
+  /* 类名用 `.mbox*`：daisyUI 自带一支 `.modal`（visibility:hidden + pointer-events:none），
+   * 撞名会让整个弹窗框不可见、点不动 —— 见 public/style.css 里那段说明。 */
   const box = el(
     'div',
-    { class: 'modal', role: 'dialog', 'aria-modal': 'true' },
+    { class: 'mbox', role: 'dialog', 'aria-modal': 'true' },
     el(
       'div',
-      { class: 'modal-head' },
+      { class: 'mbox-head' },
       el('h3', { text: title || '' }),
-      el('button', { class: 'modal-x', text: '✕', 'aria-label': '关闭', onclick: close })
+      el('button', { class: 'mbox-x', text: '✕', 'aria-label': '关闭', onclick: close })
     ),
-    el('div', { class: 'modal-body' }, ...body.flat(9)),
+    el('div', { class: 'mbox-body' }, ...body.flat(9)),
     el(
       'div',
-      { class: 'modal-actions' },
+      { class: 'mbox-actions' },
       ...actions.flat(9).map((a) =>
         el('button', {
           class: 'btn' + (a.primary ? ' primary' : ''),
@@ -89,7 +91,7 @@ export function modal({ title, body = [], actions = [], onClose } = {}) {
       )
     )
   );
-  const mask = el('div', { class: 'modal-mask' }, box);
+  const mask = el('div', { class: 'mbox-mask' }, box);
   mask.addEventListener('click', (e) => {
     if (e.target === mask) close();
   }); // 点遮罩关闭（点框内不关）

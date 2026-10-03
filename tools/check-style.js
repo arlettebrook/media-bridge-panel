@@ -29,6 +29,8 @@ const SKIP_DIRS = new Set([
   '.codebuddy',
   // 容器相关文件不属于项目源码（见 .gitignore），不参与文风检查
   'docker',
+  // 第三方前端库的原样副本（public/vendor/），不是本项目的文字
+  'vendor',
 ]);
 
 /**

@@ -121,7 +121,7 @@ export function onHashChange() {
  * 高亮只落在**子节点**上：父节点（栏名）是分组标题，本身不表示"当前在哪一页"。
  */
 export function renderNav() {
-  document.querySelectorAll('#nav .nav-child').forEach((b) => b.classList.toggle('active', b.dataset.page === S.page));
+  document.querySelectorAll('#nav .nav-child').forEach((b) => b.classList.toggle('menu-active', b.dataset.page === S.page));
 }
 
 /**
@@ -132,6 +132,9 @@ export function renderNav() {
  * 父节点是**文件夹**：点一下收起 / 展开这一栏（`foldedGroups` 记着收起来的那几个），
  * 不是"跳到这一栏的某一页" —— 一栏里哪一页当前亮着由子节点上的高亮说话。
  * 每行 = 图标 + 文字 + 右侧折叠箭头（箭头靠 `margin-left:auto` 顶到行尾）。
+ *
+ * 结构是 **daisyUI 的 menu**（`ul.menu > li > button`，嵌套的 `ul` 给子项缩进与那条竖导引线），
+ * 所以往 `#navGroups` 里画的是 `li` —— 它本身就是 `index.html` 里那个 `ul`。
  *
  * ⚠️ 往 `#navGroups` 里画，**不是整条 `#nav`** —— 侧栏顶上那行品牌（`.nav-brand`）是
  * `index.html` 里的静态节点，往 `#nav` 里 `textContent=''` 会把它一起清掉。
@@ -147,16 +150,16 @@ export function renderNavButtons() {
   for (const m of MODULES) {
     const pages = m.pages();
     if (!pages.length) continue;
-    const kids = el('div', { class: 'nav-kids' });
+    const kids = el('ul', { class: 'nav-kids' });
     for (const [id, label] of pages) {
-      kids.append(el('button', { class: 'nav-child', 'data-page': id, text: label }));
+      kids.append(el('li', {}, el('button', { class: 'nav-child', 'data-page': id, text: label })));
     }
     const group = el(
-      'div',
+      'li',
       { class: 'nav-group', 'data-module': m.id },
       el(
         'button',
-        { class: 'nav-head', title: `${m.label}：点一下收起 / 展开这一栏`, 'data-module': m.id },
+        { class: 'nav-head', title: `${m.label}：收起 / 展开`, 'data-module': m.id },
         el('span', { class: 'nav-ico-wrap', html: m.icon || '' }),
         el('span', { class: 'nav-label', text: m.label }),
         el('span', { class: 'nav-caret', text: '▾' })

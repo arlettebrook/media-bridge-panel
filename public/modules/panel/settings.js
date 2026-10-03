@@ -25,7 +25,6 @@ import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { BRAND } from '../../core/branding.js';
 import { changePassword } from '../../core/auth.js';
-import { renderPage } from '../../core/shell.js';
 
 /* -------------------------------------------------------------- 版本与更新 */
 
@@ -34,6 +33,11 @@ const UPDATE_POLL_MS = 2000;
 const UPDATE_POLL_LIMIT_MS = 60000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 一个字段：标签在上、控件在下 —— 收成一个不再拆分的整体（见 style.css 的 `.fld`）。
+ *  **单位写进标签**（`测速间隔（小时）`）：框后跟一个孤零零的 `.unit` 在窄屏换行时会脱离自己的框。 */
+const fld = (label, input) =>
+  el('div', { class: 'fld' }, el('span', { class: 'lbl', text: label }), el('div', { class: 'ctl' }, input));
 
 /**
  * 等面板重启完成：轮询 `/api/meta`，直到版本号与重启前不同。
@@ -157,7 +161,7 @@ function updateCard() {
       ],
       onClose: () => clearInterval(timer),
     });
-    const go = m.root.querySelector('.modal-actions .btn.primary');
+    const go = m.root.querySelector('.mbox-actions .btn.primary');
     if (!go) return;
     let left = 3;
     go.disabled = true; // 倒计时期间不可点
@@ -243,7 +247,7 @@ function updateCard() {
     el('h3', { text: '版本与更新' }),
     el('p', {
       class: 'note',
-      text: '面板可以从 Release 安装新版本，安装后应用进程会重启（容器不停）。更新只由你手动触发，不会在后台自动进行。更新即完整替换：新版本起来后，旧版本目录会被清掉。仓库地址见下面「关于」那张卡。',
+      text: '从 Release 安装新版本，装完应用进程重启（容器不停）。更新只手动触发，且是完整替换 —— 新版本起来后旧版本目录会被清掉。',
     }),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '当前版本' }), cur),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '最新版本' }), latest),
@@ -362,9 +366,8 @@ function backupCard() {
     const yes = await confirmModal({
       title: '用备份覆盖当前数据？',
       text:
-        `会用「${file.name}」里的全部数据覆盖当前面板：设置、模板、插件（含插件数据）、` +
-        `Emby 账号与播放进度都会被替换，缓存与应用代码不受影响。当前数据不会自动留档，` +
-        `建议先「导出备份」存一份。覆盖后需重启面板才生效（到「概览」页点「面板重启」）。`,
+        `会用「${file.name}」整项覆盖当前数据（设置、模板、插件与插件数据、Emby 账号与播放进度），` +
+        `缓存与应用代码不受影响。覆盖不可撤销，建议先「导出备份」存一份；之后需重启面板生效。`,
       okLabel: '覆盖还原',
     });
     if (!yes) return;
@@ -404,12 +407,9 @@ function backupCard() {
     el('h3', { text: '数据备份与还原' }),
     el('p', {
       class: 'note',
-      text:
-        '备份会打成一个 zip 包，包含数据卷里的全部数据：设置、模板、插件（含插件包与插件自己的数据）、' +
-        'Emby 账号与播放进度。不含缓存。' +
-        '还原会用 zip 里的数据整项覆盖当前数据卷，请先导出当前备份留档；覆盖后需重启面板才生效。',
+      text: '备份打成一个 zip，含数据卷里的全部数据：设置、模板、插件与插件数据、Emby 账号与播放进度，不含缓存。',
     }),
-    el('div', { class: 'note err-note', text: '备份可能含账号与密码，请妥善保管这份文件。' }),
+    el('div', { class: 'note err-note', text: '备份含账号与密码，请妥善保管。' }),
     el('div', { class: 'toolbar' }, exportBtn, pickBtn, picked, fileInput),
     out
   );
@@ -437,15 +437,22 @@ function fmtBytes(n) {
  */
 function cacheCard() {
   const c = (S.panel.settings || {}).cache || {};
-  /* 这几个是**默认值**，改了就落盘；留空/非数字由后端兜底回默认 */
-  const cnum = (key, dflt) =>
-    el('input', { type: 'text', value: String(c[key] === undefined || c[key] === null ? dflt : c[key]), class: 'w-sm' });
+  /* 这几个是**默认值**，改了就落盘；留空/非数字由后端兜底回默认。
+   * 不给定宽档：`.fset` 那一格有多宽就铺多宽（与全站"框不设长度"一致）。 */
+  const cnum = (key, dflt) => el('input', { type: 'text', value: String(c[key] === undefined || c[key] === null ? dflt : c[key]) });
   const cImgDays = cnum('imageTtlDays', 90);
   const cImgMB = cnum('imageMaxMB', 5);
   const cLineDays = cnum('linesTtlDays', 1);
   const cLineMB = cnum('linesMaxMB', 32);
   const cLineForever = el('input', { type: 'checkbox' });
   cLineForever.checked = !!c.linesNeverExpire;
+  /* 勾了长期有效，天数那一格就没意义了 —— 只把输入框**灰掉**，标签与勾选都留在原位
+   * （与「聚合 · 模板」页的「匹配到底」一个口径：勾选框旁边得看得出它在覆盖哪一项）。 */
+  const syncForever = () => {
+    cLineDays.disabled = cLineForever.checked;
+  };
+  cLineForever.addEventListener('change', syncForever);
+  syncForever();
   const out = el('div', { class: 'hint', text: '正在读取用量…' });
   const aggLine = el('div', { class: 'note' });
   const save = el('button', { class: 'btn primary', text: '保存' });
@@ -532,7 +539,7 @@ function cacheCard() {
   clear.addEventListener('click', async () => {
     if (
       !confirm(
-        '清空面板缓存？\n\n图片索引与线路结果都会重来（下一次点开会重新搜源）。\n账号在另一个库里，不受影响、不用重新登录。\n插件自己的缓存在插件那边，这一下不动它们。'
+        '清空面板缓存？\n\n图片索引与线路结果都会重来（下一次点开会重新搜源）。\n插件自己的缓存在插件那边，这一下不动它们。'
       )
     ) {
       return;
@@ -554,9 +561,8 @@ function cacheCard() {
       !confirm(
         '清除全部缓存？\n\n' +
           '· 面板：图片索引与线路结果（下一次点开会重新搜源）\n' +
-          '· 插件：各插件的落盘缓存（元数据的取数缓存、首页插件的行结果）\n\n' +
-          '插件的设置与登录态（网盘 Cookie、源实例清单）不在缓存里，不受影响。\n' +
-          '插件进程里还留着的那份内存缓存清不掉 —— 要等它自己的有效期过去，或重启面板。'
+          '· 插件：各插件的落盘缓存\n\n' +
+          '插件的设置与登录态不在缓存里，不受影响。插件进程里那份内存缓存要等它自己过期，或重启面板。'
       )
     ) {
       return;
@@ -578,59 +584,44 @@ function cacheCard() {
     'div',
     { class: 'card' },
     el('h3', { text: '缓存设置' }),
-    el('p', {
-      class: 'note',
-      text:
-        '天数填 0 = 不缓存；上限填 0 = 不限（不淘汰）。' +
-        '「线路结果」勾了长期有效就不按天数过期（改了模板设置就会失效）。',
-    }),
+    el('p', { class: 'note', text: '天数填 0 = 不缓存，上限填 0 = 不限。' }),
     el(
       'div',
-      { class: 'row' },
-      el('span', { class: 'muted', text: '图片索引' }),
-      cImgDays,
-      el('span', { class: 'muted', text: '天 · 上限' }),
-      cImgMB,
-      el('span', { class: 'muted', text: 'MB' })
+      { class: 'fset' },
+      fld('图片索引保留（天）', cImgDays),
+      fld('图片索引上限（MB）', cImgMB),
+      /* 勾选与它管的那个输入框**同一个字段**里：勾上就把天数灰掉（见 syncForever） */
+      el(
+        'div',
+        { class: 'fld' },
+        el('span', { class: 'lbl', text: '线路结果保留（天）' }),
+        el(
+          'div',
+          { class: 'ctl' },
+          cLineDays,
+          el('label', { class: 'chk', title: '勾上就不按天数过期' }, cLineForever, '长期有效')
+        )
+      ),
+      fld('线路结果上限（MB）', cLineMB)
     ),
-    el(
-      'div',
-      { class: 'row' },
-      el('span', { class: 'muted', text: '线路结果（线路 + 定位）' }),
-      cLineDays,
-      el('span', { class: 'muted', text: '天 · 上限' }),
-      cLineMB,
-      el('span', { class: 'muted', text: 'MB' }),
-      el('label', { class: 'chk' }, cLineForever, '长期有效'),
-      save,
-      clear,
-      clearAll
-    ),
+    el('div', { class: 'row btn-row' }, save, clear, clearAll),
     out,
     aggLine,
-    el('p', {
-      class: 'note',
-      text:
-        '「清空面板缓存」只清上面这两份；「清除全部缓存（含插件）」连各插件自己的落盘缓存一起清' +
-        '（元数据与源插件的取数缓存、首页插件的行结果）。插件的设置与登录态不在缓存里，不受影响。',
-    })
+    el('p', { class: 'note', text: '「清空面板缓存」只清面板这两份；「清除全部缓存」连插件自己的落盘缓存一起清。' })
   );
 }
 
-/** 设置要异步读一次，先占位再把卡换进去 */
-async function settingsSection(v) {
-  const holder = el('div');
-  v.append(holder);
-  holder.append(el('div', { class: 'card' }, el('h3', { text: '缓存设置' }), el('div', { class: 'muted', text: '正在读取面板设置…' })));
+/** 设置要异步读一次；三张卡都直接挂在 `.view` 下 —— 卡片间距才是同一条 */
+export async function renderPanelSettings(v) {
   try {
     if (!S.panel.settings) S.panel.settings = (await api('/api/modules/panel/settings')).settings;
   } catch (e) {
-    holder.replaceChildren(
-      el('div', { class: 'card' }, el('h3', { text: '缓存设置' }), el('div', { class: 'hint warn', text: '读取面板设置失败：' + e.message }))
-    );
+    v.append(el('div', { class: 'card' }, el('h3', { text: '设置' }), el('div', { class: 'hint warn', text: '读取面板设置失败：' + e.message })));
     return;
   }
-  holder.replaceChildren(cacheCard(), relayCard());
+  /* ⚠️ 三张卡**不许再套一层 holder**：`.card + .card` 那条间距只认相邻的卡片，
+   * 中间夹一层 div 的话，那两张与其它卡的相对距离就与别处不一样（用户实测"三个卡片距离不一样"）。 */
+  v.append(speedTestCard(), cacheCard(), relayCard());
 }
 
 /* ------------------------------------------------------------------ 播放中继设置 */
@@ -646,8 +637,8 @@ function relayCard() {
   const dflt = (v, d) => String(v === undefined || v === null ? d : v);
   const cOn = el('input', { type: 'checkbox' });
   cOn.checked = s.enabled !== false;
-  const cThreads = el('input', { type: 'text', value: dflt(s.threads, 16), class: 'w-sm' });
-  const cChunk = el('input', { type: 'text', value: dflt(s.chunkKB, 512), class: 'w-sm' });
+  const cThreads = el('input', { type: 'text', value: dflt(s.threads, 16) });
+  const cChunk = el('input', { type: 'text', value: dflt(s.chunkKB, 512) });
   const save = el('button', { class: 'btn primary', text: '保存' });
 
   /* 留空发 undefined（JSON 会丢掉），后端按默认值算；填了非数字也发 undefined，不让 NaN 落盘 */
@@ -682,34 +673,24 @@ function relayCard() {
     'div',
     { class: 'card' },
     el('h3', { text: '播放中继设置' }),
-    el('p', {
-      class: 'note',
-      text:
-        '只对"要带鉴权头、播放器自己带不了"的线路生效：这类线路的媒体字节由面板代取再转给播放器。' +
-        '上游对开放式 Range（只给起点、不给终点）限速很狠，所以默认切成有界小块、多路并发拉；' +
-        '探不出总长或上游不认 Range 会自动退回单连接。留空 = 用默认值。' +
-        '拉流地址上带 ?threads=8&chunkKB=256 可以只覆盖这一次播放。',
-    }),
+    el('p', { class: 'note', text: '带鉴权头的线路，媒体字节由面板代取再转给播放器。留空 = 用默认值。' }),
     el(
       'div',
       { class: 'row' },
-      el('label', { class: 'chk' }, cOn, '分块并发'),
-      el('span', { class: 'muted', text: '并发路数' }),
-      cThreads,
-      el('span', { class: 'muted', text: '路 · 每块' }),
-      cChunk,
-      el('span', { class: 'muted', text: 'KB' }),
-      save
-    )
+      el('label', { class: 'chk', title: '关掉就用单连接直搬（上游限速时更慢）' }, cOn, '分块并发')
+    ),
+    el('div', { class: 'fset' }, fld('并发路数', cThreads), fld('每块大小（KB）', cChunk)),
+    el('div', { class: 'row btn-row' }, save)
   );
 }
 
 /* ------------------------------------------------------------------ 面板密码 */
 
 function passwordCard() {
-  const oldInput = el('input', { type: 'password', autocomplete: 'current-password', placeholder: '当前密码' });
-  const newInput = el('input', { type: 'password', autocomplete: 'new-password', placeholder: '新密码（至少 6 位）' });
-  const againInput = el('input', { type: 'password', autocomplete: 'new-password', placeholder: '再输一次' });
+  /* 名字写在**字段标签**上（不再借 placeholder 当标签：两个字一填进去就没了） */
+  const oldInput = el('input', { type: 'password', autocomplete: 'current-password' });
+  const newInput = el('input', { type: 'password', autocomplete: 'new-password' });
+  const againInput = el('input', { type: 'password', autocomplete: 'new-password' });
   const btn = el('button', { class: 'btn primary', text: '修改密码' });
   const warn = el('div', { class: 'note err-note hidden' });
 
@@ -738,8 +719,9 @@ function passwordCard() {
     'div',
     { class: 'card' },
     el('h3', { text: '面板密码' }),
-    el('p', { class: 'note', text: '登录这个面板要用的密码。改完之后要重新登录（浏览器里 30 天不用再输）。' }),
-    el('div', { class: 'row' }, oldInput, newInput, againInput, btn),
+    el('p', { class: 'note', text: '登录面板的密码。改完要用新密码重新登录。' }),
+    el('div', { class: 'fset' }, fld('当前密码', oldInput), fld('新密码（至少 6 位）', newInput), fld('再输一次', againInput)),
+    el('div', { class: 'row btn-row' }, btn),
     warn
   );
 }
@@ -751,62 +733,43 @@ function passwordCard() {
  * 所以它不跟模板走（模板装的是内容偏好），而测速的**结果**（站点统计）也是面板级共享的一份。
  * 「立即测速」按钮仍在「聚合 · 模板」页（那是"看结果 + 手点一轮"）。
  */
-function speedTestSection(v) {
-  (async () => {
-    if (!S.panel.settings) S.panel.settings = (await api('/api/modules/panel/settings')).settings;
-    const p = S.panel.settings || {};
-    const on = el('input', { type: 'checkbox', checked: p.speedTestAuto !== false });
-    const hours = el('input', {
-      type: 'number',
-      class: 'w-sm',
-      value: String(p.speedTestHours === undefined || p.speedTestHours === null ? 6 : p.speedTestHours),
-      min: '1',
-      max: '168',
-    });
-    const save = el('button', { class: 'btn primary', text: '保存' });
-    save.addEventListener('click', async () => {
-      const h = Number(hours.value);
-      if (!(h >= 1 && h <= 168)) return toast('测速间隔填 1~168 小时', true);
-      save.disabled = true;
-      try {
-        const r = await api('/api/modules/panel/settings', {
-          method: 'PUT',
-          body: { settings: { speedTestAuto: on.checked, speedTestHours: h } },
-        });
-        S.panel.settings = r.settings || Object.assign({}, p, { speedTestAuto: on.checked, speedTestHours: h });
-        toast(on.checked ? `已保存（每 ${h} 小时自动测一轮）` : '已保存（自动测速已关）');
-      } catch (e) {
-        toast('保存失败：' + e.message, true);
-      } finally {
-        save.disabled = false;
-      }
-    });
-    v.append(
-      el(
-        'div',
-        { class: 'card' },
-        el('h3', { text: '站点测速' }),
-        el(
-          'div',
-          { class: 'row' },
-          el(
-            'label',
-            { class: 'chk', title: '每站打一发 POST /search（片名从常见影视名里随机取、非 200 换一个再测一发），结果写进「聚合 · 模板」页那一列「延迟」' },
-            on,
-            '自动测速（全部站点）'
-          ),
-          el('label', { class: 'chk', title: '多久测一轮，1~168 小时；改完从现在重新计时' }, hours, '小时'),
-          save
-        )
-      )
-    );
-  })().catch((e) => v.append(el('div', { class: 'hint warn', text: '读取测速设置失败：' + e.message })));
-}
+function speedTestCard() {
+  const p = S.panel.settings || {};
+  const on = el('input', { type: 'checkbox', checked: p.speedTestAuto !== false });
+  const hours = el('input', {
+    type: 'number',
+    value: String(p.speedTestHours === undefined || p.speedTestHours === null ? 6 : p.speedTestHours),
+    min: '1',
+    max: '168',
+  });
+  const save = el('button', { class: 'btn primary', text: '保存' });
+  save.addEventListener('click', async () => {
+    const h = Number(hours.value);
+    if (!(h >= 1 && h <= 168)) return toast('测速间隔填 1~168 小时', true);
+    save.disabled = true;
+    try {
+      const r = await api('/api/modules/panel/settings', {
+        method: 'PUT',
+        body: { settings: { speedTestAuto: on.checked, speedTestHours: h } },
+      });
+      S.panel.settings = r.settings || Object.assign({}, p, { speedTestAuto: on.checked, speedTestHours: h });
+      toast(on.checked ? `已保存（每 ${h} 小时自动测一轮）` : '已保存（自动测速已关）');
+    } catch (e) {
+      toast('保存失败：' + e.message, true);
+    } finally {
+      save.disabled = false;
+    }
+  });
 
-export function renderPanelSettings(v) {
-  /* 缓存与中继两张卡要异步读一次设置，往 v 末尾插，不挡上面的卡。 */
-  speedTestSection(v);
-  settingsSection(v);
+  return el(
+    'div',
+    { class: 'card' },
+    el('h3', { text: '站点测速' }),
+    el('p', { class: 'note', text: '按间隔自动测一轮，结果在「聚合 · 模板」页那一列「延迟」看。' }),
+    el('div', { class: 'row' }, el('label', { class: 'chk' }, on, '自动测速')),
+    el('div', { class: 'fset' }, fld('测速间隔（小时）', hours)),
+    el('div', { class: 'row btn-row' }, save)
+  );
 }
 
 /**

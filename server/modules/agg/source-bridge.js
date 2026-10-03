@@ -162,9 +162,37 @@ async function callAction(ref, action, args) {
   return callPlugin(pluginId, action, Object.assign({ source: instanceId }, args));
 }
 
+/**
+ * 在途的 search：同键（实例 + 站点 + 词 + 页）并发**只放一发**，后来的等同一个结果。
+ *
+ * 为什么在面板这一层合：插件自己的缓存是"返回后才写入"的读穿缓存，网页聚合搜索与客户端
+ * 播放链**同时**问同一片时，两发都赶在缓存写入前，会实打实打上游两遍（MissAV 首搜 >20s，
+ * 撞上的概率不低）。在这里合，所有源插件一处受益。
+ *
+ * 不合另外两个：
+ *   · `detail` —— 插件侧已各自做了同键 inflight 合并；
+ *   · `probe` —— 测速测的就是真实往返，合到在途搜索上读出来的延迟是假的。
+ */
+const searchInFlight = new Map();
+
 /** 搜索一个站（两层式站点的第一步） */
 async function search(ref, args) {
-  return asUpstream(await callAction(ref, 'search', args));
+  const a = args || {};
+  const key = JSON.stringify([String(ref), String(a.key || ''), String(a.wd || ''), Number(a.page) || 1]);
+  const going = searchInFlight.get(key);
+  if (going) return asUpstream(await going);
+  const job = callAction(ref, 'search', a).then(
+    (v) => {
+      searchInFlight.delete(key);
+      return v;
+    },
+    (e) => {
+      searchInFlight.delete(key);
+      throw e;
+    }
+  );
+  searchInFlight.set(key, job);
+  return asUpstream(await job);
 }
 
 /** 取一个站的详情（**插件自己解析**成「线路 → 选集」，每项带一个面板不解释的 `ref`） */

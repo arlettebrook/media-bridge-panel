@@ -23,7 +23,11 @@ export async function renderPluginLibrary(v) {
   const host = el('div', { id: 'pluginLibHost' });
   /* 「装完就启用」这颗复选框跨重绘保留：清单每次重画都把它原样挂回去，勾选状态不会丢 */
   const enableCb = el('input', { type: 'checkbox', checked: true });
+  /* 只往 `#view` 里挂这一个宿主，占位卡放进**宿主内部** —— 挂在宿主外面的话，
+   * `load()` 清的是宿主、那张「正在加载…」永远留在页尾；而且宿主外面那两张卡的间距
+   * 也吃不到 `.card + .card`（多一层 div 就断了）。 */
   v.append(host);
+  host.append(el('div', { class: 'card' }, el('h3', { text: '插件库' }), el('div', { class: 'muted', text: '正在加载…' })));
   await load();
 
   /** 拉一次清单（`force` = 绕过后端那 60 秒缓存）并重绘 */
@@ -54,9 +58,7 @@ export async function renderPluginLibrary(v) {
   async function install(p, btn) {
     const ok = await confirmModal({
       title: `装插件「${p.name || p.id}」`,
-      text:
-        `v${p.version}（${TYPE_LABEL[p.type] || p.type} · ${p.id}）\n\n` +
-        '插件能读写数据、能联网、能起进程 —— 装了就等于在这台机器上跑它的代码。只装信得过的来源。',
+      text: `v${p.version}（${TYPE_LABEL[p.type] || p.type} · ${p.id}）\n\n` + '插件能读写数据、能联网、能起进程 —— 只装信得过的来源。',
       okLabel: '装上去',
     });
     if (!ok) return;
@@ -88,6 +90,7 @@ export async function renderPluginLibrary(v) {
       p.author ? `作者 ${p.author}` : '',
       (p.depends || []).length ? `依赖 ${p.depends.join(' / ')}` : '',
     ].filter(Boolean);
+    /* 与管理页同一个形状：标题行只留名称与徽章，明细在下，按钮组是整块的最后一件（右下角） */
     return el(
       'div',
       { class: 'plugin-row' },
@@ -96,12 +99,11 @@ export async function renderPluginLibrary(v) {
         { class: 'plugin-head' },
         el('span', { class: 'plugin-name', text: p.name || p.id }),
         el('span', { class: 'badge', text: 'v' + p.version }),
-        p.installed ? el('span', { class: 'badge ok', text: '已装 v' + (p.installedVersion || '?') }) : null,
-        el('span', { class: 'spacer' }),
-        el('div', { class: 'row plugin-acts' }, btn)
+        p.installed ? el('span', { class: 'badge ok', text: '已装 v' + (p.installedVersion || '?') }) : null
       ),
       el('div', { class: 'note', text: bits.join(' · ') }),
-      p.description ? el('div', { class: 'note', text: p.description }) : null
+      p.description ? el('div', { class: 'note', text: p.description }) : null,
+      el('div', { class: 'row plugin-acts' }, btn)
     );
   }
 
@@ -122,7 +124,7 @@ export async function renderPluginLibrary(v) {
         el('span', { class: 'spacer' }),
         el('button', { class: 'btn mini', text: '刷新', title: '重新拉一次清单（绕过后端 60 秒缓存）', onclick: () => load(true) })
       ),
-      el('div', { class: 'row' }, el('label', { class: 'chk', title: '装完立刻启用（起它的进程）' }, enableCb, '装完就启用'))
+      el('label', { class: 'chk', title: '装完立刻启用（起它的进程）' }, enableCb, '装完就启用')
     );
     if (d.error) head.append(el('div', { class: 'hint warn', text: '清单取不到：' + d.error }));
     else if (d.generatedAt) head.append(el('div', { class: 'note', text: '索引生成于 ' + fmtTime(d.generatedAt) }));

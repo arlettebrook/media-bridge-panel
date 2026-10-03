@@ -25,7 +25,7 @@ export async function renderAggOther(v) {
 
   const providers = S.aggProviders || [];
   if (!providers.length) {
-    card.append(el('div', { class: 'hint warn', text: '还没有已注册的元数据域 —— 域由元数据插件申报（见「插件 → 管理」里装了哪些）。' }));
+    card.append(el('div', { class: 'hint warn', text: '还没有元数据域 —— 装一个元数据插件后，它会申报自己的域。' }));
     return;
   }
   if (!(S.aggTemplates || []).length) {
@@ -33,7 +33,6 @@ export async function renderAggOther(v) {
     return;
   }
 
-  card.append(el('div', { class: 'note', text: '选择每个元数据域的视频对应去哪里找片源。' }));
   for (const p of providers) card.append(domRow(p));
 }
 
@@ -41,7 +40,7 @@ export async function renderAggOther(v) {
 function domRow(p) {
   const cur = (S.aggDomains || {})[p.prefix] || '';
   const sel = el('select', { title: `域 ${p.prefix} 用哪套模板` });
-  sel.append(el('option', { value: '', text: '（没配 —— 这个域的内容搜不到）', selected: !cur }));
+  sel.append(el('option', { value: '', text: '不选择', selected: !cur }));
   for (const x of S.aggTemplates || []) {
     sel.append(el('option', { value: x.id, text: x.name, selected: cur === x.id }));
   }
@@ -55,10 +54,7 @@ function domRow(p) {
       toast('设置失败：' + e.message, true);
     }
   });
-  return el(
-    'div',
-    { class: 'kv' },
-    el('span', { class: 'k', text: `${p.label}（域 ${p.prefix}）` }),
-    sel
-  );
+  /* 域名单在上、下拉在下（原来两者并排：下拉按基础规则的 `width:100%` 占满整行，
+   * 域名单被挤成两行）。用 `.field` 这个"标签在上"的原语，竖排且自带行间距。 */
+  return el('div', { class: 'field' }, el('label', { text: `${p.label}（域 ${p.prefix}）` }), sel);
 }

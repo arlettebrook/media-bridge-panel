@@ -7,9 +7,9 @@
  * + **一套限定的搜索域**（客户端搜索走哪些元数据域；缺席 = 全部）。
  * 客户端「添加服务器」时填的就是这一行上的连接地址（见后端 `routes.js` 的 `/api/emby/instances`）。
  *
- * 首页插件做成**行内的下拉**（点一下就换，走 PATCH）：它是这一页最高频的动作，
- * 塞进弹窗等于每次都要"开窗→选→保存→关窗"；改名 / 改端口 / 启停则走弹窗
- * （那几样改错了客户端会连不上，值得多一步确认）。
+ * 启用开关做成**行内的开关**（点一下就换，走 PATCH）：它只影响"听不听这个端口"，
+ * 数据都还在，改错了再点回来就行。首页插件（= 这个实例的媒体库）、改名 / 改端口 / 搜索域
+ * 则走弹窗 —— 那几样要不要联动、改错了客户端会不会连不上，值得开窗多看一眼。
  *
  * ⚠️ 端口不是随便填的：面板本体端口被后端 `instance.validate` 挡掉；留空则由后端从 8090 起
  * 挑一个空闲的（占用了就 +1）。被占用的端口**不会**让面板起不来 —— 只是这一行的状态变成红点 + 原因。
@@ -129,7 +129,7 @@ function listCard(pluginErr, domainErr) {
     )
   );
 
-  if (pluginErr) card.append(el('div', { class: 'hint warn', text: '读不到首页插件清单：' + pluginErr + '（下拉里只剩「未选择」）' }));
+  if (pluginErr) card.append(el('div', { class: 'hint warn', text: '读不到首页插件清单：' + pluginErr + '（下拉里只剩「空库」）' }));
   if (domainErr) card.append(el('div', { class: 'hint warn', text: '读不到元数据域清单：' + domainErr + '（搜索域多选里只剩已保存的那些）' }));
 
   if (!list.length) {
@@ -141,20 +141,37 @@ function listCard(pluginErr, domainErr) {
 }
 
 function instanceRow(inst) {
-  const run = inst.running
-    ? el('span', { class: 'dot running', title: '在监听（客户端能连上）' })
-    : el('span', { class: 'dot error', title: '没在监听' });
-
-  const row = el(
+  /* 一行说清这台实例：启用开关 · 名称 · 端口 · 「默认」 · 地址与操作（靠右）。
+   * 开关摆最前面 —— 它就是这个实例在不在的状态（原来那颗绿点说的是同一件事，已去掉）。
+   * 首页插件是 `width:100%` 的下拉，搁进这行会把地址与按钮顶到下一行（1440px 实测折三行），
+   * 所以它留在编辑弹窗里 —— 那一项本来也不常改。 */
+  const head = el(
     'div',
     { class: 'file-row' },
-    run,
+    enableSwitch(inst),
     el('span', { class: 'name', title: inst.id, text: inst.name }),
     el('span', { class: 'badge mono', title: '这个实例自己的端口（客户端填它）', text: ':' + inst.port }),
     inst.isDefault ? el('span', { class: 'badge', title: '默认实例：老数据（原 emby.db）挂在它身上，不能删', text: '默认' }) : null,
-    homePluginSelect(inst),
-    el('code', { class: 'mono', text: inst.url }),
-    el('button', { class: 'btn mini', title: '复制这个地址到剪贴板', text: '复制', onclick: () => copyText(inst.url) }),
+    el('span', { class: 'spacer' }),
+    el('code', { class: 'mono', text: inst.url })
+  );
+
+  /* 第二行：这一实例的规模 + 状态说明（错误 / 停用都写在这里，红字那句用 err-note） */
+  const stats = `${inst.accountCount} 个账号 · ${inst.sessionCount} 个在线会话 · ${inst.viewCount} 个媒体库 · 搜索域：${domainsBrief(inst)}`;
+  let tail;
+  if (inst.error) {
+    tail = el('div', { class: 'err-note', text: `没在监听：${inst.error}（换个端口，或停掉占用它的程序，再「编辑」保存一次）` });
+  } else if (!inst.enabled) {
+    tail = el('div', { class: 'note', text: `${stats} · 已停用，客户端连不上` });
+  } else {
+    tail = el('div', { class: 'note', text: stats });
+  }
+
+  /* 按钮组是整块的最后一件东西、靠右（与插件列表同一个口径，见 style.css 的 `.file-acts`）。
+   * 「复制」去掉了：地址就在行上，长按选中即可。 */
+  const acts = el(
+    'div',
+    { class: 'row file-acts' },
     el('button', { class: 'btn mini', text: '编辑', onclick: () => openEditor(inst) }),
     inst.isDefault
       ? null
@@ -165,42 +182,25 @@ function instanceRow(inst) {
         })
   );
 
-  /* 第二行：这一实例的规模 + 状态说明（错误 / 停用都写在这里，红字那句用 err-note） */
-  const stats = `${inst.accountCount} 个账号 · ${inst.sessionCount} 个在线会话 · ${inst.viewCount} 个媒体库 · 搜索域：${domainsBrief(inst)}`;
-  if (inst.error) {
-    row.append(el('div', { class: 'err-note', text: `没在监听：${inst.error} —— 换个端口，或把占用那个端口的程序停掉，再来点「编辑」保存一次。` }));
-  } else if (!inst.enabled) {
-    row.append(el('div', { class: 'note', text: `${stats}。这个实例已停用，不在监听 —— 客户端连不上（数据还在）。` }));
-  } else {
-    row.append(el('div', { class: 'note', text: stats }));
-  }
-  return row;
+  return el('div', { class: 'plugin-row' }, head, tail, acts);
 }
 
-/** 行内的「首页插件」下拉：选中即 PATCH（见文件头那段，这是本页最高频的动作） */
-function homePluginSelect(inst) {
-  const sel = el('select', { title: '这个实例客户端上的媒体库 = 所选插件的全部行；未选择 = 空库' });
-  const opts = [{ id: '', name: '（未选择 —— 空库）' }, ...(S.emby.homePlugins || [])];
-  /* 清单里没有当前值（插件被卸了 / 清单没取到）也要把它列出来，否则下拉会静默跳到第一项 */
-  if (inst.homePlugin && !opts.some((p) => p.id === inst.homePlugin)) opts.push({ id: inst.homePlugin, name: inst.homePlugin, missing: true });
-  for (const p of opts) {
-    const note = p.missing ? '（插件不在了）' : p.id ? ` · ${p.enabled ? '' : '未启用'}${p.rowCount === undefined ? '' : p.rowCount + ' 行'}` : '';
-    const o = el('option', { value: p.id, text: `${p.name}${p.id ? `（${p.id}）` : ''}${note}` });
-    if (p.id === (inst.homePlugin || '')) o.selected = true;
-    sel.append(o);
-  }
-  sel.addEventListener('change', async () => {
-    sel.disabled = true;
+/** 行上的启用开关：停用 = 不在这个端口上监听（数据都还在），点一下即 PATCH */
+function enableSwitch(inst) {
+  const cb = el('input', { type: 'checkbox', class: 'switch' });
+  cb.checked = !!inst.enabled;
+  cb.addEventListener('change', async () => {
+    cb.disabled = true;
     try {
-      await api('/api/emby/instances/' + encodeURIComponent(inst.id), { method: 'PATCH', body: { homePlugin: sel.value } });
-      await afterChange(sel.value ? `首页已切换为：${sel.value}` : '已清空首页 —— 这个实例的媒体库现在是空的');
+      await api('/api/emby/instances/' + encodeURIComponent(inst.id), { method: 'PATCH', body: { enabled: cb.checked } });
+      await afterChange(cb.checked ? `已启用：${inst.name}` : `已停用：${inst.name}（客户端连不上，数据还在）`);
     } catch (e) {
       toast('切换失败：' + e.message, true);
-      sel.disabled = false;
-      sel.value = inst.homePlugin || '';
+      cb.disabled = false;
+      cb.checked = !!inst.enabled;
     }
   });
-  return sel;
+  return el('label', { class: 'chk', title: '启用后才会在这个端口上监听；停用只是不监听，数据还在' }, cb, '启用');
 }
 
 /* ------------------------------------------------------------------ 增 / 改 / 删 */
@@ -245,20 +245,23 @@ function openEditor(inst) {
   const name = el('input', { type: 'text', spellcheck: 'false', maxlength: '40', placeholder: '实例名称', value: isNew ? '' : inst.name });
   const port = el('input', {
     type: 'number',
-    class: 'w-md',
     min: '1',
     max: '65535',
     placeholder: '留空 = 自动挑',
     value: isNew ? '' : String(inst.port),
   });
-  const sel = el('select');
-  for (const p of [{ id: '', name: '（未选择 —— 空库）' }, ...(S.emby.homePlugins || [])]) {
-    const o = el('option', { value: p.id, text: p.id ? `${p.name}（${p.id}）${p.enabled ? '' : ' · 未启用'}` : p.name });
-    if (p.id === ((isNew ? '' : inst.homePlugin) || '')) o.selected = true;
+  /* 首页插件 = 这个实例客户端上的媒体库（所选插件的全部行）；「空库」= 一行都不给。
+   * 清单里没有当前值（插件被卸了 / 清单没取到）也要把它列出来，否则下拉会静默跳到第一项。 */
+  const sel = el('select', { title: '客户端上的媒体库 = 所选插件的全部行；空库 = 一行都不给' });
+  const opts = [{ id: '', name: '空库' }, ...(S.emby.homePlugins || [])];
+  const cur = (isNew ? '' : inst.homePlugin) || '';
+  if (cur && !opts.some((p) => p.id === cur)) opts.push({ id: cur, name: cur, missing: true });
+  for (const p of opts) {
+    const note = p.missing ? '（插件不在了）' : p.id ? `${p.enabled ? '' : ' · 未启用'}${p.rowCount === undefined ? '' : p.rowCount + ' 行'}` : '';
+    const o = el('option', { value: p.id, text: p.id ? `${p.name}（${p.id}）${note}` : p.name });
+    if (p.id === cur) o.selected = true;
     sel.append(o);
   }
-  const enabled = el('input', { type: 'checkbox' });
-  enabled.checked = isNew ? true : !!inst.enabled;
   const picker = metaDomainPicker(inst);
   const tip = el('div', { class: 'note' });
 
@@ -267,9 +270,8 @@ function openEditor(inst) {
     body: [
       el('div', { class: 'field' }, el('label', { text: '实例名（客户端「服务器名」）' }), name),
       el('div', { class: 'field' }, el('label', { text: '端口' }), port),
-      el('div', { class: 'field' }, el('label', { text: '首页插件（= 这个实例的媒体库）' }), sel),
-      el('div', { class: 'field' }, el('label', { text: '接受的元数据域内容' }), picker.row),
-      el('label', { class: 'chk' }, enabled, '启用（启用才会在这个端口上监听）'),
+      el('div', { class: 'field' }, el('label', { text: '首页' }), sel),
+      el('div', { class: 'field' }, el('label', { text: '搜索域' }), picker.row),
       tip,
     ],
     actions: [
@@ -280,7 +282,6 @@ function openEditor(inst) {
         onclick: async () => {
           const body = {
             name: name.value.trim(),
-            enabled: enabled.checked,
             homePlugin: sel.value,
           };
           /* 搜索域：有可选项时才写（一个域都没装时保持"缺席=全部"）；全不勾 = `[]`（一个都不搜） */
@@ -310,9 +311,7 @@ function openEditor(inst) {
 async function removeInstance(inst) {
   const go = await confirmModal({
     title: '删除实例',
-    text:
-      `删除「${inst.name}」（端口 ${inst.port}）？` +
-      `它自己的 ${inst.accountCount} 个账号与全部观看进度**一并删掉**，删完找不回来；那些客户端要重新建账号。`,
+    text: `删除「${inst.name}」（:${inst.port}）？${inst.accountCount} 个账号与全部观看进度一并删掉，找不回来。`,
     okLabel: '删除',
     primary: false,
   });
@@ -325,15 +324,3 @@ async function removeInstance(inst) {
   }
 }
 
-/* ------------------------------------------------------------------ 小工具 */
-
-/** 复制到剪贴板。**http 直连局域网 IP 时剪贴板 API 不可用**（非安全上下文）——
- *  那种情况如实提示手动复制，不假装成功。 */
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast('已复制：' + text);
-  } catch {
-    toast('这个浏览器不让直接复制，请手动选中：' + text, true);
-  }
-}
