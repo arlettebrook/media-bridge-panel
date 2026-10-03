@@ -91,6 +91,16 @@ const aggHandlers = {
   },
 
   /**
+   * 模板清单（id + name 摘要）：输出插件让用户**直接挑模板**，
+   * 不必先装元数据插件、按域走一遍（模板自带站点与参数）。
+   */
+  async templates() {
+    const api = require('../agg/api');
+    const list = api.templates.list().map((t) => ({ id: t.id, name: t.name }));
+    return ok({ templates: list });
+  },
+
+  /**
    * 聚合搜索：参数与 HTTP `POST /api/agg/search` 同义
    * { domain 或 tpl, wd, page, year, season, episode, minScore, maxItems, keys }
    * 编排与那条路由保持同一形状（作用域 → 站点 → 并发搜+打分）。

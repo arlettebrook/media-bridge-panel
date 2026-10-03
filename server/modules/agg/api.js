@@ -417,10 +417,10 @@ async function play(opts = {}) {
   const ref = String(opts.ref || '').trim();
   if (!ref) return fail('BAD_INPUT', 400, '请提供 ref（版本 Id 里那段，由源插件编）');
 
-  /* 域 → 模板：只借它那一档超时（播放有**自己那一档** `playTimeoutSec`，见 service.playTimeoutMs）。
+  /* 作用域（tpl 或 domain）：只借它那一档超时（播放有**自己那一档** `playTimeoutSec`，见 service.playTimeoutMs）。
    * **站点与线路不再经过这里** ——
    * `ref` 里是什么、去哪儿取，都是插件的事（见 docs/plugin-migration-plan.md 批次 7）。 */
-  const dom = ensureDomain(opts.domain);
+  const dom = scopeOf(opts);
   if (dom.error) return dom.error;
   return playEpisode({
     ref,

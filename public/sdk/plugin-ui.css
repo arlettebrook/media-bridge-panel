@@ -11,7 +11,7 @@
  * style.css 不叠层 —— 不叠层的规则天然压得过叠层的，最终以 style.css 为准。
  */
 @import url("/vendor/daisyui.css") layer(theme);
-@import url("/style.css");
+@import url("/style.css?v=1.7.6");
 
 /*
  * iframe 内 body 承担面板「.view」的角色（宿主给插件页的容器是 .view.nopad，

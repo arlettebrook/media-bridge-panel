@@ -653,7 +653,12 @@ pre.json { background: var(--code-bg); border: 1px solid var(--line); border-rad
 
 /* ---------------- 当前源 / 聚合搜索 ---------------- */
 .row-input { display: flex; gap: 8px; align-items: center; }
-.row-input input { flex: 1; min-width: 0; }
+/* flex-basis 不能写 0%：input 作为 replaced element 成为 flex item 时，basis 0% 会触发
+ * Chromium 缺陷 —— 交叉轴的 height 被整个忽略（连 inline style 都无效），输入框塌成 21px
+ * （实测 Electron 39 / Chrome 142；对照：脱离 flex 或 flex:none 立即恢复 40px）。
+ * 用 `1 1 auto`：宽度照样吃剩余空间（全局 width:100% 兜底、min-width:0 允许收缩），高度规则恢复生效。
+ * 桌面 34px；860px 媒体查询的 40px 位置更后，照常接管移动端 */
+.row-input input { flex: 1 1 auto; min-width: 0; height: 34px; }
 .agg-list { display: flex; flex-direction: column; gap: 8px; }
 .agg-item {
   display: flex; gap: 12px; align-items: flex-start;

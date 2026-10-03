@@ -602,13 +602,13 @@ async function relayBytes(req, res, opts) {
 /* --------------------------------------------------------------- agg 壳 */
 
 /**
- * 按 `{domain, ref}` 取地址并落到响应上。
+ * 按 `{tpl 或 domain, ref}` 取地址并落到响应上。
  *
  * `clientHost` = 客户端访问面板用的主机名（请求的 `Host` 头）：本地部署的实例回的是回环
  * 地址，源插件拿它换成客户端够得着的那台机器（与 emby 层同一口径）。
  */
-async function serveByRef(req, res, { domain, ref, playVia, clientHost }) {
-  const out = await api.play({ domain, ref, clientHost });
+async function serveByRef(req, res, { domain, tpl, ref, playVia, clientHost }) {
+  const out = await api.play({ domain, tpl, ref, clientHost });
   if (!out.ok) {
     const e = out.error || {};
     return sendError(res, e.status || 502, e.message || '取播放地址失败');
@@ -620,7 +620,7 @@ async function serveByRef(req, res, { domain, ref, playVia, clientHost }) {
     return sendError(res, 501, '这条线路给的不是可直连地址（push:// 之类），暂不支持');
   }
   const headers = play.header || {};
-  const label = `${String(playVia || 'client')}·${String(domain || '')}/${String(ref || '').slice(0, 12)}…`;
+  const label = `${String(playVia || 'client')}·${String(tpl || domain || '')}/${String(ref || '').slice(0, 12)}…`;
   const mode = planStream({ url, playVia });
 
   /* ⚠️ `Location` 里的非 ASCII 必须先编码（同 emby 层 `serveStream`）：HTTP 头只认 ASCII，

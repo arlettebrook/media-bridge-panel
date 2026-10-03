@@ -12,7 +12,7 @@
  *   POST /api/agg/detail  取某部影视的详情：**内部含搜索**（或 `source+site+vodId` 快路径），
  *                         把站源协议（`$$$` / `#` / `$`）拆成「线路 → 选集」，需要时可定位某一集
  *                         （作用域同上：`tpl` 或 `domain` 二选一）
- *   POST /api/agg/play    按 `{domain, ref}` 取播放地址（`ref` 由源插件编，面板不解释它）
+ *   POST /api/agg/play    按 `{tpl?|domain?, ref}` 取播放地址（`ref` 由源插件编，面板不解释它）
  *
  * 源清单与站点清单都**来自源插件**（`站点清单` 动作，见 `agg/source-bridge.js`）：
  * 面板这边不再有"聚合源配置"，也不再自己去打每个源的 `/config`。
@@ -24,6 +24,7 @@
  */
 const { sendJson, sendError, readBody } = require('../../core/http');
 const auth = require('../../core/auth');
+const settings = require('../../core/settings');
 const api = require('./api');
 const stream = require('./stream');
 const templates = require('./templates');
@@ -213,7 +214,7 @@ module.exports = function routes(r) {
   /**
    * POST /api/agg/detail —— 取影视详情（**内部含搜索**）
    *
-   * body：**domain（元数据域，必填 —— 决定用哪套模板）** / name（影视名，必填）/ year（消歧）/
+   * body：**tpl 或 domain（作用域二选一，决定用哪套模板）** / name（影视名，必填）/ year（消歧）/
    *       season + episode（定位某一集）/
    *       keys（限定站点，`{source,key}[]`）/ `source`+`site`+`vodId`（快路径：已知绑定就直查，跳过搜索）/
    *       minScore + maxItems（打分阈值与"最多留几条"，不传读设置）
@@ -231,7 +232,7 @@ module.exports = function routes(r) {
   /**
    * POST /api/agg/play —— 取播放地址
    *
-   * body：**domain（元数据域，必填 —— 决定用哪套模板）** / **ref（版本 Id 里那段，必填）** /
+   * body：**tpl 或 domain（作用域二选一，决定用哪套模板）** / **ref（版本 Id 里那段，必填）** /
    *       clientHost（客户端访问用的主机名，可选 —— emby 层会传）
    * 成功 200 `{ok:true, play:{urls, header, parse, nonHttp}}`；
    * 失败按原因给码（BAD_REQUEST 400 / NO_PLAY_URL 502 / 上游的码照搬 / …）。
@@ -263,15 +264,21 @@ module.exports = function routes(r) {
     const seg = String(query.get('seg') || '').trim();
     if (seg) return stream.servePart(req, res, { seg, sid: String(query.get('sid') || '').trim() });
 
-    if (!auth.verifyIngressToken(auth.ingressTokenOf(req, query))) {
+    /* 面板设置关了外部令牌就免验（默认开）；关了之后这条流入口人人可打 */
+    if (settings.read('panel').ingressTokenRequired !== false
+      && !auth.verifyIngressToken(auth.ingressTokenOf(req, query))) {
       return sendError(res, 401, '这条流入口需要外部访问令牌（在插件设置页复制；或先登录面板）');
     }
     const domain = String(query.get('domain') || '').trim();
+    const tpl = String(query.get('tpl') || '').trim();
     const ref = String(query.get('ref') || '').trim();
-    if (!domain || !ref) return sendError(res, 400, '请提供 domain 与 ref');
+    if (!ref || (!domain && !tpl)) {
+      return sendError(res, 400, '请提供 ref，以及 tpl 或 domain');
+    }
     /* clientHost = 客户端访问面板用的主机名（本地实例回的是回环地址，源插件拿它换成客户端够得着的） */
     return stream.serveByRef(req, res, {
       domain,
+      tpl,
       ref,
       playVia: String(query.get('playVia') || 'client').trim(),
       clientHost: req.headers.host || '',
