@@ -1,0 +1,60 @@
+/*
+ * 插件 UI 样式 —— 唯一稳定入口
+ *
+ * 插件只引用这一个文件：
+ *     <link rel="stylesheet" href="/sdk/plugin-ui.css" />
+ *
+ * 内部用什么实现（daisyUI / 其它）只由这里决定；换技术栈、调顺序、合并文件，
+ * 都只改本文件，插件零改动。
+ *
+ * 级联顺序与面板 index.html 保持一致：daisyUI 的规则全部在 @layer 内，
+ * style.css 不叠层 —— 不叠层的规则天然压得过叠层的，最终以 style.css 为准。
+ */
+@import url("/vendor/daisyui.css") layer(theme);
+@import url("/style.css");
+
+/*
+ * iframe 内 body 承担面板「.view」的角色（宿主给插件页的容器是 .view.nopad，
+ * 留白全部移交到 iframe 内部）。各档 padding 与 style.css 的 .view 完全一致：
+ * 桌面 22/26/48，窄屏 16，手机 12 —— 卡片到边缘的距离才不会和自带页面有出入。
+ * 断点按 iframe 自身宽度判定（= 内容区宽度），与可用空间一致。
+ */
+body {
+  padding: 22px 26px 48px;
+}
+body > :last-child {
+  margin-bottom: 0;
+}
+@media (max-width: 860px) {
+  body { padding: 16px 16px calc(36px + env(safe-area-inset-bottom)); }
+}
+@media (max-width: 480px) {
+  body { padding: 12px 12px calc(32px + env(safe-area-inset-bottom)); }
+}
+
+/*
+ * ≤480px：表格摊成卡片，与面板 .sites-table 同口径。
+ * 窄屏里 4~5 列的表只会被挤成横向滚动条；摊开后每行一张卡、一列一格，格上带列名。
+ * 列名靠单元格的 data-label（app.js 的 labelCols(table) 从表头统一补），
+ * 没有 data-label 的格（通常是操作按钮列）不显示前缀。
+ */
+@media (max-width: 480px) {
+  .table-wrap { overflow-x: visible; }
+  table { min-width: 0; }
+  thead { display: none; }
+  table, tbody, tr, td { display: block; }
+  tbody tr {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 9px 11px;
+    margin-bottom: 10px;
+  }
+  tbody tr:last-child { margin-bottom: 0; }
+  td { border: 0; padding: 3px 0; text-align: left; white-space: normal; }
+  td[data-label]::before {
+    content: attr(data-label) '：';
+    display: block;
+    font-size: 11.5px;
+    color: var(--fg-dim-2);
+  }
+}

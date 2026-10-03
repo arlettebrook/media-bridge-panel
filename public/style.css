@@ -252,9 +252,10 @@ input[type='file']::file-selector-button {
 .row,
 .toolbar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
 /* 行里既有字段（标签一在上、控件在下，比如 55px 高）又有裸按钮（34px）时：让按钮与**控件行**对齐。
- * 居中对齐会把按钮摆在"标签与输入框中间"那个高度上 —— 看着就像没对齐。 */
-.row:has(.fld),
-.toolbar:has(.fld) { align-items: flex-end; }
+ * 居中对齐会把按钮摆在"标签与输入框中间"那个高度上 —— 看着就像没对齐。
+ * `.fld` 与 `.field` 同属"标签在上"结构，一并底对齐（插件设置页的"关键词 + 自检"行用 `.field`）。 */
+.row:has(.fld), .row:has(.field),
+.toolbar:has(.fld), .toolbar:has(.field) { align-items: flex-end; }
 .row > .field,
 .toolbar > .field { flex: 1 1 200px; } /* 弹性宽度 + 自动换行；页面里不再写 min-width */
 /* 控件直接放进行里也行（省一层 wrapper）：同样弹性、同样不撑破。
@@ -758,7 +759,9 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
   select { padding-right: 32px; }
   textarea { height: auto; padding-top: 10px; padding-bottom: 10px; }
   .chk { font-size: 13px; }
-  .chk input { width: 17px; height: 17px; }
+  /* 只限勾选控件：写 `.chk input` 会把"每 [数字框] 小时检查"这类嵌在 .chk 里的数字框
+   * 也压成 17px 高 —— 桌面规则本就按 checkbox/radio 限定，移动端对齐 */
+  .chk input[type='checkbox'], .chk input[type='radio'] { width: 17px; height: 17px; }
 
   .grid.cols-3 { grid-template-columns: 1fr; }
   .grid { gap: 12px; }
