@@ -38,18 +38,32 @@ const bundle = require('./bundle');
 const library = require('./library');
 const updater = require('./updater');
 
-/** 一个插件能不能给"某类型栏目"挂导航入口 —— 有 webui 才行（见 docs/adr/0029 的已定 18） */
+/** 某类型栏目的 webui 入口（见 docs/adr/0046：一个类型一个 UI） */
 const webuiPath = (type, id) => `/api/plugins/${encodeURIComponent(type)}/${encodeURIComponent(id)}/ui/`;
+
+/** 一个包在每个声明了 webui 的类型上的入口：`{source:"/api/plugins/source/<id>/ui/", …}` */
+function webuiPathsOf(x) {
+  const out = {};
+  const map = x.webui || {};
+  for (const role of Object.keys(map)) {
+    if ((x.types || []).includes(role)) out[role] = webuiPath(role, x.id);
+  }
+  return out;
+}
 
 function register(r) {
   r.add('GET', '/api/plugins', (req, res) => {
     const installed = store.list();
-    const states = new Map(host.states().map((s) => [store.sid(s.type, s.id), s]));
+    /* 进程状态按 id 取一份就够（同包各角色行共享 pid/status） */
+    const states = new Map(host.states().map((s) => [s.id, s]));
     const rows = installed.map((x) => {
-      const st = states.get(store.sid(x.type, x.id)) || {};
-      return Object.assign({}, x, st, {
-        webuiPath: x.hasWebui ? webuiPath(x.type, x.id) : '',
-        dir: store.dirOf(x.type, x.id),
+      const st0 = states.get(x.id) || {};
+      const { proc, inflight, ...stateFields } = st0; // 内部字段不外吐
+      return Object.assign({}, x, stateFields, {
+        /* 兼容仍读 type 的旧前端：给第一个类型（无主类型语义，前端已改读 types） */
+        type: (x.types || [])[0] || '',
+        webuiPaths: webuiPathsOf(x),
+        dir: store.dirOf(x.id),
       });
     });
     /* 只有**已装的**：插件不随面板发行（见 docs/adr/0035），"可装的"在 /api/plugins/library */
@@ -69,14 +83,14 @@ function register(r) {
    */
   r.add('POST', '/api/plugins/library/install', async (req, res) => {
     const body = (await readBody(req)) || {};
-    const type = String(body.type || '').trim();
     const id = String(body.id || '').trim();
-    if (!type || !id) return sendError(res, 400, '要指定 type 与 id');
+    if (!id) return sendError(res, 400, '要指定 id');
     let tmp = null;
     try {
+      /* 多类型之后仓库条目以 id 为身份（type 仅作可选校验） */
       const { entry, buf } = await library.install({
-        type,
         id,
+        type: String(body.type || '').trim(),
         version: String(body.version || '').trim(),
       });
       tmp = bundle.extractToTemp(buf, entry.md5);
@@ -85,9 +99,9 @@ function register(r) {
         md5: entry.md5,
         enable: body.enable === undefined ? undefined : body.enable === true,
       });
-      console.log(`  ✔ 插件库：已安装 ${out.entry.type}/${out.entry.id} v${out.entry.version}（${out.entry.files} 个文件，${Math.round(out.entry.bytes / 1024)}KB）`);
+      console.log(`  ✔ 插件库：已安装 ${out.entry.id} v${out.entry.version}（${(out.entry.types || []).join('/')}，${out.entry.files} 个文件，${Math.round(out.entry.bytes / 1024)}KB）`);
       return sendJson(res, 200, {
-        plugin: Object.assign({}, out.entry, host.stateOf(out.entry.type, out.entry.id)),
+        plugin: Object.assign({}, out.entry, host.stateOf(out.entry.types[0], out.entry.id)),
         restarted: !!(out.previous && out.entry.enabled),
       });
     } catch (e) {
@@ -109,9 +123,9 @@ function register(r) {
         md5: String(body.md5 || ''),
         enable: body.enable === undefined ? undefined : body.enable === true,
       });
-      console.log(`  ✔ 插件已安装 ${out.entry.type}/${out.entry.id} v${out.entry.version}（${out.entry.files} 个文件，${Math.round(out.entry.bytes / 1024)}KB）`);
+      console.log(`  ✔ 插件已安装 ${out.entry.id} v${out.entry.version}（${(out.entry.types || []).join('/')}，${out.entry.files} 个文件，${Math.round(out.entry.bytes / 1024)}KB）`);
       return sendJson(res, 200, {
-        plugin: Object.assign({}, out.entry, host.stateOf(out.entry.type, out.entry.id)),
+        plugin: Object.assign({}, out.entry, host.stateOf(out.entry.types[0], out.entry.id)),
         restarted: !!(out.previous && out.entry.enabled),
       });
     } catch (e) {
@@ -198,13 +212,15 @@ function register(r) {
 
   r.add('GET', '/api/plugins/:type/:id/ui/*rest', (req, res, { params }) => {
     const entry = store.get(params.type, params.id);
-    if (!entry || !entry.hasWebui) return sendError(res, 404, '这个插件没有 webui');
-    /* `/ui/` 之后的部分**相对 webui 入口所在目录**解析（入口是 `ui/index.html` 时，
-     * `/ui/x.js` 就是 `ui/x.js`）—— 这样页面里写 `./x.js` 与写 `/ui/x.js` 是一回事 */
+    /* 这个角色自己的 webui 入口（多类型包每个类型一个，见 docs/adr/0046） */
+    const webuiEntry = entry && (entry.webui || {})[params.type];
+    if (!webuiEntry) return sendError(res, 404, '这个插件的这个类型没有 webui');
+    /* `/ui/` 之后的部分**相对该角色 webui 入口所在目录**解析（入口是 `source/ui/index.html` 时，
+     * `/ui/x.js` 就是 `source/ui/x.js`）—— 页面里写 `./x.js` 与写绝对路径是一回事。 */
     const rel = String(params.rest || '');
-    const base = path.resolve(store.dirOf(params.type, params.id));
-    const entryDir = path.dirname(entry.webui || 'index.html');
-    const target = rel ? path.join(entryDir, rel) : entry.webui;
+    const base = path.resolve(store.dirOf(entry.id));
+    const entryDir = path.dirname(webuiEntry);
+    const target = rel ? path.join(entryDir, rel) : webuiEntry;
     const dest = path.resolve(base, target);
     if (dest !== base && !dest.startsWith(base + path.sep)) return sendError(res, 400, '路径不合法');
     const file = fs.existsSync(dest) && fs.statSync(dest).isDirectory() ? path.join(dest, 'index.html') : dest;
@@ -233,11 +249,15 @@ function register(r) {
      * 生成"外部程序回头访问面板"的默认地址（它自己不知道面板在哪）。 */
     /* query 必须在这里转成**普通对象**：路由器给的是 URLSearchParams，直接丢进
      * IPC 的 JSON 序列化会变成 `{}`（插件侧 args.query.pluginId 全是 undefined）。
-     * 顺手剥掉 `token`：网关已验过票，凭证不该再下发给插件子进程。 */
+     * 顺手剥掉 `token`：网关已验过票，凭证不该再下发给插件子进程。
+     * ⚠️ 例外：**public 路径**（如 fwrex 生成 widget.js）—— 那里的 token 不是
+     * 进门凭证，而是用户显式挂在模块 URL 上、让插件验过后注入生成代码的；
+     * 剥掉它，"模块地址携带令牌"就无从生效。token 路径照旧剥除。 */
+    const ingressHit = contract.ingressMatch(entry.ingress, 'api/' + String(params.rest || ''));
     const queryOut = {};
     if (query && typeof query.forEach === 'function') {
       query.forEach((v, k) => {
-        if (k !== 'token') queryOut[k] = v;
+        if (k !== 'token' || ingressHit === 'public') queryOut[k] = v;
       });
     }
     const out = await host.call(
@@ -245,6 +265,8 @@ function register(r) {
       params.id,
       'http',
       {
+        /* role 随转发消息带给插件：多类型包的 `http` 动作按角色进各自的处理器 */
+        role: params.type,
         method: req.method,
         path: '/' + String(params.rest || ''),
         query: queryOut,

@@ -55,10 +55,6 @@ module.exports = {
        * `enabled: false` 退回"单连接、Range 原样透传"（排查与对比用）。
        * 源插件也可以在 `play` 返回里带 `threads` / `chunkKB` 覆盖这一组（那一路优先）。 */
       streamRelay: { enabled: true, threads: 16, chunkKB: 512 },
-      /* 外部访问令牌**总开关**（校验点就两处：plugin/ingress.js 的 token 入口、
-       * agg/routes.js 的外部拉流）。默认开：关掉后任何能访问面板端口的人都能读聚合数据、
-       * 起播拉流 —— 只在自己可信的网络里关。 */
-      ingressTokenRequired: true,
     }),
     fields: [
       { key: 'port', label: '面板端口', type: 'number', min: 1, max: 65535 },
@@ -72,7 +68,6 @@ module.exports = {
       { key: 'streamRelay.enabled', label: '中继分块并发', type: 'boolean', hint: '勾上：按块切、多路并发发有界 Range（默认）。关掉退回单连接原样透传，用于对比排查' },
       { key: 'streamRelay.threads', label: '中继并发路数', type: 'number', min: 1, max: 32, hint: '同时在飞的有界 Range 请求数（默认 16，对齐猫爪引擎网盘档）' },
       { key: 'streamRelay.chunkKB', label: '中继分块 KB', type: 'number', min: 64, max: 8192, hint: '每块大小（默认 512KB）' },
-      { key: 'ingressTokenRequired', label: '外部访问令牌', type: 'boolean', hint: '关掉后插件入口与外部拉流免令牌，任何能访问面板的人都能用（只在可信网络关）' },
     ],
     validate: (o) => {
       if (!(Number(o.port) >= 1 && Number(o.port) <= 65535)) return 'port 取值 1~65535';

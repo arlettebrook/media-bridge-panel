@@ -15,7 +15,8 @@ module.exports = {
   PUBLIC_DIR: path.join(ROOT, 'public'),
   DATA_DIR,
   SETTINGS_DIR: path.join(DATA_DIR, 'settings'),
-  /** 插件宿主（见 docs/adr/0028）：`plugins/<类型>/<id>/` —— 装在这下面的插件包 + 它自己的 data/。
+  /** 插件宿主（见 docs/adr/0028；多类型后拍平，见 docs/adr/0046）：`plugins/<id>/` ——
+   * 一个包一个目录（可同时声明多个类型）+ 它自己的 data/。
    * 源实例（猫源包与它的运行目录）现在归**源插件**自己管，就在那个 data/ 里。 */
   PLUGINS_DIR: path.join(DATA_DIR, 'plugins'),
   /** 模板：一份一个文件（站点集合 + 打分过滤参数 + 超时与并发，见 docs/adr/0033）。 */

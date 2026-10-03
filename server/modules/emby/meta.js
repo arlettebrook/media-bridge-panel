@@ -60,7 +60,7 @@ function normLinks(v) {
 function syncProviders() {
   const entries = store
     .list()
-    .filter((x) => x && x.type === 'metadata')
+    .filter((x) => x && Array.isArray(x.types) && x.types.includes('metadata'))
     .map((x) => ({
       id: String(x.domain || '').trim(),
       prefix: String(x.domain || '').trim(),

@@ -65,11 +65,13 @@ export function parsePluginUiPage(page) {
   return null;
 }
 
-/** 这一栏里有哪些子项：**启用中且带 webui** 的插件，一个一行 */
+/** 这一栏里有哪些子项：**启用中、声明了该类型、且该类型带 webui** 的包，一个一行。
+ * 多类型包会同时出现在多栏（见 docs/adr/0046：一个类型一个 UI）。 */
 function pluginUiPages(type) {
   const list = (S.plugins && S.plugins.plugins) || [];
   return list
-    .filter((p) => p && p.type === type && p.enabled && p.hasWebui)
+    .filter((p) => p && p.enabled && Array.isArray(p.types) && p.types.includes(type))
+    .filter((p) => p.webuiPaths && p.webuiPaths[type])
     .map((p) => [PLUGIN_UI_PREFIX + type + '-' + p.id, p.name || p.id]);
 }
 

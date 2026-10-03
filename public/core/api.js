@@ -24,6 +24,12 @@ export async function api(path, { method = 'GET', body = null } = {}) {
     onUnauthorized((data && data.error) || '需要登录面板');
     throw new Error('需要登录面板');
   }
-  if (!res.ok) throw new Error((data && data.error) || 'HTTP ' + res.status);
+  if (!res.ok) {
+    const err = new Error((data && data.error) || 'HTTP ' + res.status);
+    /* 业务码一并带出：如 503 MIGRATION_REQUIRED（启动迁移向导用，见 core/migration.js） */
+    err.code = (data && data.code) || '';
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }

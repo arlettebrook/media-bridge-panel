@@ -24,8 +24,13 @@ const LIBRARY_REPO = String(process.env.PLUGIN_REPO || 'dlushu/media-bridge-plug
 /** 仓库里的清单文件名（约定，见 docs/plugin-contract.md 第七节） */
 const INDEX_NAME = 'index.json';
 
-/** 清单支持的结构版本：对不上就如实说"这份清单不是这个面板能读的" */
-const SCHEMA = 1;
+/** 清单支持的结构版本：v2 起条目用 types 数组（多类型，见 docs/adr/0046） */
+const SCHEMA = 2;
+/** 归一化一条清单的类型字段：v2 types 数组；兼容仍带单 type 的旧镜像 */
+function typesOf(x) {
+  if (Array.isArray(x.types)) return x.types.map((t) => String(t || '').trim()).filter(Boolean);
+  return x.type ? [String(x.type).trim()] : [];
+}
 
 const CHECK_TTL_MS = 60 * 1000;
 
@@ -80,10 +85,15 @@ let cache = { at: 0, value: null };
  */
 function checkEntry(x) {
   if (!x || typeof x !== 'object') return '不是一个对象';
-  const type = String(x.type || '').trim();
-  if (!contract.TYPES.includes(type)) return `type 不是 ${contract.TYPES.join(' / ')}：「${type || '(空)'}」`;
+  const types = typesOf(x);
+  if (!types.length) return `缺 types（${contract.TYPES.join(' / ')} 的数组）`;
+  for (const t of types) {
+    if (!contract.TYPES.includes(t)) return `types 里有不认识的类型：「${t}」`;
+  }
+  if (new Set(types).size !== types.length) return `types 有重复：${types.join(' / ')}`;
   const id = String(x.id || '').trim();
   if (!contract.ID_RE.test(id)) return `id 不合法：「${id || '(空)'}」`;
+  if (types.includes('metadata') && !String(x.domain || '').trim()) return 'types 含 metadata 时缺 domain';
   if (!String(x.name || '').trim()) return '缺 name';
   if (!String(x.version || '').trim()) return '缺 version';
   if (!String(x.path || '').trim()) return '缺 path（包在仓库里的相对路径）';
@@ -114,8 +124,12 @@ async function fetchIndex({ force = false } = {}) {
   const bad = [];
   for (const x of raw0.plugins) {
     const why = checkEntry(x);
-    if (why) bad.push({ id: (x && x.id) || '', type: (x && x.type) || '', reason: why });
-    else plugins.push(x);
+    if (why) bad.push({ id: (x && x.id) || '', types: typesOf(x), reason: why });
+    else {
+      /* 归一化：v2 条目补一个 type=types[0] 给仍读单值的地方（无主类型语义） */
+      const types = typesOf(x);
+      plugins.push(Object.assign({}, x, { types, type: types[0] }));
+    }
   }
   const value = { generatedAt: String(raw0.generatedAt || ''), plugins, bad };
   cache = { at: now, value };
@@ -146,9 +160,10 @@ async function index({ force = false } = {}) {
   } catch (e) {
     return emptyShape((e && e.message) || String(e));
   }
-  const installed = new Map(store.list().map((x) => [store.sid(x.type, x.id), x]));
+  /* 已装状态按 id 标注（身份就是 id；同 id 即同包） */
+  const installed = new Map(store.list().map((x) => [x.id, x]));
   const plugins = doc.plugins.map((x) => {
-    const cur = installed.get(store.sid(x.type, x.id)) || null;
+    const cur = installed.get(x.id) || null;
     return Object.assign({}, x, {
       installed: !!cur,
       installedVersion: cur ? String(cur.version || '') : '',
@@ -161,12 +176,15 @@ async function index({ force = false } = {}) {
   return Object.assign(emptyShape(null, { generatedAt: doc.generatedAt }), { plugins, bad: doc.bad });
 }
 
-/** 在清单里找一条（支持点名版本；不点名 = 用清单里的那个版本）。找不到回 `null` */
-async function find(type, id, version = '') {
+/** 在清单里按 id 找一条（type 给了就顺带校验它在 types 里；支持点名版本）。找不到回 null */
+async function find(id, { type = '', version = '' } = {}) {
   const doc = await fetchIndex({});
   return (
     doc.plugins.find(
-      (x) => String(x.type) === String(type) && String(x.id) === String(id) && (!version || String(x.version) === String(version))
+      (x) =>
+        String(x.id) === String(id) &&
+        (!type || (x.types || []).includes(String(type))) &&
+        (!version || String(x.version) === String(version))
     ) || null
   );
 }
@@ -187,11 +205,11 @@ async function download(entry) {
  * 解包 / 校验 / 安装由调用方走统一的 `updater.replaceInstalled`（与手动上传同一条路），
  * 本函数只负责"从仓库拿字节"，不碰插件目录 —— 临时目录的清理也归调用方。
  */
-async function install({ type, id, version = '' }) {
-  const entry = await find(type, id, version);
-  if (!entry) throw new Error(`插件库里没有 ${type}/${id}${version ? '@' + version : ''}`);
+async function install({ type = '', id, version = '' }) {
+  const entry = await find(id, { type, version });
+  if (!entry) throw new Error(`插件库里没有 ${id}${version ? '@' + version : ''}`);
   const { buf, url } = await download(entry);
-  console.log(`  · 插件库：下载 ${entry.type}/${entry.id} v${entry.version} ← ${url}（${Math.round(buf.length / 1024)}KB）`);
+  console.log(`  · 插件库：下载 ${entry.id} v${entry.version}（${(entry.types || []).join('/')}）← ${url}（${Math.round(buf.length / 1024)}KB）`);
   return { entry, buf };
 }
 

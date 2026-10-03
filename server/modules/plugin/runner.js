@@ -7,7 +7,7 @@
  * 这个文件做三件事：切到插件目录、加载它的入口、把宿主的消息分发给它的动作。
  * 面板与插件之间的协议（管道，JSON 消息）：
  *
- *   宿主 → 插件   `{ id, action, args }`
+ *   宿主 → 插件   `{ id, role?, action, args }`（多类型包按 role 在分组 actions 里分发，见 adr/0046）
  *   插件 → 宿主   `{ id, ok: true, value }` / `{ id, ok: false, error: { code, message } }`
  *   插件 → 宿主   `{ type: 'ready', actions: [...] }`（加载完成后发一次）
  *   插件 → 宿主   `{ type: 'fatal', error }`（入口有问题，装不起来）
@@ -59,16 +59,50 @@ const actions = (mod && mod.actions) || null;
 if (!actions || typeof actions !== 'object' || Array.isArray(actions)) {
   fatal('入口必须导出 `module.exports = { actions: { … } }`');
 }
+/**
+ * 动作表有两种形状（见 docs/adr/0046）：
+ *   · 单类型包：扁平 `{ 动作名: fn }`
+ *   · 多类型包：按角色分组 `{ source: { 动作名: fn }, home: { … } }`
+ * 同一个 actions 对象允许只有一层（全扁平）或全是分组；分组内必须都是函数。
+ */
+const roleActions = {};
+const flatActions = {};
 for (const [name, fn] of Object.entries(actions)) {
-  if (typeof fn !== 'function') fatal(`动作 ${name} 不是函数`);
+  if (fn && typeof fn === 'object' && !Array.isArray(fn)) {
+    for (const [an, afn] of Object.entries(fn)) {
+      if (typeof afn !== 'function') fatal(`分组动作 ${name}.${an} 不是函数`);
+    }
+    roleActions[name] = fn;
+  } else if (typeof fn === 'function') {
+    flatActions[name] = fn;
+  } else {
+    fatal(`动作 ${name} 既不是函数也不是角色分组`);
+  }
 }
 
+/** 宿主消息带的 role → 处理器；没给 role / 没匹配到分组时回退到扁平表 */
+function resolveFn(role, action) {
+  if (role && roleActions[role] && typeof roleActions[role][action] === 'function') return roleActions[role][action];
+  return flatActions[action] || null;
+}
+
+/** ready 时报给宿主的动作清单（分组的写成 `角色/动作`，管理页原样显示） */
+const actionNames = [
+  ...Object.keys(flatActions),
+  ...Object.entries(roleActions).flatMap(([role, map]) => Object.keys(map).map((a) => `${role}/${a}`)),
+];
+
 /** 交给插件的上下文：只有它自己的身份、数据目录与日志口 */
+const types = String(process.env.MBP_PLUGIN_TYPES || process.env.MBP_PLUGIN_TYPE || '')
+  .split(',')
+  .map((x) => x.trim())
+  .filter(Boolean);
 const ctx = {
-  type: String(process.env.MBP_PLUGIN_TYPE || ''),
+  types,
+  type: types[0] || String(process.env.MBP_PLUGIN_TYPE || ''),
   id: String(process.env.MBP_PLUGIN_ID || ''),
   dataDir: path.join(dir, 'data'),
-  /** 打日志：走 stdout → 宿主转发进面板日志（带 `[plugin:<类型>/<id>]` 前缀） */
+  /** 打日志：走 stdout → 宿主转发进面板日志（带 `[plugin:<id>]` 前缀） */
   log: (...args) => console.log(...args),
 };
 
@@ -129,12 +163,16 @@ process.on('message', async (msg) => {
   if (msg.type === 'hostCallReply') return;
   if (!msg.id) return;
   const id = msg.id;
-  const fn = actions[msg.action];
+  /* role 路由（见 docs/adr/0046）：多类型包按消息带的角色进分组，单类型包走扁平表 */
+  const fn = resolveFn(String(msg.role || ''), msg.action);
   if (typeof fn !== 'function') {
     return send({
       id,
       ok: false,
-      error: { code: 'NO_ACTION', message: `这个插件没有实现动作「${msg.action}」（它实现的是：${Object.keys(actions).join(' / ')}）` },
+      error: {
+        code: 'NO_ACTION',
+        message: `这个插件没有实现动作「${msg.role ? msg.role + '/' : ''}${msg.action}」（它实现的是：${actionNames.join(' / ')}）`,
+      },
     });
   }
   const t0 = Date.now();
@@ -150,4 +188,4 @@ process.on('message', async (msg) => {
 /* 插件自己抛的异步错误：如实记一行，**不让进程退出**（退出会把没答完的请求全丢掉） */
 process.on('unhandledRejection', (e) => console.error('[插件] 未处理的 Promise 拒绝：' + ((e && e.stack) || e)));
 
-send({ type: 'ready', actions: Object.keys(actions) });
+send({ type: 'ready', actions: actionNames });

@@ -611,42 +611,7 @@ function cacheCard() {
   );
 }
 
-/* ------------------------------------------------------------------ 访问控制 */
-
-/**
- * 「访问控制」卡：外部访问令牌总开关（校验点两处：plugin/ingress.js 的 token 入口、
- * agg/routes.js 的 /api/agg/stream；默认开）。
- */
-function accessCard() {
-  const p = S.panel.settings || {};
-  const on = el('input', { type: 'checkbox', checked: p.ingressTokenRequired !== false });
-  const save = el('button', { class: 'btn primary', text: '保存' });
-  save.addEventListener('click', async () => {
-    save.disabled = true;
-    try {
-      const r = await api('/api/modules/panel/settings', {
-        method: 'PUT',
-        body: { settings: { ingressTokenRequired: on.checked } },
-      });
-      S.panel.settings = r.settings;
-      toast(on.checked ? '已保存：外部访问需要令牌' : '已保存：外部访问免令牌');
-    } catch (e) {
-      toast('保存失败：' + e.message, true);
-    } finally {
-      save.disabled = false;
-    }
-  });
-  return el(
-    'div',
-    { class: 'card' },
-    el('h3', { text: '访问控制' }),
-    el('p', { class: 'note', text: '关掉后插件入口与外部拉流免令牌，任何能访问面板的人都能用，只在可信网络关。' }),
-    el('div', { class: 'row' }, el('label', { class: 'chk' }, on, '外部访问令牌')),
-    el('div', { class: 'row btn-row' }, save)
-  );
-}
-
-/** 设置要异步读一次；三张卡都直接挂在 `.view` 下 —— 卡片间距才是同一条 */
+/** 设置要异步读一次；卡片都直接挂在 `.view` 下 —— 卡片间距才是同一条 */
 export async function renderPanelSettings(v) {
   try {
     if (!S.panel.settings) S.panel.settings = (await api('/api/modules/panel/settings')).settings;
@@ -655,8 +620,8 @@ export async function renderPanelSettings(v) {
     return;
   }
   /* ⚠️ 几张卡**不许再套一层 holder**：`.card + .card` 那条间距只认相邻的卡片，
-   * 中间夹一层 div 的话，那两张与其它卡的相对距离就与别处不一样（用户实测"三个卡片距离不一样"）。 */
-  v.append(speedTestCard(), accessCard(), cacheCard(), relayCard());
+   * 中间夹一层 div 的话，卡片间距就与别处不一样（用户实测"三个卡片距离不一样"）。 */
+  v.append(speedTestCard(), cacheCard(), relayCard());
 }
 
 /* ------------------------------------------------------------------ 播放中继设置 */

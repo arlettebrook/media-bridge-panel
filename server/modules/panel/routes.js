@@ -274,7 +274,7 @@ module.exports = function routes(r) {
   r.add('DELETE', '/api/panel/cache/all', (req, res) => {
     cachedb.clearAll();
     const pc = pluginStore.clearCaches();
-    const which = pc.plugins.map((x) => `${x.type}/${x.id}`).join(' / ') || '（没有可清的）';
+    const which = pc.plugins.map((x) => `${(x.types || []).join('/')}/${x.id}`).join(' / ') || '（没有可清的）';
     console.log(`  ✔ 全部缓存已清空（面板：lines.db 线路结果、cache.db 图片索引；插件落盘缓存：${which}）`);
     return sendJson(res, 200, Object.assign({ plugins: pc }, cacheView()));
   });

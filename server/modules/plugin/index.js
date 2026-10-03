@@ -6,7 +6,7 @@
  * docs/adr/0029（走管道 / 动作名 / 能力申报）。
  *
  *   · 对外：`/api/plugins/*`（管理面；都在 `/api/` 下 ⇒ **天然受门禁**）
- *   · 数据：`data/plugins/`（`registry.json` + `<类型>/<插件 id>/`）
+ *   · 数据：`data/plugins/`（`registry.json` + `<插件 id>/`，多类型一包一目录，见 docs/adr/0046）
  *   · 依赖：无（`upstream: null`）—— 插件自己联网、自己读写自己的目录，不经过别的模块
  *
  * 三个钩子给 server.js 用：开机拉起**启用中**的插件、退出时**停掉所有插件**

@@ -53,6 +53,8 @@
 | [0043](0043-line-filter-at-aggregate-output.md) | 线路过滤下沉到聚合层产出处：客户端拿到的就是滤过的那份 | 已采纳（局部取代 0025 的转发口径） |
 | [0044](0044-emby-stream-playvia-relay.md) | Emby 层也接 `proxy` 档：`playVia` 编进版本 Id | 已采纳（延伸 0042） |
 | [0045](0045-relay-chunked-concurrent.md) | 字节中继改分块并发：把开放式 Range 换成有界 Range | 已采纳（改 0042 第 3 条约束的实现） |
+| [0046](0046-plugin-multiple-types.md) | 插件多类型：一个包一个 id，types 平级 | 已采纳（已实现；迁移见 0047） |
+| [0047](0047-data-migration-gate.md) | 数据迁移框架：版本门禁 + 冲突处置向导 + 提交点续跑 | 已采纳（已实现；交互口径 2026-10-04 修订：无冲突静默迁移、有冲突才铺向导） |
 
 ## 新增一条 ADR
 

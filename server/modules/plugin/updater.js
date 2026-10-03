@@ -67,8 +67,9 @@ async function fetchBytes(url, { what, timeoutMs = FETCH_TIMEOUT_MS }) {
 async function check(type, id, { force = false } = {}) {
   const entry = store.get(type, id);
   if (!entry) throw e('NOT_FOUND', `没有这个插件：${type}/${id}`);
-  const sid = store.sid(type, id);
-  const cached = checkCache.get(sid);
+  /* 更新清单是**包级**的（一个 id 一份），缓存按 id 即可 */
+  const cacheKey = entry.id;
+  const cached = checkCache.get(cacheKey);
   if (!force && cached && Date.now() - cached.at < CHECK_TTL_MS) return cached.info;
 
   const updateUrl = String(entry.updateUrl || '').trim();
@@ -100,8 +101,9 @@ async function check(type, id, { force = false } = {}) {
   if (md5 && !/^[0-9a-f]{32}$/.test(md5)) throw e('BAD_MANIFEST', '自更新清单里的 md5 不是 32 位十六进制');
 
   const info = {
-    type,
-    id,
+    type: (entry.types || [])[0] || type,
+    types: (entry.types || []).slice(),
+    id: entry.id,
     updateUrl,
     current: String(entry.version || ''),
     latest,
@@ -111,7 +113,7 @@ async function check(type, id, { force = false } = {}) {
     hasUpdate: compareVersion(latest, entry.version || '0.0.0') > 0,
     checkedAt: new Date().toISOString(),
   };
-  checkCache.set(sid, { at: Date.now(), info });
+  checkCache.set(cacheKey, { at: Date.now(), info });
   return info;
 }
 
@@ -124,12 +126,14 @@ async function checkAll({ force = false } = {}) {
   const entries = store.list().filter((x) => String(x.updateUrl || '').trim());
   const updates = await Promise.all(
     entries.map(async (x) => {
+      const role = (x.types || [])[0] || '';
       try {
-        return Object.assign({ ok: true }, await check(x.type, x.id, { force }));
+        return Object.assign({ ok: true }, await check(role, x.id, { force }));
       } catch (err) {
         return {
           ok: false,
-          type: x.type,
+          type: role,
+          types: (x.types || []).slice(),
           id: x.id,
           current: String(x.version || ''),
           error: (err && err.message) || '检查更新失败',
@@ -152,17 +156,17 @@ async function checkAll({ force = false } = {}) {
  */
 async function replaceInstalled(root, { origin = 'manual', md5 = '', enable } = {}) {
   const m = contract.readManifest(root); // 第二道校验之前先确认清单本身可读
-  const prev = store.get(m.type, m.id);
+  const role = (m.types || [])[0];
+  const prev = store.byId(m.id);
   const wasEnabled = !!(prev && prev.enabled);
   const wantEnabled = enable === undefined ? wasEnabled : !!enable;
 
-  if (prev) await host.stop(m.type, m.id);
+  if (prev) await host.stop(role, m.id);
   const installed = store.installDir(root, { origin, md5, enabled: wantEnabled });
-  /* 版本变了，之前查到的"有没有新版"就不作数了 —— 立刻丢掉缓存，
-   * 否则刚装完的那 60 秒里页面还按旧版本显示"可更新到 vX"（版本已经就是 vX 了）。 */
-  checkCache.delete(store.sid(m.type, m.id));
+  /* 版本变了，之前查到的"有没有新版"就不作数了 —— 立刻丢掉缓存。 */
+  checkCache.delete(m.id);
   let state = null;
-  if (wantEnabled) state = host.start(m.type, m.id).state || null;
+  if (wantEnabled) state = host.start(role, m.id).state || null;
   return { entry: installed, state, previous: prev ? { version: prev.version, enabled: wasEnabled } : null };
 }
 
@@ -188,11 +192,18 @@ async function update(type, id) {
     const buf = await fetchBytes(info.url, { what: `插件包 ${id}-${info.latest}` });
     tmp = bundle.extractToTemp(buf, info.md5);
 
-    /* 身份核对：更新包必须是**同一个插件的新版本**，不能借更新把 (type,id) 换掉；
+    /* 身份核对：更新包必须是**同一个包的新版本** —— id 相同且 **types 集合完全相同**
+     * （多类型之后，借更新把包的类型集合换掉等于换身份，拒绝）；
      * 版本也要与清单声明一致 —— 清单说 v1.0.2、包里却是别的，按篡改拒绝。 */
     const m = contract.readManifest(tmp.root);
-    if (m.type !== type || m.id !== id) {
-      return fail('IDENTITY_MISMATCH', 400, `更新包身份对不上：清单属于 ${type}/${id}，包里是 ${m.type}/${m.id}`);
+    const current0 = store.get(type, id);
+    if (m.id !== id || !current0 || !store.sameTypes(current0.types, m.types)) {
+      return fail(
+        'IDENTITY_MISMATCH',
+        400,
+        `更新包身份对不上：清单属于 ${type}/${id}（${(current0 && current0.types || []).join('/')}），` +
+          `包里是 ${(m.types || []).join('/')}/${m.id}`
+      );
     }
     if (m.version !== info.latest) {
       return fail('VERSION_MISMATCH', 400, `更新包版本与清单不一致：清单 v${info.latest}，包内 v${m.version}`);

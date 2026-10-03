@@ -3,22 +3,18 @@
  * 插件仓库：`data/plugins/` 的目录布局 + 清单读写 + 安装 / 卸载。
  *
  *   data/plugins/
- *     registry.json              清单：只放元数据（id / 类型 / 版本 / 启用 / 来源 / md5），**不放代码**
- *     <类型>/<插件 id>/           包本体（解包后的目录）
- *     <类型>/<插件 id>/data/      插件自己的数据（设置与缓存都在这儿）
+ *     registry.json              清单：只放元数据（id / types / 版本 / 启用 / 来源 / md5），**不放代码**
+ *     <插件 id>/                  包本体（解包后的目录）—— **id 全局唯一、目录拍平**
+ *     <插件 id>/data/             插件自己的数据（设置与缓存都在这儿）
  *
- * ⚠️ **一个插件一个目录、按类型分文件夹**（见 docs/adr/0028）：
- * 身份是 `(类型, id)`，所以不同类型下同名不冲突。
+ * ⚠️ **一个包一个 id 一个目录**（见 docs/adr/0046）：一个包可同时具备多个平级类型
+ * （`types:["metadata","source"]`），但仍只有一个目录、一个进程、一个开关、一份数据。
+ * 路由里的 `:type` 只是**角色参数**：`get(type,id)` 按 id 定位包，并校验该类型 ∈ types。
  *
- * ⚠️ **"清空插件数据"就是删 `<目录>/data`** —— 声明与存储在插件自己那边，面板不碰内容
- * （见 docs/adr/0033 与 0028）。
+ * ⚠️ **"清空插件数据"就是删 `<目录>/data`** —— 声明与存储在插件自己那边，面板不碰内容。
  *
- * ⚠️ **插件不随面板发行**（见 docs/adr/0035）—— 这里没有任何"内置插件同步"：
- * 装进来的两条路都是外部的（面板「插件库」从插件仓库装、或手动上传 .tar.gz），
- * 所以**全新安装的插件目录是空的**，卸载也一定持久（卸掉就是卸掉了）。
- *
- * 清单为什么不放进 `settings/`：启用/卸载是**单插件操作**，而 settings 的数组是整体替换 ——
- * 多个插件并发保存会互相覆盖（首页插件那边踩过，同样的取舍）。
+ * ⚠️ **插件不随面板发行**（见 docs/adr/0035）—— 装进来的两条路都是外部的
+ * （插件库 / 手动上传），卸载也一定持久。
  */
 const fs = require('fs');
 const path = require('path');
@@ -61,39 +57,60 @@ function saveAll(arr) {
   return writeJsonAtomic(REGISTRY, arr);
 }
 
-/** 身份键：`(类型, id)` */
-const sid = (type, id) => `${type}\u0001${id}`;
-const splitSid = (s) => {
-  const [type, ...rest] = String(s || '').split('\u0001');
-  return { type, id: rest.join('\u0001') };
-};
+/** 角色键分隔符（不会出现在 type / id 里的控制字符） */
+const SID_SEP = String.fromCharCode(1);
+/** 角色键：展开状态行 / 前端 join 用（一个包按 types 展开成多行） */
+const sid = (type, id) => `${type}${SID_SEP}${id}`;
 
-function get(type, id) {
-  return list().find((x) => x && x.type === type && x.id === id) || null;
+/** 两个 types 集合是否相同（与顺序无关） */
+function sameTypes(a, b) {
+  const x = Array.isArray(a) ? a : [];
+  const y = Array.isArray(b) ? b : [];
+  if (x.length !== y.length) return false;
+  const ys = new Set(y);
+  return x.every((t) => ys.has(t));
 }
 
-/** 按身份键找（host 用） */
+/** 按 id 找包（身份就是 id） */
+function byId(id) {
+  return list().find((x) => x && x.id === id) || null;
+}
+
+/**
+ * 按"角色 + id"找包：id 定位，`:type` 必须是它声明的类型之一。
+ * 路由 /ingress /host 都走这里 —— types 里没有这个角色就当作没有，
+ * 这样 `/api/plugins/home/missav/...` 不会误落到一个纯 source 的同名包上。
+ */
+function get(type, id) {
+  const e = byId(id);
+  return e && Array.isArray(e.types) && e.types.includes(type) ? e : null;
+}
+
+/** 按身份键找（兼容老调用点） */
 function getBySid(s) {
-  const { type, id } = splitSid(s);
+  const [type, id] = String(s || '').split(SID_SEP);
   return get(type, id);
 }
 
-const dirOf = (type, id) => path.join(ROOT, String(type), String(id));
-const dataDirOf = (type, id) => path.join(dirOf(type, id), 'data');
+/** 包目录：拍平后只有 id 一层（见 docs/adr/0046） */
+const dirOf = (id) => path.join(ROOT, String(id));
+const dataDirOf = (id) => path.join(dirOf(id), 'data');
 
 function upsert(entry) {
   const arr = list();
-  const i = arr.findIndex((x) => x && x.type === entry.type && x.id === entry.id);
+  const i = arr.findIndex((x) => x && x.id === entry.id);
   if (i >= 0) arr[i] = Object.assign({}, arr[i], entry);
   else arr.push(entry);
   saveAll(arr);
-  return get(entry.type, entry.id);
+  return byId(entry.id);
 }
 
-/** 改一个插件的几个字段（不动别的） */
+/** 改一个插件的几个字段（不动别的）。角色参数仅用于定位包。 */
 function patch(type, id, fields) {
+  const cur = get(type, id);
+  if (!cur) return null;
   const arr = list();
-  const i = arr.findIndex((x) => x && x.type === type && x.id === id);
+  const i = arr.findIndex((x) => x && x.id === cur.id);
   if (i < 0) return null;
   arr[i] = Object.assign({}, arr[i], fields);
   saveAll(arr);
@@ -105,14 +122,16 @@ function patch(type, id, fields) {
  * `keepData` = 保留它的 `data/` 目录（默认跟着删 —— "卸载"就该干净）。
  */
 function remove(type, id, { keepData = false } = {}) {
-  const dir = dirOf(type, id);
+  const cur = get(type, id);
+  if (!cur) return { kept: '' };
+  const dir = dirOf(cur.id);
   let kept = '';
-  if (keepData && fs.existsSync(dataDirOf(type, id))) {
-    kept = path.join(ROOT, `.kept-${type}-${id}-${Date.now()}`);
-    fs.renameSync(dataDirOf(type, id), kept);
+  if (keepData && fs.existsSync(dataDirOf(cur.id))) {
+    kept = path.join(ROOT, `.kept-${cur.id}-${Date.now()}`);
+    fs.renameSync(dataDirOf(cur.id), kept);
   }
   fs.rmSync(dir, { recursive: true, force: true });
-  saveAll(list().filter((x) => !(x && x.type === type && x.id === id)));
+  saveAll(list().filter((x) => !(x && x.id === cur.id)));
   return { kept };
 }
 
@@ -129,33 +148,52 @@ function copyDir(from, to) {
 }
 
 /**
- * 安装 / 覆盖一个插件：把 `srcDir`（已经解包好的目录）放到 `<类型>/<id>/` 下。
+ * 安装 / 覆盖一个插件：把 `srcDir`（已经解包好的目录）放到 `<id>/` 下。
  *
- * `origin` = 'library'（面板「插件库」从插件仓库装的）/ 'manual'（手动上传的）——
- * 只影响显示（见 docs/adr/0035：没有"随包发行"这一类了）。
- * 覆盖时**保留 `data/`**（插件的设置与缓存不该因为换版本被清掉）。
+ * `origin` = 'library' / 'manual'，只影响显示。覆盖时**保留 `data/`**。
+ *
+ * 身份口径（见 docs/adr/0046）：
+ *   · id 全局唯一：同 id 已装时只允许**类型集合完全相同**的包覆盖（自更新同款）；
+ *     同 id 但 types 不同 → 拒绝（先卸载旧包，别让"更新"换掉包的身份）。
+ *   · metadata 域全局唯一：另一个 id 的包已注册同域 → 拒绝。
  */
 function installDir(srcDir, { origin = 'manual', md5 = '', enabled } = {}) {
   ensureRoot();
   const m = contract.readManifest(srcDir); // 第二道校验在这里（files 逐文件核对）
-  const dir = dirOf(m.type, m.id);
-  const existed = fs.existsSync(dir);
+
+  const existed = byId(m.id);
+  if (existed && !sameTypes(existed.types, m.types)) {
+    const e2 = new Error(
+      `已装过同 id「${m.id}」但类型不同的包（已装 ${(existed.types || []).join(' / ')}，新包 ${m.types.join(' / ')}）。` +
+        '一个 id 只能有一个包；请先卸载旧包再装。'
+    );
+    e2.code = 'IDENTITY_MISMATCH';
+    throw e2;
+  }
+  if (m.domain) {
+    const clash = list().find((x) => x && x.id !== m.id && x.domain === m.domain);
+    if (clash) {
+      const e2 = new Error(`元数据域「${m.domain}」已被插件 ${clash.id} 注册，一个域只能有一个插件`);
+      e2.code = 'DOMAIN_CONFLICT';
+      throw e2;
+    }
+  }
+
+  const dir = dirOf(m.id);
 
   /* 先把新版放到临时目录，验完再原子换过去 —— 不让"解到一半"的包留在插件目录里 */
-  const stage = path.join(ROOT, `.staging-${m.type}-${m.id}-${Date.now()}`);
+  const stage = path.join(ROOT, `.staging-${m.id}-${Date.now()}`);
   fs.rmSync(stage, { recursive: true, force: true });
   copyDir(srcDir, stage);
 
-  /* ⚠️ 换包时**必须把 `data/` 挪到一边再挪回来**：它是插件自己的数据（源实例清单、它自己的缓存），
-   * 不属于"包"。`copyDir` 会跳过 `data/`，但下面那个 `rmSync(dir)` 是整个目录删掉的 ——
-   * 一句话：跳过复制不等于保证不删。实测就是这么把刚加好的实例清单清空的。 */
-  const dataDir = dataDirOf(m.type, m.id);
-  const stash = path.join(path.dirname(dir), `.data-${m.id}-${Date.now()}`);
+  /* ⚠️ 换包时**必须把 `data/` 挪到一边再挪回来**（它是插件自己的数据，不属于"包"）。 */
+  const dataDir = dataDirOf(m.id);
+  const stash = path.join(ROOT, `.data-${m.id}-${Date.now()}`);
   const hadData = fs.existsSync(dataDir);
   if (hadData) fs.renameSync(dataDir, stash);
   try {
     fs.rmSync(dir, { recursive: true, force: true });
-    fs.mkdirSync(path.dirname(dir), { recursive: true }); // 类型那一层目录可能还不存在
+    fs.mkdirSync(ROOT, { recursive: true });
     fs.renameSync(stage, dir);
   } catch (e) {
     fs.rmSync(stage, { recursive: true, force: true });
@@ -169,11 +207,11 @@ function installDir(srcDir, { origin = 'manual', md5 = '', enabled } = {}) {
     throw e;
   }
   if (hadData && fs.existsSync(stash)) fs.renameSync(stash, dataDir);
-  fs.mkdirSync(dataDirOf(m.type, m.id), { recursive: true }); // 插件自己的数据目录
+  fs.mkdirSync(dataDirOf(m.id), { recursive: true }); // 插件自己的数据目录
 
   const stat = contract.dirDigest(dir);
   const entry = {
-    type: m.type,
+    types: m.types,
     id: m.id,
     name: m.name,
     author: m.author,
@@ -181,10 +219,10 @@ function installDir(srcDir, { origin = 'manual', md5 = '', enabled } = {}) {
     description: m.description,
     domain: m.domain,
     series: m.series,
-    hasWebui: !!m.webui,
-    webui: m.webui,
-    /* ingress 路径名单（output 插件用；见 contract.normalizeIngress）。
-     * 网关鉴权时直接读注册表里这份，不必每次请求解包 plugin.json。 */
+    hasWebui: Object.keys(m.webui || {}).length > 0,
+    /* webui 归一化成 {类型:入口}（见 contract.readManifest）；网关/路由按角色取 */
+    webui: m.webui || {},
+    /* ingress 路径名单包级共享（不按类型分家）。 */
     ingress: m.ingress || { public: [], token: [] },
     /* 自更新清单地址（插件自带；没有就是空串，管理页不显示更新按钮） */
     updateUrl: m.updateUrl || '',
@@ -196,7 +234,7 @@ function installDir(srcDir, { origin = 'manual', md5 = '', enabled } = {}) {
     bytes: stat.bytes,
     installedAt: Date.now(),
     /* 覆盖安装时保留原来的启用状态；新建默认**不启用**（装完由人明确打开） */
-    enabled: enabled === undefined ? (existed ? !!(get(m.type, m.id) || {}).enabled : false) : !!enabled,
+    enabled: enabled === undefined ? (existed ? !!existed.enabled : false) : !!enabled,
   };
   return upsert(entry);
 }
@@ -217,23 +255,18 @@ function sizeOf(p) {
 
 /**
  * 清掉**已装插件**的落盘缓存（面板「清除全部缓存」按钮用）。
- *
- * 两份位置都由**插件自己**定的（契约第十节"缓存归插件"），所以这里只认当前这几种写法：
- *   · 元数据 / 源 / 输出插件：`<插件>/data/cache/`
- *   · 首页插件：`<插件>/data/storage.json`（行结果缓存，见 home 插件自己的 `lib/storage.js`）
- * 这两处都是**可丢弃**数据 —— 设置与凭据（网盘 Cookie、源实例清单、`auth.json`）不在这两处，
- * 所以这个动作**不动它们**，清完不用重新登录。
- *
- * ⚠️ **只清落盘的那一份。** 插件进程里可能还留着自己的内存态（首页插件的行结果就是
- * 先读内存快照），那一份要等它自己的有效期过去、或重启那个插件才散 —— 如实说，不假装清干净了。
+ *   · 所有插件：`<包>/data/cache/`
+ *   · types 含 home 的包：再加 `<包>/data/storage.json`（行结果缓存）
+ * 两份都是**可丢弃**数据 —— 设置与凭据不在这两处，清完不用重新登录。
+ * （多类型包只清一次 storage.json —— 一个包一份 data。）
  */
 function clearCaches() {
   const plugins = [];
   for (const m of list()) {
-    if (!m || !m.type || !m.id) continue;
-    const data = dataDirOf(m.type, m.id);
+    if (!m || !m.id) continue;
+    const data = dataDirOf(m.id);
     const targets = [path.join(data, 'cache')];
-    if (m.type === 'home') targets.push(path.join(data, 'storage.json'));
+    if (Array.isArray(m.types) && m.types.includes('home')) targets.push(path.join(data, 'storage.json'));
     let bytes = 0;
     for (const p of targets) {
       const n = sizeOf(p);
@@ -244,7 +277,7 @@ function clearCaches() {
       }
       bytes += n;
     }
-    if (bytes > 0) plugins.push({ type: m.type, id: m.id, bytes });
+    if (bytes > 0) plugins.push({ id: m.id, types: m.types, bytes });
   }
   return { plugins, bytes: plugins.reduce((n, x) => n + x.bytes, 0) };
 }
@@ -253,11 +286,12 @@ module.exports = {
   ROOT,
   REGISTRY,
   sid,
-  splitSid,
+  sameTypes,
   dirOf,
   dataDirOf,
   list,
   get,
+  byId,
   getBySid,
   upsert,
   patch,

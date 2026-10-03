@@ -24,7 +24,6 @@
  */
 const { sendJson, sendError, readBody } = require('../../core/http');
 const auth = require('../../core/auth');
-const settings = require('../../core/settings');
 const api = require('./api');
 const stream = require('./stream');
 const templates = require('./templates');
@@ -264,9 +263,8 @@ module.exports = function routes(r) {
     const seg = String(query.get('seg') || '').trim();
     if (seg) return stream.servePart(req, res, { seg, sid: String(query.get('sid') || '').trim() });
 
-    /* 面板设置关了外部令牌就免验（默认开）；关了之后这条流入口人人可打 */
-    if (settings.read('panel').ingressTokenRequired !== false
-      && !auth.verifyIngressToken(auth.ingressTokenOf(req, query))) {
+    /* 这条流入口的凭证统一是外部访问令牌（query token / Bearer / X-Access-Token） */
+    if (!auth.verifyIngressToken(auth.ingressTokenOf(req, query))) {
       return sendError(res, 401, '这条流入口需要外部访问令牌（在插件设置页复制；或先登录面板）');
     }
     const domain = String(query.get('domain') || '').trim();

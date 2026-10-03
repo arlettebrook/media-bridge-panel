@@ -9,6 +9,7 @@
 import { $, el } from './dom.js';
 import { api } from './api.js';
 import { ensureAuth } from './auth.js';
+import { ensureMigrationGate } from './migration.js';
 import { S } from './state.js';
 import { applyHash, applyNavState, closeNavIfNarrow, collapseNav, onHashChange, renderNavButtons, renderPage, switchPage, toggleNav, toggleNavGroup } from './shell.js';
 import { mountThemeButtons } from './theme.js';
@@ -18,6 +19,8 @@ export async function init() {
   mountThemeButtons([$('#themeBtn'), $('#themeBtnTop')]); // 主题按钮：侧栏品牌行一颗 + 窄屏顶栏一颗
   /* 面板门禁：没登录就把登录框铺上，后面一步都不做（拉了也是 401） */
   if (!(await ensureAuth())) return;
+  /* 数据迁移门禁（见 docs/adr/0047）：数据落后 / 超前时只留全屏向导，业务一概不起 */
+  if (await ensureMigrationGate()) return;
   await loadPlugins(); // 侧栏那三栏挂哪些插件靠它 —— 必须赶在 applyHash 之前（见下面那段说明）
   renderNavButtons(); // 侧栏按钮照 MODULES 现画（没有子项的栏目不画）
   applyHash(); // 地址栏里有页就按它来（刷新后停在同一页），下面的 renderPage 会用上

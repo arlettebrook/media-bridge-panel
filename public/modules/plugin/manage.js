@@ -23,10 +23,15 @@ import { refreshNav } from '../../core/shell.js';
 
 /* 四个类型名与侧栏那四栏一致（元数据 / 片源 / 首页 / 输出，见 core/registry.js） */
 const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页', output: '输出' };
-/* 更新结果按 `type/id` 索引。**放在模块作用域**：放在 renderPluginManage 里会踩 TDZ ——
- * 首屏那次 `await load()` 会先跑到 paint()，那时函数体里的 `const` 还没初始化（实测报
- * "Cannot access 'sidOf' before initialization"，整张列表直接空掉）。 */
-const sidOf = (p) => `${p.type}/${p.id}`;
+/* 多类型之后身份就是 id（见 docs/adr/0046）：更新结果 / 忙碌状态都按 id 索引。
+ * 管理 URL 仍要带一个角色段，用第一个类型即可（后端按 id 定位进程）。 */
+const sidOf = (p) => p.id;
+const roleOf = (p) => (Array.isArray(p.types) && p.types[0]) || p.type || '';
+/** 一个类型一个小徽章：多类型包一排多个 */
+const typeBadges = (p) =>
+  (Array.isArray(p.types) ? p.types : [p.type]).filter(Boolean).map((t) =>
+    el('span', { class: 'badge', title: '类型：' + t, text: TYPE_LABEL[t] || t })
+  );
 const fmtDuration = (ms) => {
   if (!ms) return '—';
   const s = Math.round(ms / 1000);
@@ -106,7 +111,7 @@ export async function renderPluginManage(v) {
     checkInflight = (async () => {
       try {
         const out = await api('/api/plugins/updates' + (force ? '?refresh=1' : ''));
-        updates = new Map((out.updates || []).map((u) => [`${u.type}/${u.id}`, u]));
+        updates = new Map((out.updates || []).map((u) => [u.id, u]));
       } catch (e) {
         if (loud) toast('检查更新失败：' + e.message, true);
         /* 失败就保留上一次的结果：这一页的状态不该因为一次网络抖动变空 */
@@ -181,7 +186,7 @@ export async function renderPluginManage(v) {
       busy.add(sid);
       paint();
       try {
-        await api(`/api/plugins/${p.type}/${p.id}/update`, { method: 'POST' });
+        await api(`/api/plugins/${roleOf(p)}/${p.id}/update`, { method: 'POST' });
       } catch (e) {
         failed.push(`${p.name || p.id}（${e.message}）`);
       } finally {
@@ -220,7 +225,7 @@ export async function renderPluginManage(v) {
     /* 版本与作者单独一行、紧跟标题下面；已跑时长与来路另起一行。
      * 跟名称、几颗按钮挤在一条线上时会被折成两三截，一屏看下来对不上号 */
     const headBits = [
-      `${TYPE_LABEL[p.type] || p.type} · ${p.id}`,
+      p.id,
       `v${p.version}`,
       p.domain ? `域 ${p.domain}` : '',
       p.author ? `作者 ${p.author}` : '',
@@ -252,6 +257,7 @@ export async function renderPluginManage(v) {
         'div',
         { class: 'plugin-head' },
         el('span', { class: 'plugin-name', text: p.name || p.id }),
+        ...typeBadges(p),
         el('span', { class: 'badge' + statusCls, text: statusText }),
         canUpdate ? el('span', { class: 'badge warn', text: `可更新 v${u.latest}` }) : null
       ),
@@ -264,10 +270,10 @@ export async function renderPluginManage(v) {
         'div',
         { class: 'row plugin-acts' },
         p.enabled
-          ? btn('停用', '停掉它的进程（它自己起的东西由它自己清理）', () => act(() => api(`/api/plugins/${p.type}/${p.id}/disable`, { method: 'POST' })))
-          : btn('启用', '起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/enable`, { method: 'POST' })), 'btn mini primary'),
+          ? btn('停用', '停掉它的进程（它自己起的东西由它自己清理）', () => act(() => api(`/api/plugins/${roleOf(p)}/${p.id}/disable`, { method: 'POST' })))
+          : btn('启用', '起它的进程', () => act(() => api(`/api/plugins/${roleOf(p)}/${p.id}/enable`, { method: 'POST' })), 'btn mini primary'),
         updateBtn,
-        btn('重启', '重起它的进程', () => act(() => api(`/api/plugins/${p.type}/${p.id}/restart`, { method: 'POST' }))),
+        btn('重启', '重起它的进程', () => act(() => api(`/api/plugins/${roleOf(p)}/${p.id}/restart`, { method: 'POST' }))),
         btn('卸载', '卸载它 —— 它的 data/ 目录也会一起删掉', () => uninstall(p))
       )
     );
@@ -289,7 +295,7 @@ export async function renderPluginManage(v) {
     busy.add(sid);
     paint();
     try {
-      const out = await api(`/api/plugins/${p.type}/${p.id}/update`, { method: 'POST' });
+      const out = await api(`/api/plugins/${roleOf(p)}/${p.id}/update`, { method: 'POST' });
       toast(`已更新：${p.name || p.id} → v${out.to || u.latest}`);
     } catch (e) {
       toast('更新失败：' + e.message, true);
@@ -302,8 +308,8 @@ export async function renderPluginManage(v) {
   }
 
   async function uninstall(p) {
-    if (!confirm(`卸载「${p.name || p.id}」（${p.type}/${p.id}）？\n\n它的进程会停掉，插件目录与它自己的 data/ 目录都会删掉。`)) return;
-    await act(() => api(`/api/plugins/${p.type}/${p.id}`, { method: 'DELETE' }));
+    if (!confirm(`卸载「${p.name || p.id}」（${p.id}）？\n\n它的进程会停掉，插件目录与它自己的 data/ 目录都会删掉。`)) return;
+    await act(() => api(`/api/plugins/${roleOf(p)}/${p.id}`, { method: 'DELETE' }));
     toast('已卸载：' + (p.name || p.id));
     updates.delete(sidOf(p));
   }
@@ -353,7 +359,7 @@ function installCard(onInstalled = () => {}) {
         method: 'POST',
         body: { tarball: b64, md5: md5In.value.trim(), enable: enableCb.checked },
       });
-      out.textContent = `已装上：${r.plugin.name} v${r.plugin.version}（${r.plugin.type}/${r.plugin.id}，${r.plugin.files} 个文件）`;
+      out.textContent = `已装上：${r.plugin.name} v${r.plugin.version}（${(r.plugin.types || []).join('/')}/${r.plugin.id}，${r.plugin.files} 个文件）`;
       toast('已装上：' + r.plugin.name);
     } catch (e) {
       out.textContent = '装失败：' + e.message;

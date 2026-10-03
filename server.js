@@ -15,6 +15,7 @@ const { DATA_DIR } = require('./server/core/paths');
 const logbus = require('./server/core/logbus');
 const auth = require('./server/core/auth');
 const pluginIngress = require('./server/modules/plugin/ingress');
+const migrations = require('./server/core/migrations');
 const BRAND = require('./server/core/branding');
 
 /* ⚠️ **必须在加载模块之前装**（就在这一行）：模块顶层、路由注册、启动横幅都会打日志，
@@ -34,6 +35,20 @@ for (const m of MODULES) {
   if (m.settings) settings.define(m.id, m.settings);
   registry.register(m);
   if (typeof m.routes === 'function') m.routes(router);
+}
+
+/* 数据迁移 API（/api/migration/*）：平时只是一条查状态的路由，门禁触发时它是向导的后端。
+ * 必须在 listen 前登记好 —— 迁移模式下面板仍 listen，只是不起业务（见 docs/adr/0047）。 */
+migrations.registerRoutes(router);
+
+/* 启动门禁：数据版本落后 / 超前时进入迁移模式。
+ * 迁移模式下不 boot 插件、不起 Emby，业务 API 一律 503（前端只显示迁移向导）。 */
+const migrationGate = migrations.evaluate();
+if (migrationGate.phase !== 'ok') {
+  console.log(
+    `\n  ⚠ 数据迁移门禁：data v${migrationGate.dataVersion} / 代码 v${migrationGate.currentVersion}` +
+      `（${migrationGate.phase === 'ahead' ? '数据版本超前' : '数据版本落后，等待迁移'}）`
+  );
 }
 
 // 旧版单文件 data/settings.json → data/settings/<模块>.json
@@ -98,6 +113,21 @@ const server = http.createServer(async (req, res) => {
 
     // 面板接口（各模块注册的路由；插件宿主那几条也在其中）
     if (pathname.startsWith('/api/')) {
+      /* 数据迁移门禁（见 docs/adr/0047）：非 ok 相位下只放行登录、迁移 API 与只读备份下载，
+       * 其余业务接口一律 503 —— 前端见到 MIGRATION_REQUIRED 就铺全屏迁移向导，不起业务。
+       * 静态壳（非 /api 路径）照常服务，向导页面本身要能打开。 */
+      if (migrations.phase() !== 'ok') {
+        const allowed =
+          pathname.startsWith('/api/auth/') ||
+          pathname.startsWith('/api/migration/') ||
+          (req.method === 'GET' && pathname === '/api/panel/backup');
+        if (!allowed) {
+          return sendJson(res, 503, {
+            error: '数据版本与面板代码不一致，需要先完成数据迁移（或确认强制启动）',
+            code: 'MIGRATION_REQUIRED',
+          });
+        }
+      }
       /* 插件 ingress 先判一道（单端口入口：/api/plugins/<类型>/<id>/(ui|api)/...）。
        * 插件在 plugin.json 里声明 public（匿名）/ token（外部令牌或面板 cookie）路径；
        * 名单外的路径返回 null，继续走下面的面板登录门禁 —— 默认收紧。 */
@@ -144,22 +174,22 @@ const embyModule = registry.get('emby');
 const pluginModule = registry.get('plugin');
 const panelModule = registry.get('panel');
 
-server.listen(WEB_PORT, WEB_HOST, async () => {
-  /* 名字读 core/branding.js（改名只改那一处 + 前端那份 + package.json + index.html 兜底）；
-   * 依既定决策**不摆图标**，所以这里与顶栏都只有文字。 */
-  console.log(`\n  ${BRAND.panelName}已启动`);
-  console.log(`     面板地址: http://127.0.0.1:${WEB_PORT}`);
-  console.log(`     数据目录: ${DATA_DIR}`);
-  console.log(`     模块: ${registry.list().map((m) => m.id).join(' · ')}`);
-  if (migrated) console.log(`     ↻ 设置已拆分: settings.json → ${migrated.to}（旧文件留档 ${migrated.backup}）`);
-  console.log('');
+/**
+ * 业务启动序列（门禁放行后才跑）。
+ *
+ * 正常启动时在 listen 回调里跑；数据迁移在进程内跑完后由 migrations 框架回调这同一个函数 ——
+ * 不依赖容器 / 进程重启（见 docs/adr/0047）。只允许跑一次（迁移完成那次）。
+ */
+let businessBooted = false;
+async function bootBusiness() {
+  if (businessBooted) return;
+  businessBooted = true;
   /* 站点测速的开机计时（接线在这儿做，理由见 agg/site-test.js 顶部）：
    * 默认每 6 小时自动一轮，2 分钟后先跑一次。
    * ⚠️ 原先还有"某个源起来就测一轮它的站点"那条 —— 源实例现在活在源插件里，
    * 面板收不到"它起来了"，已随源插件化去掉（开机那一轮会覆盖自启的实例）。 */
   if (aggModule && typeof aggModule.startSiteTest === 'function') aggModule.startSiteTest();
-  /* 插件：把随包发行的内置插件同步进数据目录，再拉起所有**启用中**的插件
-   * （见 modules/plugin/index.js 的 autostart）。失败不挡面板启动。
+  /* 插件：拉起所有**启用中**的插件（见 modules/plugin/index.js 的 autostart）。失败不挡面板启动。
    * ⚠️ **源实例由源插件自己起**（它自己的"开机自启"那份逻辑），不在这里管。 */
   if (pluginModule && typeof pluginModule.autostart === 'function') await pluginModule.autostart();
   /* emby 层：把各首页插件的行清单预热进面板内存快照（免得开机后第一发 `Views` 拿到空）。
@@ -186,6 +216,40 @@ server.listen(WEB_PORT, WEB_HOST, async () => {
    * 决策见 docs/adr/0021-update-replaces-app-dir.md）。它自己会延迟几秒再动手，
    * 也会在非受管运行方式下跳过（直接跑源码时数据目录里的 app/ 不该被动）。 */
   if (panelModule && typeof panelModule.pruneOnBoot === 'function') panelModule.pruneOnBoot();
+}
+
+/* 迁移（或超前强制启动）在进程内完成后，直接在本进程拉起业务，不要求重启进程/容器。 */
+migrations.onReady(bootBusiness);
+
+server.listen(WEB_PORT, WEB_HOST, async () => {
+  /* 名字读 core/branding.js（改名只改那一处 + 前端那份 + package.json + index.html 兜底）；
+   * 依既定决策**不摆图标**，所以这里与顶栏都只有文字。 */
+  console.log(`\n  ${BRAND.panelName}已启动`);
+  console.log(`     面板地址: http://127.0.0.1:${WEB_PORT}`);
+  console.log(`     数据目录: ${DATA_DIR}`);
+  console.log(`     模块: ${registry.list().map((m) => m.id).join(' · ')}`);
+  if (migrated) console.log(`     ↻ 设置已拆分: settings.json → ${migrated.to}（旧文件留档 ${migrated.backup}）`);
+  console.log('');
+  if (migrationGate.phase === 'ok') {
+    await bootBusiness();
+  } else if (migrationGate.phase === 'migrate' && !migrations.needsDecision()) {
+    /* 预检没有要人决定的事 → 启动时就静默迁移，再启业务（见 docs/adr/0047 第 4 节）。
+     * 无人值守升级 / 全新安装因此不必等有人打开面板点一下。
+     * ⚠️ run() 跑完会在进程内回调 bootBusiness()，这里**不要再叫一次**；
+     * 失败则退回"迁移模式"（HTTP 只留静态壳与迁移 API），下次启动还会重试 —— 步骤是幂等的。 */
+    console.log('  ⏳ 数据版本落后且预检无冲突：自动迁移中…');
+    try {
+      const out = await migrations.run({});
+      const chain = (out.ran || []).map((v) => 'v' + v).join(' → ') || '无待办任务';
+      console.log(`  ✔ 自动迁移完成（${chain}），业务已启动。\n`);
+    } catch (e) {
+      console.error('  ✘ 自动迁移失败（退回迁移模式，可在面板向导里处置）：' + ((e && e.message) || e));
+    }
+  } else {
+    /* 迁移模式：HTTP 只留静态壳 + /api/migration/*（+登录与只读备份），业务全部不启动。
+     * 用户在向导里跑完迁移后，migrations 框架会在进程内回调 bootBusiness()。 */
+    console.log('  ⏸ 迁移模式：插件 / Emby / 聚合均未启动，请在面板向导里完成数据迁移。\n');
+  }
 });
 
 /* 进程级兜底：**一个请求出问题不该把整个面板带走**。曾出现过整进程退出 ——

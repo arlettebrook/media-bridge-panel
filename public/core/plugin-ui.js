@@ -25,9 +25,14 @@ export function renderPluginUi(v) {
     return;
   }
   const list = (S.plugins && S.plugins.plugins) || [];
-  const plugin = list.find((p) => p && p.type === info.type && p.id === info.id);
-  /* webuiPath 由后端给（它才知道 `webui` 声明的是哪个文件）；万一列表还没到手就自己拼一个 */
-  const src = (plugin && plugin.webuiPath) || `/api/plugins/${info.type}/${info.id}/ui/`;
+  /* 身份是 id；再确认这个包确实声明了当前类型（多类型包在多栏各有一页，见 docs/adr/0046） */
+  const plugin = list.find((p) => p && p.id === info.id && Array.isArray(p.types) && p.types.includes(info.type));
+  /* webuiPaths[type] 由后端给（它才知道这个角色的入口是哪个文件）；没到手就自己拼。
+   * 带上 ?role= —— 转发消息与 iframe 路径天然含角色段，插件 http 处理器据此分发。 */
+  const base =
+    (plugin && plugin.webuiPaths && plugin.webuiPaths[info.type]) ||
+    `/api/plugins/${info.type}/${encodeURIComponent(info.id)}/ui/`;
+  const src = base + '?role=' + encodeURIComponent(info.type);
   const frame = el('iframe', {
     class: 'plugin-ui-frame',
     src,

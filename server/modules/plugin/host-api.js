@@ -144,7 +144,21 @@ const aggHandlers = {
   },
 };
 
-const HANDLERS = { home: homeHandlers, agg: aggHandlers };
+/* ------------------------------------------------------------------ panel */
+
+const panelHandlers = {
+  /**
+   * 校验外部访问令牌：output 插件生成 widget 时，模块 URL 里可带 `?token=`，
+   * 插件拿它问宿主，**验过才把令牌注入生成的 JS**，匿名下载依旧拿不到令牌。
+   */
+  async ingressTokenCheck(args) {
+    const auth = require('../../core/auth');
+    const token = String((args && args.token) || '').trim();
+    return ok({ valid: !!auth.verifyIngressToken(token) });
+  },
+};
+
+const HANDLERS = { home: homeHandlers, agg: aggHandlers, panel: panelHandlers };
 
 /**
  * 派发一次插件反向调用。超时由这里兜（比插件侧的等待短或相等都没关系——

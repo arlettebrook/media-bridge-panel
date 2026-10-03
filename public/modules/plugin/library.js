@@ -18,6 +18,11 @@ import { refreshNav } from '../../core/shell.js';
 
 const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页', output: '输出' };
 const fmtKB = (n) => (Number(n) > 0 ? `约 ${Math.max(1, Math.round(Number(n) / 1024))}KB` : '');
+/** 一条清单的类型数组（后端 v2 清单给 types；兼容单值） */
+const typesOf = (p) => (Array.isArray(p.types) ? p.types : p.type ? [p.type] : []);
+/** 多类型徽章（与管理页同一口径，见 docs/adr/0046） */
+const typeBadges = (p) =>
+  typesOf(p).map((t) => el('span', { class: 'badge', title: '类型：' + t, text: TYPE_LABEL[t] || t }));
 
 export async function renderPluginLibrary(v) {
   const host = el('div', { id: 'pluginLibHost' });
@@ -56,9 +61,11 @@ export async function renderPluginLibrary(v) {
   }
 
   async function install(p, btn) {
+    const types = typesOf(p);
+    const typeText = types.map((t) => TYPE_LABEL[t] || t).join('/');
     const ok = await confirmModal({
       title: `装插件「${p.name || p.id}」`,
-      text: `v${p.version}（${TYPE_LABEL[p.type] || p.type} · ${p.id}）\n\n` + '插件能读写数据、能联网、能起进程 —— 只装信得过的来源。',
+      text: `v${p.version}（${typeText} · ${p.id}）\n\n` + '插件能读写数据、能联网、能起进程 —— 只装信得过的来源。',
       okLabel: '装上去',
     });
     if (!ok) return;
@@ -67,7 +74,7 @@ export async function renderPluginLibrary(v) {
     try {
       const r = await api('/api/plugins/library/install', {
         method: 'POST',
-        body: { type: p.type, id: p.id, version: p.version, enable: enableCb.checked },
+        body: { type: types[0] || '', id: p.id, version: p.version, enable: enableCb.checked },
       });
       toast('已装上：' + ((r.plugin && r.plugin.name) || p.name || p.id));
       await load(true);
@@ -80,11 +87,12 @@ export async function renderPluginLibrary(v) {
   }
 
   function rowOf(p) {
+    const types = typesOf(p);
     const label = !p.installed ? '安装' : p.hasUpdate ? `更新到 v${p.version}` : '重装';
-    const btn = el('button', { class: 'btn mini primary', text: label, title: `装 ${p.type}/${p.id} v${p.version}` });
+    const btn = el('button', { class: 'btn mini primary', text: label, title: `装 ${types.join('/')}/${p.id} v${p.version}` });
     btn.addEventListener('click', () => install(p, btn));
     const bits = [
-      `${TYPE_LABEL[p.type] || p.type} · ${p.id}`,
+      p.id,
       fmtKB(p.bytes),
       p.domain ? `域 ${p.domain}` : '',
       p.author ? `作者 ${p.author}` : '',
@@ -98,6 +106,7 @@ export async function renderPluginLibrary(v) {
         'div',
         { class: 'plugin-head' },
         el('span', { class: 'plugin-name', text: p.name || p.id }),
+        ...typeBadges(p),
         el('span', { class: 'badge', text: 'v' + p.version }),
         p.installed ? el('span', { class: 'badge ok', text: '已装 v' + (p.installedVersion || '?') }) : null
       ),
@@ -141,7 +150,9 @@ export async function renderPluginLibrary(v) {
       list.append(
         el('div', {
           class: 'hint warn',
-          text: `清单里有 ${d.bad.length} 条读不懂，已跳过：` + d.bad.map((x) => `${x.type || '?'}/${x.id || '?'}（${x.reason}）`).join('；'),
+          text:
+            `清单里有 ${d.bad.length} 条读不懂，已跳过：` +
+            d.bad.map((x) => `${((x.types || []).join('/')) || '?'}/${x.id || '?'}（${x.reason}）`).join('；'),
         })
       );
     }

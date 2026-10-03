@@ -25,7 +25,6 @@
 const store = require('./store');
 const contract = require('./contract');
 const auth = require('../../core/auth');
-const settings = require('../../core/settings');
 
 /**
  * `/api/plugins/<类型>/<id>/(ui|api)/<相对路径>`
@@ -50,12 +49,6 @@ function check(pathname, req, searchParams) {
   if (!hit) return null; // 名单外：默认门禁（cookie），不匿名、不验令牌
 
   if (hit === 'public') return { access: 'public', via: 'public' };
-
-  /* 面板设置里关了外部令牌：token 入口匿名放行（开关默认开，见 panel 设置）。
-   * 放行后这条路径人人可打 —— 与 public 同形，所以 access 也归 public。 */
-  if (settings.read('panel').ingressTokenRequired === false) {
-    return { access: 'public', via: 'public' };
-  }
 
   /* token 路径：外部令牌 或 面板登录 cookie，二选一 */
   if (auth.isAuthed(req)) return { access: 'session', via: 'cookie' };

@@ -38,8 +38,9 @@ function isCache(rel) {
    * 旁文件留着没有意义（它们是那份缓存的写前日志与共享内存），白占体积
    * （实测这一份就有 4MB），而且运行中被拷走也不保证一致。 */
   if (rel.startsWith('emby/cache.db')) return true;
-  /* 插件自己的缓存固定放在它的 `data/cache` 下（见各插件 lib/cache.js 的约定） */
-  return /^plugins\/[^/]+\/[^/]+\/data\/cache(\/|$)/.test(rel);
+  /* 插件自己的缓存固定放在它的 `data/cache` 下（见各插件 lib/cache.js 的约定）。
+   * 多类型拍平后布局是 plugins/<id>/data/cache（见 docs/adr/0046）。 */
+  return /^plugins\/[^/]+\/data\/cache(\/|$)/.test(rel);
 }
 
 /** 排除规则：给 `zip.dirEntries` 用（返回真值则跳过，目录被跳过时整棵子树都不进） */

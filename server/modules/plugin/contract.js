@@ -11,15 +11,20 @@
  *   data/           插件自己的数据 —— **由面板在安装时创建，包里不该有**
  *
  * `plugin.json`：
- *   id       必填，反向域名风格，**同一类型内唯一**（身份 = `(类型, id)`）
+ *   id       必填，反向域名风格，**全局唯一**（身份就是 id；见 docs/adr/0046）
  *   name     必填，显示名
  *   author   可选，作者署名（插件库与管理页里显示；不写就不显示这一行）
  *   version  必填
- *   type     必填，metadata / source / home / output
+ *   types    必填，metadata / source / home / output 的**数组**（一个包可同时具备多个平级类型）；
+ *            旧写法单值 `type` 仍接受，等价 `types:[type]`
  *   main     可选，入口文件名（默认 index.js）
- *   domain   元数据插件必填：**它注册的域 id**（就是条目 Id 的前缀，见 docs/adr/0031）
+ *   domain   types 含 metadata 时必填：**它注册的域 id**（就是条目 Id 的前缀，见 docs/adr/0031），
+ *            且一个包最多注册一个域、域全局唯一
  *   series   元数据插件可选：剧集式（默认 true）还是电影式
- *   webui    可选：webui 入口（相对包目录，例如 ui/index.html）
+ *   webui    可选。单类型包：字符串入口（如 `ui/index.html`）；
+ *            多类型包：**对象**，每个类型各自一个入口（如
+ *            `{"source":"ui/index.html","home":"ui/home.html"}`，key 必须 ∈ types、文件必须存在，
+ *            可指向同一文件）。见 docs/adr/0046「一个类型一个 UI」。
  *   ingress  output 插件可选：**面板单端口入口（ingress）的访问声明**，形状：
  *              { "public": ["api/widget.js"], "token": ["api/**"] }
  *            · public：匿名可取（例如给外部播放器下载的 widget.js —— 程序本身不含秘密）；
@@ -146,21 +151,57 @@ function readManifest(dir) {
   if (!name) throw fail('缺少 name（显示名）');
   const version = String(raw.version || '').trim();
   if (!version) throw fail('缺少 version');
-  const type = String(raw.type || '').trim();
-  if (!TYPES.includes(type)) throw fail(`type 必须是 ${TYPES.join(' / ')}，实际是「${type || '(空)'}」`);
+
+  /* types：新写法数组；旧写法单值 type 仍收（等价 types:[type]）。
+   * 去重、非空、必须是四个已知类型之一（见 docs/adr/0046：平级、无主类型）。 */
+  let types;
+  if (Array.isArray(raw.types)) {
+    types = raw.types.map((t) => String(t || '').trim());
+  } else if (raw.type !== undefined && raw.type !== null) {
+    types = [String(raw.type || '').trim()];
+  } else {
+    throw fail(`缺少 types（${TYPES.join(' / ')} 的数组；旧版单值 type 也仍接受）`);
+  }
+  if (!types.length || types.some((t) => !t)) throw fail('types 不能为空');
+  for (const t of types) {
+    if (!TYPES.includes(t)) throw fail(`types 里有不认识的类型：「${t}」（只认 ${TYPES.join(' / ')}）`);
+  }
+  if (new Set(types).size !== types.length) throw fail(`types 有重复：${types.join(' / ')}`);
+  const type = types[0]; // 兼容仍读 m.type 的调用点；没有"主类型"语义
+
   const main = String(raw.main || 'index.js').trim();
   const mainFile = path.join(dir, main);
   if (!fs.existsSync(mainFile)) throw fail(`入口文件不存在：${main}`);
 
   let domain = '';
-  if (type === 'metadata') {
+  if (types.includes('metadata')) {
     domain = String(raw.domain || '').trim();
     if (!/^[a-z][a-z0-9]*$/i.test(domain)) {
-      throw fail(`元数据插件必须声明 domain（域 id，就是条目 Id 的前缀）：「${domain || '(空)'}」不合法`);
+      throw fail(`types 含 metadata 时必须声明 domain（域 id，就是条目 Id 的前缀）：「${domain || '(空)'}」不合法`);
     }
   }
-  const webui = String(raw.webui || '').trim();
-  if (webui && !fs.existsSync(path.join(dir, webui))) throw fail(`webui 入口不存在：${webui}`);
+
+  /* webui：单类型包给字符串或对象都行；多类型包必须给 {类型:入口} 的对象，
+   * key 必须是它声明的类型、文件必须存在。统一归一化成 {类型:相对路径}。 */
+  const webui = {};
+  if (raw.webui !== undefined && raw.webui !== null && raw.webui !== '') {
+    if (typeof raw.webui === 'string') {
+      if (types.length > 1) throw fail('多类型插件的 webui 必须是 {类型:入口文件} 的对象，不接受单个字符串');
+      const rel = raw.webui.trim();
+      if (!fs.existsSync(path.join(dir, rel))) throw fail(`webui 入口不存在：${rel}`);
+      webui[types[0]] = rel;
+    } else if (raw.webui && typeof raw.webui === 'object' && !Array.isArray(raw.webui)) {
+      for (const [role, rel0] of Object.entries(raw.webui)) {
+        if (!types.includes(role)) throw fail(`webui 的 key「${role}」不在 types 里（${types.join(' / ')}）`);
+        const rel = String(rel0 || '').trim();
+        if (!rel) throw fail(`webui.${role} 入口为空`);
+        if (!fs.existsSync(path.join(dir, rel))) throw fail(`webui.${role} 入口不存在：${rel}`);
+        webui[role] = rel;
+      }
+    } else {
+      throw fail('webui 必须是字符串（单类型包）或 {类型:入口文件} 对象');
+    }
+  }
 
   /* 自更新清单地址（可选）：只收 http(s) —— 这是面板要主动去 GET 的外部地址，
    * 不许 file:// / 内网协议头从插件清单里混进来。 */
@@ -190,13 +231,14 @@ function readManifest(dir) {
     name,
     author: String(raw.author || '').trim(),
     version,
-    type,
+    types,
+    type, // = types[0]，兼容旧调用点；没有"主类型"语义
     main,
     mainFile,
     domain,
     series: raw.series !== false,
+    /** 归一化后的 webui：`{类型:入口相对路径}`（没有就是 `{}`） */
     webui,
-    webuiFile: webui ? path.join(dir, webui) : '',
     ingress,
     updateUrl,
     depends: Array.isArray(raw.depends) ? raw.depends.map((x) => String(x)) : [],
