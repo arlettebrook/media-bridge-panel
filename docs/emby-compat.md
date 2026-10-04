@@ -661,7 +661,8 @@ docker logs -t media-bridge-panel              # 带时间戳
     那是 **上游榜单的总数，不是库里的数量**，拿它当"库里有 11216 部片"就是**编数据**，比 0 更差。
   - `Shows/NextUp` 与 `Items/Resume` 的分工（都靠观看历史，见 [0023](adr/0023-playback-progress.md)）：
     `Resume` = **有播放进度、还没看完**的条目；`NextUp` = 正在追的剧里**下一集**该看哪一集
-    （最近看的那集没看完 → 回它自己；看完 → 回下一集，且必须在上游季数据里真实存在）。
+    （最近看的那集没看完 → 回它自己；看完 → 回下一集，且必须在上游季数据里真实存在；
+    指名 `SeriesId` 而库里没有它任何进度 → 回**第一集**）。
   - 路由形状提醒：这两条都**没有**同名冲突（没有裸的 `Shows/:showId`、条目详情那条是
     `Users/:userId/Items/:itemId` 而不是 `Items/:itemId`）。但 `Items/Resume` 与 `Items/Latest`
     **都**被同形状路由吞过一次（后者曾导致 VidHub 首页全空）——

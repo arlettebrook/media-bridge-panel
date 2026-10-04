@@ -1068,12 +1068,28 @@ async function getNextUp(requestedId, req, query) {
     if (it) items.push(it);
     else skipped += 1;
   }
+
+  /* 客户端拿 `SeriesId` 来问"这部剧从哪看"，而库里**一点它的进度都没有**时（新剧，
+   * 或进度被清过）：回**第一集**、位置 0。
+   *
+   * 不回的话客户端拿到空列表就停在这儿 —— CapyPlayer 进剧页只发这一条，空了就铺不出
+   * 播放目标，后面既不问季集也不问播放信息（电影没有这一环，所以同一个客户端里电影照常能播）。
+   * 只有"这部剧一条进度都没有"才补：全看完的剧本就该没有下一集，不能拿第一集顶上。 */
+  let fromStart = false;
+  if (wantSeries && !rows.length && items.length < limit) {
+    const first = await firstEpisodeItem(wantSeries, accountId);
+    if (first) {
+      items.push(first);
+      fromStart = true;
+    }
+  }
   return {
     status: 200,
     body: { Items: items, TotalRecordCount: items.length },
     log:
       `接下来看：库里 ${rows.length} 部在追 → 列出 ${items.length} 条` +
       (wantSeries ? `（只问 ${wantSeries}）` : '') +
+      (fromStart ? '（库里没有这部剧的进度 → 从第一集开始）' : '') +
       (skipped ? `（${skipped} 部算不出下一集，未列出）` : '') +
       briefIds(items),
   };
@@ -1131,6 +1147,40 @@ async function episodeExists(domain, entryId, season, episode) {
   const look = await metaBridge.lookupSeason({ entryId, season, domain });
   if (!look.ok) return false;
   return (look.item.episodes || []).some((e) => Number(e.episodeNumber) === Number(episode));
+}
+
+/**
+ * 一部剧的**第一集**（库里没有这部剧的进度时由 `getNextUp` 补一条）。
+ *
+ * 季号、集号都取最小的那一个，且要**上游真实存在** —— 季按升序找，第一季里没有集
+ * 就试下一季，全都没有就回 null，不编（ADR-0008）。特别篇（S0）不参与，与 `getSeasons` 同口径。
+ * 组装仍走 `progressItem`：没看过的一集位置 0、未看，客户端点它就是从头发起。
+ */
+async function firstEpisodeItem(seriesId, accountId) {
+  const p = metaBridge.parseItemId(seriesId);
+  if (!p || p.type !== 'tv' || p.season !== null) return null;
+
+  const show = await metaBridge.lookup({ type: 'tv', entryId: p.entryId, withSeasons: true, domain: p.domain });
+  if (!show.ok) return null;
+  const seasons = (show.item.seasons || [])
+    .filter((s) => Number.isFinite(s.seasonNumber) && s.seasonNumber > 0)
+    .map((s) => s.seasonNumber)
+    .sort((a, b) => a - b);
+
+  for (const n of seasons) {
+    const season = await metaBridge.lookupSeason({ entryId: p.entryId, season: n, domain: p.domain });
+    if (!season.ok) continue;
+    const first = (season.item.episodes || [])
+      .filter((e) => Number.isFinite(e.episodeNumber))
+      .map((e) => e.episodeNumber)
+      .sort((a, b) => a - b)[0];
+    if (first === undefined) continue;
+    const id = metaBridge.itemId(p.domain, 'tv', p.entryId, n, first);
+    const row = db.getPlayback(accountId, id);
+    if (row) return progressItem(row, accountId); // 有隐藏过的旧行也照它的位置回
+    return progressItem({ item_id: id, series_id: seriesId, position_ticks: 0, played: 0, hidden: 0 }, accountId);
+  }
+  return null;
 }
 
 /**

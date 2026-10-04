@@ -574,10 +574,51 @@ async function relayPipe(req, res, { url, headers, label }) {
 }
 
 /**
+ * 外部字节代理链接：面板设置 `streamRelay.forwardEnabled` 打开就 302 过去，字节交给
+ * 外部代理（Cloudflare Worker，见 https://github.com/dlushu/media-bridge-relay 仓库）搬，面板只发 302 不碰字节。
+ *
+ * 参数全部放 URL 上（**无状态**：面板重启/换机都不影响已发出去的链接，比 `sid` 内存表抗造）：
+ *   · u  上游地址（base64url）
+ *   · h  发给上游的请求头 JSON（base64url）—— Cookie 这串头只活在面板内存里，代理拿不到
+ *        就取不动上游；进 URL 会留在代理的访问日志里，属外部代理模式的固有代价
+ *   · s  HMAC-SHA256(面板 forwardSecret, u[.h])，配了 secret 才带 —— 代理验签防白嫖
+ *   · threads / chunkKB  搬运参数照旧带上（`enabled` 关掉时不带 → 代理单连接透传，
+ *     与内置开关的语义一致），面板设置页改了即生效
+ *
+ * 回 '' = 没配外部代理（或拼不出），调用方走面板内置中继。
+ */
+function forwardLink(url, headers, p) {
+  let base = '';
+  let secret = '';
+  try {
+    const s = (settings.read('panel') || {}).streamRelay || {};
+    /* 外转有独立开关：forwardEnabled 没开，即使填了 URL 也不转（URL 留着不丢） */
+    if (!s.forwardEnabled) return '';
+    base = String(s.forwardUrl || '').trim().replace(/\/+$/, '');
+    secret = String(s.forwardSecret || '').trim();
+  } catch {
+    return '';
+  }
+  if (!base) return '';
+  const u = Buffer.from(String(url), 'utf8').toString('base64url');
+  const h = headers && Object.keys(headers).length
+    ? Buffer.from(JSON.stringify(headers), 'utf8').toString('base64url')
+    : '';
+  let link = `${base}?u=${u}`;
+  if (h) link += `&h=${h}`;
+  if (secret) link += `&s=${crypto.createHmac('sha256', secret).update(u + (h ? '.' + h : '')).digest('base64url')}`;
+  if (p && p.enabled) link += `&threads=${p.threads}&chunkKB=${p.chunkKB}`;
+  return link;
+}
+
+/**
  * 字节中继（对外唯一入口，`servePart` / agg 壳 / emby 路由都走它）。两条路：
  *   ① **分块并发**（默认）：探总长 → 有界 Range 切块并发 → 按序吐（`relayChunked`）；
  *   ② **单连接原样透传**（兜底）：总开关关掉、或上游不认 Range / 探不出总长（`relayPipe`）。
  * 走哪条只影响"怎么搬"，不影响 `playVia` 的落法判断（那在 `planStream`）。
+ *
+ * **外转优先**：设置里 `streamRelay.forwardEnabled` 打开就不自己搬 —— 直接 302 到外部代理
+ * （参数见 `forwardLink`），面板从"搬运工"退成"发路条的"。
  *
  * 搬运参数**在这一处合并**：拉流 URL 上的 `?threads=&chunkKB=` 覆盖 `opts` 里那对
  * （源插件 `play` 返回 / 清单子地址记着的），不带就继续往下取面板设置与默认（见 `relayParams`）。
@@ -588,6 +629,12 @@ async function relayBytes(req, res, opts) {
   const { url, headers, label } = opts || {};
   if (!url) return sendError(res, 502, '中继缺地址');
   const p = relayParams(mergeRelayOverrides(urlRelayParams(req), opts));
+  const fwd = forwardLink(url, headers, p);
+  if (fwd) {
+    console.log(`  ⇄ 中继外转 ${label || ''} → 外部字节代理（302，${p.enabled ? `${p.threads} 路 / ${p.chunkKB}KB` : '透传'}）`);
+    res.writeHead(302, { Location: fwd, 'Cache-Control': 'no-store' });
+    return res.end();
+  }
   try {
     if (!p.enabled) return await relayPipe(req, res, { url, headers, label });
     const probe = await probeRange(url, headers);

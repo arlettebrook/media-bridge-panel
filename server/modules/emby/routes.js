@@ -70,6 +70,16 @@ const instance = require('./instance');
 const meta = require('./meta');
 const listener = require('./listener');
 
+/* 取 UserId：真机客户端的写法**不统一** —— CapyPlayer 在 `Shows/NextUp`、`Shows/{id}/Seasons`、
+ * `Items/{id}/Similar` 上发小写 `userId`，在 `Items` 与 `PlaybackInfo` 上发驼峰 `UserId`（Emby 约定是后者）。
+ * 两种都认：小写那几条以前取到 null，被 `assertUser` 判成"id 不属于任何账号 → 404"，
+ * 剧页的季列表与相似推荐整条铺不出来（NextUp 侥幸没事 —— 它走 `accountIdFor`，能从 token 兜回来）。 */
+const userIdOf = (query) => query.get('UserId') || query.get('userId');
+
+/* 取 SeasonId：同一个客户端在参数大小写上本来就混着发（见上面的 `userId`）。
+ * 小写 `seasonId` 取不到时，分集列表会回 **200 但 Items=0** —— 静默空，比 404 更难查，照样放宽。 */
+const seasonIdOf = (query) => query.get('SeasonId') || query.get('seasonId');
+
 /**
  * 未实现端点的统一回应：**记一行**日志（返回序号）+ 501。
  *
@@ -232,7 +242,7 @@ module.exports = function routes(r) {
    */
   r.add('GET', '/api/emby/Shows/NextUp', async (req, res, { query }) => {
     const q = log.queryBrief(query);
-    const out = await service.getNextUp(query.get('UserId'), req, query);
+    const out = await service.getNextUp(userIdOf(query), req, query);
     log.logResult(req, '接下来看 Shows/NextUp', out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });
@@ -305,14 +315,14 @@ module.exports = function routes(r) {
   r.add('GET', '/api/emby/Shows/:showId/Seasons', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, query.get('UserId'));
+    const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `季列表 Shows/${params.showId}/Seasons`, denied, q);
       return sendJson(res, denied.status, denied.body);
     }
 
-    const out = await service.getSeasons(params.showId, query.get('UserId'));
-    service.applyUserData(out, query.get('UserId'), req);
+    const out = await service.getSeasons(params.showId, userIdOf(query));
+    service.applyUserData(out, userIdOf(query), req);
     log.logResult(req, `季列表 Shows/${params.showId}/Seasons`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });
@@ -321,14 +331,14 @@ module.exports = function routes(r) {
   r.add('GET', '/api/emby/Shows/:showId/Episodes', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, query.get('UserId'));
+    const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `分集列表 Shows/${params.showId}/Episodes`, denied, q);
       return sendJson(res, denied.status, denied.body);
     }
 
-    const out = await service.getEpisodes(params.showId, query.get('UserId'), query.get('SeasonId'));
-    service.applyUserData(out, query.get('UserId'), req);
+    const out = await service.getEpisodes(params.showId, userIdOf(query), seasonIdOf(query));
+    service.applyUserData(out, userIdOf(query), req);
     log.logResult(req, `分集列表 Shows/${params.showId}/Episodes`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });
@@ -357,13 +367,13 @@ module.exports = function routes(r) {
   r.add('POST', '/api/emby/Items/:itemId/PlaybackInfo', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, query.get('UserId'));
+    const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `播放信息 Items/${params.itemId}/PlaybackInfo`, denied, q);
       return sendJson(res, denied.status, denied.body);
     }
 
-    const out = await service.getPlaybackInfo(params.itemId, query.get('UserId'), req.headers.host || '', service.tokenFrom(req).token);
+    const out = await service.getPlaybackInfo(params.itemId, userIdOf(query), req.headers.host || '', service.tokenFrom(req).token);
     log.logResult(req, `播放信息 Items/${params.itemId}/PlaybackInfo`, out, q + " " + log.countOf(out, "MediaSources"));
     return sendJson(res, out.status, out.body);
   });
@@ -376,7 +386,7 @@ module.exports = function routes(r) {
    */
   const streamByPath = async (req, res, { params, query }) => {
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, query.get('UserId'));
+    const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `拉流 Items/${params.itemId}/Stream`, denied);
       return sendJson(res, denied.status, denied.body);
@@ -389,7 +399,7 @@ module.exports = function routes(r) {
         error: '路径里的 token 认不出（应是 base64url 的、以 catpaw: 开头的版本 Id）',
       });
     }
-    const out = await service.resolveStream(params.itemId, src, query.get('UserId'), req);
+    const out = await service.resolveStream(params.itemId, src, userIdOf(query), req);
     return serveStream(req, res, out, `Items/${params.itemId}/Stream`);
   };
   r.add('GET', '/api/emby/Items/:itemId/Stream/:token', streamByPath);
@@ -398,13 +408,13 @@ module.exports = function routes(r) {
   /* 渠道 ①'：老的 `?src=&vod=` 形状 —— 不再写进 `Path`，留着手工调试（文档里那条实测走的就是它）。 */
   r.add('GET', '/api/emby/Items/:itemId/Stream', async (req, res, { params, query }) => {
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, query.get('UserId'));
+    const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `拉流 Items/${params.itemId}/Stream`, denied);
       return sendJson(res, denied.status, denied.body);
     }
 
-    const out = await service.resolveStream(params.itemId, query.get('src'), query.get('UserId'), req);
+    const out = await service.resolveStream(params.itemId, query.get('src'), userIdOf(query), req);
     return serveStream(req, res, out, `Items/${params.itemId}/Stream`);
   });
 
@@ -420,7 +430,7 @@ module.exports = function routes(r) {
    */
   const serveDirectVideo = async (req, res, { params, query, pathname }) => {
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, query.get('UserId'));
+    const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `拉流 videos/${params.itemId}/${params.file}`, denied);
       return sendJson(res, denied.status, denied.body);
@@ -431,7 +441,7 @@ module.exports = function routes(r) {
     const out = await service.resolveStream(
       params.itemId,
       query.get('MediaSourceId'),
-      query.get('UserId'),
+      userIdOf(query),
       req // 由本跳的 Host 推 clientHost / origin：本地实例回的是回环地址，插件拿它拼成客户端够得着的
     );
     return serveStream(req, res, out, `videos/${params.itemId}/${params.file}`);
@@ -477,7 +487,7 @@ module.exports = function routes(r) {
    */
   r.add('GET', '/api/emby/Items/:itemId/Download', async (req, res, { params, query }) => {
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, query.get('UserId'));
+    const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `下载 Items/${params.itemId}/Download`, denied);
       return sendJson(res, denied.status, denied.body);
@@ -486,7 +496,7 @@ module.exports = function routes(r) {
     const out = await service.resolveStream(
       params.itemId,
       query.get('MediaSourceId'),
-      query.get('UserId'),
+      userIdOf(query),
       req // 由本跳的 Host 推 clientHost / origin：本地实例回的是回环地址，插件拿它拼成客户端够得着的
     );
     return serveStream(req, res, out, `Items/${params.itemId}/Download`, '下载');
@@ -495,14 +505,14 @@ module.exports = function routes(r) {
   /* 相似推荐：按条目的坐标反查上游（与季/集同类，归 emby 层，不走首页模块） */
   r.add('GET', '/api/emby/Items/:itemId/Similar', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
-    const denied = service.authorize(req, query.get('UserId'));
+    const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `相似推荐 Items/${params.itemId}/Similar`, denied, q);
       return sendJson(res, denied.status, denied.body);
     }
 
-    const out = await service.getSimilar(params.itemId, query.get('UserId'), query.get('Limit'));
-    service.applyUserData(out, query.get('UserId'), req);
+    const out = await service.getSimilar(params.itemId, userIdOf(query), query.get('Limit'));
+    service.applyUserData(out, userIdOf(query), req);
     log.logResult(req, `相似推荐 Items/${params.itemId}/Similar`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });

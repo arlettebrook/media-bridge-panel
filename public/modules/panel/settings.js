@@ -639,6 +639,12 @@ function relayCard() {
   cOn.checked = s.enabled !== false;
   const cThreads = el('input', { type: 'text', value: dflt(s.threads, 16) });
   const cChunk = el('input', { type: 'text', value: dflt(s.chunkKB, 512) });
+  const cFwdOn = el('input', { type: 'checkbox' });
+  cFwdOn.checked = !!s.forwardEnabled;
+  const cForward = el('input', { type: 'text', placeholder: 'https://xxx.workers.dev' });
+  cForward.value = s.forwardUrl || '';
+  const cFwdSecret = el('input', { type: 'text', placeholder: '与代理侧 SECRET 一致（可选）' });
+  cFwdSecret.value = s.forwardSecret || '';
   const save = el('button', { class: 'btn primary', text: '保存' });
 
   /* 留空发 undefined（JSON 会丢掉），后端按默认值算；填了非数字也发 undefined，不让 NaN 落盘 */
@@ -656,7 +662,14 @@ function relayCard() {
         method: 'PUT',
         body: {
           settings: {
-            streamRelay: { enabled: cOn.checked, threads: num(cThreads), chunkKB: num(cChunk) },
+            streamRelay: {
+              enabled: cOn.checked,
+              threads: num(cThreads),
+              chunkKB: num(cChunk),
+              forwardEnabled: cFwdOn.checked,
+              forwardUrl: cForward.value.trim(),
+              forwardSecret: cFwdSecret.value.trim(),
+            },
           },
         },
       });
@@ -680,6 +693,24 @@ function relayCard() {
       el('label', { class: 'chk', title: '关掉就用单连接直搬（上游限速时更慢）' }, cOn, '分块并发')
     ),
     el('div', { class: 'fset' }, fld('并发路数', cThreads), fld('每块大小（KB）', cChunk)),
+    el(
+      'div',
+      { class: 'row' },
+      el('label', { class: 'chk', title: '关掉：即使填了 URL 也不外转，面板自己中继（URL 留着不丢）' }, cFwdOn, '外转到外部字节代理')
+    ),
+    el(
+      'div',
+      { class: 'fset' },
+      fld('外部字节代理 URL', cForward),
+      fld('外部代理签名密钥', cFwdSecret)
+    ),
+    el(
+      'p',
+      { class: 'note' },
+      '打开外转：面板不搬字节，302 把上游地址、请求头与上面的并发参数全部交给代理取流。代理端是 Cloudflare Worker，代码与一键部署见 ',
+      el('a', { href: 'https://github.com/dlushu/media-bridge-relay', target: '_blank', rel: 'noopener', text: 'media-bridge-relay' }),
+      '。'
+    ),
     el('div', { class: 'row btn-row' }, save)
   );
 }

@@ -54,7 +54,7 @@ module.exports = {
        * 所以中继默认**切块 + 多路并发**（默认值与猫爪引擎的网盘档对齐：16 路 / 512KB）。
        * `enabled: false` 退回"单连接、Range 原样透传"（排查与对比用）。
        * 源插件也可以在 `play` 返回里带 `threads` / `chunkKB` 覆盖这一组（那一路优先）。 */
-      streamRelay: { enabled: true, threads: 16, chunkKB: 512 },
+      streamRelay: { enabled: true, threads: 16, chunkKB: 512, forwardEnabled: false, forwardUrl: '', forwardSecret: '' },
     }),
     fields: [
       { key: 'port', label: '面板端口', type: 'number', min: 1, max: 65535 },
@@ -65,9 +65,12 @@ module.exports = {
       { key: 'cache.linesTtlDays', label: '线路结果天数', type: 'text', placeholder: '1（0 = 不缓存）' },
       { key: 'cache.linesMaxMB', label: '线路结果上限 MB', type: 'text', placeholder: '32（0 = 不限）' },
       { key: 'cache.linesNeverExpire', label: '线路结果长期有效', type: 'boolean', hint: '勾上就不按天数过期（只要你不动设置，源里有什么就一直用那份）' },
-      { key: 'streamRelay.enabled', label: '中继分块并发', type: 'boolean', hint: '勾上：按块切、多路并发发有界 Range（默认）。关掉退回单连接原样透传，用于对比排查' },
-      { key: 'streamRelay.threads', label: '中继并发路数', type: 'number', min: 1, max: 32, hint: '同时在飞的有界 Range 请求数（默认 16，对齐猫爪引擎网盘档）' },
-      { key: 'streamRelay.chunkKB', label: '中继分块 KB', type: 'number', min: 64, max: 8192, hint: '每块大小（默认 512KB）' },
+      { key: 'streamRelay.enabled', label: '中继分块并发', type: 'boolean', hint: '勾上：按块切、多路并发发有界 Range（默认）。关掉退回单连接原样透传，用于对比排查。配了外部字节代理时同样生效：关掉就不给代理传并发参数（代理单连接透传）' },
+      { key: 'streamRelay.threads', label: '中继并发路数', type: 'number', min: 1, max: 32, hint: '同时在飞的有界 Range 请求数（默认 16，对齐猫爪引擎网盘档）。配了外部字节代理时随 302 传给代理，同样生效' },
+      { key: 'streamRelay.chunkKB', label: '中继分块 KB', type: 'number', min: 64, max: 8192, hint: '每块大小（默认 512KB）。配了外部字节代理时随 302 传给代理，同样生效' },
+      { key: 'streamRelay.forwardEnabled', label: '外转到外部字节代理', type: 'boolean', hint: '打开：要鉴权头的线路不再由面板搬字节，302 到下方填的代理，上游地址/请求头/并发参数全部随 URL 带过去，由它取流。关掉 = 面板自己中继（即使填了 URL 也不生效）' },
+      { key: 'streamRelay.forwardUrl', label: '外部字节代理 URL', type: 'text', placeholder: 'https://xxx.workers.dev', hint: '代理端用 Cloudflare Worker 部署，代码与一键部署见 https://github.com/dlushu/media-bridge-relay' },
+      { key: 'streamRelay.forwardSecret', label: '外部代理签名密钥', type: 'text', placeholder: '与 Worker 侧 SECRET 一致（可选）', hint: '可选：两边填同一个值，302 链接带 HMAC 签名，代理验签防白嫖；不填不带签名' },
     ],
     validate: (o) => {
       if (!(Number(o.port) >= 1 && Number(o.port) <= 65535)) return 'port 取值 1~65535';
@@ -92,6 +95,10 @@ module.exports = {
           return `streamRelay.${key} 取值 ${lo}~${hi}（当前：${v}）`;
         }
       }
+      /* 外部字节代理只收 http(s)：这是面板 302 要跳过去的外部地址 */
+      const fu = String(sr.forwardUrl || '').trim();
+      if (fu && !/^https?:\/\//i.test(fu)) return `streamRelay.forwardUrl 必须是 http(s) 地址（当前：${fu}）`;
+      if (sr.forwardEnabled && !fu) return '开了「外转到外部字节代理」但没填外部字节代理 URL';
       return null;
     },
   },
