@@ -119,4 +119,21 @@ function notFound(res) {
   return res.end('Not Found');
 }
 
-module.exports = { MIME, sendJson, sendError, sendBuffer, readRawBody, readBody, serveStatic, notFound };
+/**
+ * `Location` 头用的地址：**保证是 ASCII，且不破坏已有的百分号编码**。
+ *
+ * 用 `new URL()`（WHATWG）做归一化 —— 它只补编"URL 里不允许的字符"（中文、空格等非 ASCII），
+ * 已经编码好的 `%3D`/`%2F` 原样保留（实测对源直链 `new URL(u).href === u`）。
+ * **不能用 `encodeURI`**：它把 `%` 也转义（`%3D` → `%253D`），源直链的签名再编一次就对不上（回 400）。
+ * 地址不是合法绝对 URL 时退回 `encodeURI`（至少保证 ASCII，不因编码把响应打挂）。
+ */
+function encodeLocation(url) {
+  const s = String(url);
+  try {
+    return new URL(s).href;
+  } catch {
+    return encodeURI(s);
+  }
+}
+
+module.exports = { MIME, sendJson, sendError, sendBuffer, readRawBody, readBody, serveStatic, notFound, encodeLocation };

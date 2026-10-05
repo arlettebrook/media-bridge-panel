@@ -58,7 +58,7 @@
  *
  * 端点清单与规矩见 docs/emby-compat.md。
  */
-const { sendJson, sendBuffer, readBody, readRawBody } = require('../../core/http');
+const { sendJson, sendBuffer, readBody, readRawBody, encodeLocation } = require('../../core/http');
 const service = require('./service');
 /* 流内核（agg 拥有）：`proxy` 档的清单子地址与字节中继都共用那一份，别再各写一遍 */
 const streamKernel = require('../agg/stream');
@@ -133,8 +133,9 @@ function serveStream(req, res, out, label, verb = '拉流') {
   /* ⚠️ `Location` 里的**非 ASCII 必须先编码**：HTTP 头的值只认 ASCII，Node 碰上中文会直接抛
    * `Invalid character in header content ["Location"]` —— 那时状态行已经写了一半，
    * 客户端看到的是一个莫名其妙的 500（实测：源回的地址里带中文站名时会这样）。
-   * `encodeURI` 只动非 ASCII 与空格，`?`/`&`/`=`/`/` 这些保留字符照旧（不会破坏 query）。 */
-  res.writeHead(302, { Location: encodeURI(out.stream.url), 'Cache-Control': 'no-store' });
+   * 用 `encodeLocation`（`new URL().href`）而**不是** `encodeURI`：后者把 `%` 也转义，
+   * 会把源直链已有的签名（`%3D`/`%2F`）编成 `%253D`，上游校验不过直接 400。 */
+  res.writeHead(302, { Location: encodeLocation(out.stream.url), 'Cache-Control': 'no-store' });
   return res.end();
 }
 
@@ -569,8 +570,9 @@ module.exports = function routes(r) {
     /* 一律 302（见上面那段）：面板只回 `Location`，字节全在源站与客户端之间跑。
      * 两条取图路（tag / 本地索引）已经在上面对 URL 做过校验，仍是这里唯一的 SSRF 防线。 */
     log.logResult(req, `图片 ${label}`, { status: 302, log: `via=${via}` });
-    /* ⚠️ `Location` 里的**非 ASCII 必须先编码**（同 serveStream 那段）：HTTP 头只认 ASCII。 */
-    res.writeHead(302, { Location: encodeURI(url), 'Cache-Control': 'public, max-age=86400' });
+    /* `Location` 里的非 ASCII 必须先编码（同 serveStream 那段）：HTTP 头只认 ASCII。
+     * 用 `encodeLocation` 而非 `encodeURI`：后者把 `%` 也转义，会破坏源直链已有的签名。 */
+    res.writeHead(302, { Location: encodeLocation(url), 'Cache-Control': 'public, max-age=86400' });
     return res.end();
   };
   r.add('GET', '/api/emby/Items/:itemId/Images/:type', imagesByType);

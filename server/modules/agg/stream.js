@@ -31,7 +31,7 @@
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
-const { sendBuffer, sendError } = require('../../core/http');
+const { sendBuffer, sendError, encodeLocation } = require('../../core/http');
 const auth = require('../../core/auth');
 const settings = require('../../core/settings');
 const api = require('./api');
@@ -281,13 +281,17 @@ function relayPlaylist(text, base, { origin, headers, path, over }) {
  * 播放器发的多半是开放式（或干脆不带 Range），单连接原样透传正好撞在限速那一档上。
  * 切块并发不是为了"多开管子刷流量"，而是为了**让每一发都变成有界 Range**。
  */
-const RELAY_DEFAULTS = { threads: 16, chunkKB: 512, timeout: 15000, retries: 1 };
+const RELAY_DEFAULTS = { threads: 16, chunkKB: 512, timeout: 15000, retries: 2 };
 /** 上限只防"参数填错把面板与上游打爆" */
 const RELAY_MAX_THREADS = 32;
 const RELAY_MIN_CHUNK_KB = 64;
 const RELAY_MAX_CHUNK_KB = 8192;
 /** 探测时先要多少字节（只为拿 `content-range` 里的总长，读完即断） */
 const RELAY_PROBE_BYTES = 1024;
+/** 首块自适应：播放器 `bytes=0-` 探测时，前 N 块用小尺寸
+ *  （探测完读几百 KB 就 seek，大块全在飞浪费带宽，还拖慢首字节） */
+const RELAY_HEAD_SMALL_COUNT = 4;
+const RELAY_HEAD_SMALL_BYTES = 256 * 1024;
 
 /**
  * 搬运参数：**外部给的 > 面板设置 > 默认**。
@@ -455,6 +459,9 @@ async function fetchOneChunk(url, headers, start, end, signal, timeout) {
  * 分块并发中继：按 `chunkKB` 切块、**保持 `threads` 路在飞**，完成块**按序**写回客户端。
  * 内存里只留一个滚动窗口（`threads × chunkKB`），不留整片；背压交给 `pipeline`。
  * 客户端断开 → 整个窗口的上游连接一起断。
+ *
+ * 首块自适应：探测式请求（`bytes=0-`，或无 Range 从头全量）的前 4 块用 256KB ——
+ * 播放器起播常发开放式 Range 探测，读几百 KB 就 seek；小块早吐字节，起播更快、少浪费在飞数据。
  */
 async function relayChunked(req, res, { url, headers, label, probe, p }) {
   const head = String(req.method || 'GET').toUpperCase() === 'HEAD';
@@ -478,8 +485,18 @@ async function relayChunked(req, res, { url, headers, label, probe, p }) {
   const ctrl = new AbortController();
   res.on('close', () => ctrl.abort());
 
+  /* 切块边界：探测式请求前 N 块小尺寸，其余正常 chunkSize */
+  const isProbe = req.headers.range === 'bytes=0-' || (!req.headers.range && r.start === 0);
   const chunkSize = p.chunkKB * 1024;
-  const count = Math.ceil((r.end - r.start + 1) / chunkSize);
+  const bounds = [];
+  let pos = r.start;
+  while (pos <= r.end) {
+    const size = isProbe && bounds.length < RELAY_HEAD_SMALL_COUNT ? RELAY_HEAD_SMALL_BYTES : chunkSize;
+    const end = Math.min(pos + size - 1, r.end);
+    bounds.push([pos, end]);
+    pos = end + 1;
+  }
+  const count = bounds.length;
   const pending = new Map();
   let launched = 0;
   let bytes = 0;
@@ -491,8 +508,8 @@ async function relayChunked(req, res, { url, headers, label, probe, p }) {
     while (launched < count && pending.size < p.threads) {
       const i = launched;
       launched += 1;
-      const a = r.start + i * chunkSize;
-      const one = fetchChunk(url, headers, a, Math.min(a + chunkSize - 1, r.end), ctrl.signal, p.timeout, p.retries);
+      const [a, b] = bounds[i];
+      const one = fetchChunk(url, headers, a, b, ctrl.signal, p.timeout, p.retries);
       one.catch(() => {});
       pending.set(i, one);
     }
@@ -671,9 +688,11 @@ async function serveByRef(req, res, { domain, tpl, ref, playVia, clientHost }) {
   const mode = planStream({ url, playVia });
 
   /* ⚠️ `Location` 里的非 ASCII 必须先编码（同 emby 层 `serveStream`）：HTTP 头只认 ASCII，
-   * Node 碰上中文会直接抛 —— 那时状态行已经写了一半（实测源回带中文站名的地址会这样）。 */
+   * Node 碰上中文会直接抛 —— 那时状态行已经写了一半（实测源回带中文站名的地址会这样）。
+   * 用 `encodeLocation` 而**不是** `encodeURI`：后者连 `%` 一起转义，会把源直链里
+   * 已有的签名（`%3D`/`%2F`）编成 `%253D`，上游校验不过直接 400。 */
   if (mode === 'redirect') {
-    res.writeHead(302, { Location: encodeURI(url), 'Cache-Control': 'no-store' });
+    res.writeHead(302, { Location: encodeLocation(url), 'Cache-Control': 'no-store' });
     return res.end();
   }
   /* `proxy` 的非清单地址**直接开搬**，别先去"取清单" —— 那会把一个分片当清单读满 256KB 再判错。
@@ -688,7 +707,7 @@ async function serveByRef(req, res, { domain, tpl, ref, playVia, clientHost }) {
      * `proxy` 档退回 302 等于把"要头的地址"丢给带不了头的客户端 —— 那是必然播不了的死路，
      * 不如如实报错，让日志里看得见原因。 */
     if (mode === 'playlist') {
-      res.writeHead(302, { Location: encodeURI(url), 'Cache-Control': 'no-store' });
+      res.writeHead(302, { Location: encodeLocation(url), 'Cache-Control': 'no-store' });
       return res.end();
     }
     return sendError(res, 502, `中继取清单失败：${got.error}`);
