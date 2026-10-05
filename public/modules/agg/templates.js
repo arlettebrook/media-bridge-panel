@@ -299,7 +299,7 @@ function editor(t) {
   const cc = el('input', { type: 'number', value: String(num(p.concurrency, 8)), min: '1', max: '32' });
   const minScore = el('input', { type: 'number', value: String(num(p.matchMinScore, 0.85)), min: '0', max: '1', step: '0.05' });
   const maxItems = el('input', { type: 'number', value: String(num(p.matchMaxItems, 8)), min: '1', max: '20' });
-  const extraK = el('input', { type: 'number', value: String(num(p.matchExtraK, 0)), min: '0', max: '10' });
+  const extraK = el('input', { type: 'number', value: String(num(p.matchExtraK, 8)), min: '0', max: '10' });
   const extraAllCb = el('input', { type: 'checkbox', checked: p.matchExtraAll === true });
   const lineFilter = el('input', {
     type: 'text',

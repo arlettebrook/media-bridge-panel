@@ -108,7 +108,7 @@ emby 层直接 `require` 该模块而**不经过 HTTP**（原因见 [ARCHITECTUR
 - 早期实现为「名字完全相等，否则把候选名交给上游反查条目编号」，失败点在输入侧：站源标题常含更新话术与
   画质标注（如 `斗破苍穹年番4更211[2025][动漫]`），直接检索无法命中 ⇒ 版本列表为空
   （在 Emby 中表现为「条目在、点开没有版本」）。本地打分不需要外部依赖，且能说明「为什么是这一条」。
-- **阈值与条数进模板**（`matchMinScore` 默认 0.85 / `matchMaxItems` 默认 8 / `matchExtraK` 默认 0，
+- **阈值与条数进模板**（`matchMinScore` 默认 0.85 / `matchMaxItems` 默认 8 / `matchExtraK` 默认 8，
   在「模板」页修改）。web 的「聚合搜索」页**不再填这两项**（它只决定"搜什么"：关键字 / 季 / 集 / 年份），
   要单次覆盖只能直接调接口（请求体里的 `minScore` / `maxItems`，见上面的接口表）。
 - **条数为什么要限制**：每多保留一条命中，后续就要多打一次站源 `/detail` 取链。实测保留 3 条 ≈ 2s，
@@ -129,7 +129,7 @@ emby 层直接 `require` 该模块而**不经过 HTTP**（原因见 [ARCHITECTUR
   它取代 [ADR-0005](adr/0005-continuation-fetch.md) 的触发与停止口径）：
   命中 ≠ 能播 —— 前 `matchMaxItems`（N）条取详情后**一条能用的都没有**（没有线路 / 未定位到这一集）时，
   按分数继续往下打，**最多再试 `matchExtraK`（K）条**，**整批并发、第一批拿到能用的就不再发第二批**；
-  K 填 0 = 不补打（默认）。前面已经有版本时**一条都不补打**。
+  K 填 0 = 不补打（默认 8，即前 8 条都没拿到能用的就补打）。前面已经有版本时**一条都不补打**。
   `matchExtraAll`（开关）= **匹配到底**：不看 K，一直往下打到拿到一条或名单打完（可能很慢）。
   诊断字段：`stats.targetN / matchUsable / extraTried / usableExtra`、`picked.matchedBy='score+extra'`。
 - **定位只认集号**：`detail` 传了 `episode` 就定位（`season` 可选）—— 源里的集名常常只有集号

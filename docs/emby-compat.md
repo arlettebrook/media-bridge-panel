@@ -510,7 +510,7 @@ docker logs -t media-bridge-panel              # 带时间戳
     - **接续补打 = 前面一条能用的都没拿到时才兜底往下打**：命中 ≠ 能播 —— 前
       `matchMaxItems`（N）条取详情后**一条能用的都没有**（空壳没线路、或集名定位不到这一集）时，
       按分数**继续往下打，最多再试 `matchExtraK`（K）条**，**整批并发、第一批拿到就不再发第二批**；
-      K 填 0 = 不补打（默认）；`matchExtraAll` 开关 = **匹配到底**（不看 K，直到拿到一条或名单打完，可能很慢）。
+      K 填 0 = 不补打（默认 8，即前 8 条都没拿到能用的就补打）；`matchExtraAll` 开关 = **匹配到底**（不看 K，直到拿到一条或名单打完，可能很慢）。
       补打的能用的条目里**第一条当"代表"**（`picked.matchedBy = 'score+extra'`），其余进版本列表。
       诊断：`stats.targetN / matchUsable / extraTried / usableExtra`，日志 `↻ agg 接续补打：…`。
       前面只要有能用的就**一次都不补**（实测：首条可用 → 日志里不出现补打那一行）。

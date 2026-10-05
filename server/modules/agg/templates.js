@@ -34,7 +34,7 @@ const PARAM_DEFAULTS = {
   concurrency: 8,
   matchMinScore: 0.85,
   matchMaxItems: 8,
-  matchExtraK: 0,
+  matchExtraK: 8,
   matchExtraAll: false,
   lineFilter: '',
   /* 最近一次测速失败的站，聚合搜索时先跳过（勾选不变，测速成功即自动恢复）。
