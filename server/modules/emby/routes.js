@@ -28,6 +28,7 @@
  *   GET  /api/emby/Shows/{Id}/Seasons        剧的季列表（**占位**：插件的 seasons[]；UserId 在 query 里）
  *   GET  /api/emby/Shows/{Id}/Episodes       某一季的分集（**占位**：插件的取季动作；UserId/SeasonId 在 query 里）
  *   GET  /api/emby/Items/{Id}/Images/{type}  图片（**豁免 token**；tag = `cpimg.<base64url(URL)>.<签名>`，验签不过 404；**一律 302** 到原图；支持 `/Images/{type}/{index}`）
+ *   GET  /api/emby/Users/{UserId}/Images/{type}  用户头像（**豁免 token**；只认 `Primary`，回按 userId 派生的纯色默认 PNG）
  *   GET  /api/emby/Items/{Id}/Similar        相似推荐（按条目坐标反查上游，归 emby 层）
  *
  * 面板自用（不是 Emby 客户端协议，但同样必须注册在通配之前）—— **都走面板门禁**：
@@ -52,9 +53,10 @@
  * 查看：面板「面板设置 → 日志」（内存最近 N 条）+ `docker logs`（长期，自带轮转）。
  *
  * **AccessToken 校验**：除下面这些豁免项外，所有端点都先过 `service.authorize()`
- *   （豁免：握手 / 登录 / 面板自用端点 / 501 通配 —— 图片端点将来也要豁免：
- *   实测 8 条图片请求里 5 条带 `x-emby-authorization`、3 条**什么凭证都不带**（原生 Rex 客户端），
- *   要求 token 会让那部分客户端图全挂；而非图片请求 9/9 都带 `x-emby-token`）。
+ *   （豁免：握手 / 登录 / 面板自用端点 / 501 通配 / **图片端点**：条目图片 `Items/{Id}/Images/{type}`
+ *   与用户头像 `Users/{UserId}/Images/{type}` —— 实测 8 条图片请求里 5 条带 `x-emby-authorization`、
+ *   3 条**什么凭证都不带**（原生 Rex 客户端），要求 token 会让那部分客户端图全挂；
+ *   而非图片请求 9/9 都带 `x-emby-token`）。
  *
  * 端点清单与规矩见 docs/emby-compat.md。
  */
@@ -80,6 +82,12 @@ const userIdOf = (query) => query.get('UserId') || query.get('userId');
  * 小写 `seasonId` 取不到时，分集列表会回 **200 但 Items=0** —— 静默空，比 404 更难查，照样放宽。 */
 const seasonIdOf = (query) => query.get('SeasonId') || query.get('seasonId');
 
+/* 取客户端访问面板用的协议：面板常挂在 HTTPS 反代后面，`Host` 头里**没有协议**，
+ * 只看 Host 拼绝对 URL 会一律吐 `http://`（经 https 进来也照样）—— 反代把协议写在
+ * `X-Forwarded-Proto` 里，先看它、没有才回退 `http`。口径与 agg 的 `streamKernel.originOf` 一致。 */
+const protoOf = (req) =>
+  String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || 'http';
+
 /**
  * 未实现端点的统一回应：**记一行**日志（返回序号）+ 501。
  *
@@ -101,6 +109,18 @@ function notImplemented(req, res, { pathname, query, body }) {
       hint: '该端点尚未实现，已记录到面板日志',
     })
   );
+}
+
+/**
+ * 把 service 结果落到响应上。真机的错误体（401 / 404）是**纯文本**、成功体才是 JSON：
+ * `out.text` 有值即按 `text/plain` 回，否则按 JSON 回。所有受保护端点的发送点都走这里，
+ * 免得每处各判一次（`authorize` 的 401 与 `getUser` 的 404 都靠它出纯文本）。
+ */
+function sendResult(res, out) {
+  if (out.text !== undefined) {
+    return sendBuffer(res, out.status, Buffer.from(out.text, 'utf8'), 'text/plain; charset=utf-8');
+  }
+  return sendJson(res, out.status, out.body);
 }
 
 /**
@@ -157,7 +177,7 @@ module.exports = function routes(r) {
   /* ---------------- 已实现端点（先于通配注册） ---------------- */
 
   r.add('GET', '/api/emby/System/Info/Public', (req, res) => {
-    const info = service.publicInfo(req);
+    const info = service.publicInfo();
     log.logResult(req, '握手 System/Info/Public', { status: 200, log: `ServerName=${info.ServerName} Version=${info.Version}` });
     return sendJson(res, 200, info);
   });
@@ -168,7 +188,9 @@ module.exports = function routes(r) {
     /* 登录**成功与失败都记**：客户端登录时带上试的用户名，401 排查全靠它 */
     const who = String((body && (body.Username || body.username)) || '(空)');
     log.logResult(req, '登录 Users/AuthenticateByName', out, ` user=${who}`);
-    return sendJson(res, out.status, out.body);
+    /* 真机的登录错误是**纯文本**（401「无效用户名或密码。请重试。」/ 400「…appName…」），
+     * 见 service.authenticate —— sendResult 按 out.text 分两支发。 */
+    return sendResult(res, out);
   });
 
   r.add('GET', '/api/emby/Users/:userId', (req, res, { params }) => {
@@ -176,12 +198,12 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, params.userId);
     if (denied) {
       log.logResult(req, `取用户资料 Users/${params.userId}`, denied);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
     const out = service.getUser(params.userId);
     log.logResult(req, `取用户资料 Users/${params.userId}`, out);
-    return sendJson(res, out.status, out.body);
+    return sendResult(res, out);
   });
 
   /* 媒体库列表：每个「启用的」首页插件行 = 一个库（已不再是留白端点） */
@@ -191,7 +213,7 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, params.userId);
     if (denied) {
       log.logResult(req, `媒体库 Users/${params.userId}/Views`, denied, q);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
     const out = service.getViews(params.userId);
@@ -277,7 +299,7 @@ module.exports = function routes(r) {
       const denied = service.authorize(req, params.userId);
       if (denied) {
         log.logResult(req, `条目列表 Users/${params.userId}/Items`, denied, q);
-        return sendJson(res, denied.status, denied.body);
+        return sendResult(res, denied);
       }
     }
 
@@ -302,7 +324,7 @@ module.exports = function routes(r) {
       const denied = service.authorize(req, params.userId);
       if (denied) {
         log.logResult(req, `最新条目 Users/${params.userId}/Items/Latest`, denied, q);
-        return sendJson(res, denied.status, denied.body);
+        return sendResult(res, denied);
       }
     }
 
@@ -319,7 +341,7 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `季列表 Shows/${params.showId}/Seasons`, denied, q);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
     const out = await service.getSeasons(params.showId, userIdOf(query));
@@ -335,7 +357,7 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `分集列表 Shows/${params.showId}/Episodes`, denied, q);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
     const out = await service.getEpisodes(params.showId, userIdOf(query), seasonIdOf(query));
@@ -351,14 +373,15 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, params.userId);
     if (denied) {
       log.logResult(req, `条目详情 Users/…/Items/${params.itemId}`, denied, q);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
     if (!metaBridge.parseItemId(params.itemId)) return notImplemented(req, res, { pathname, query });
 
     /* `host` 传进去是为了让 `MediaSources[].Path` / 条目级 `Path` 是**绝对 URL**
-     * （真机的 Path 也从来不是相对路径）。用请求自己的 Host —— 那正是客户端能连到的地址。 */
-    const out = await service.getItem(params.itemId, params.userId, req.headers.host || '');
+     * （真机的 Path 也从来不是相对路径）。用请求自己的 Host —— 那正是客户端能连到的地址。
+     * `proto` 一起给：反代后面 Host 里没协议，漏了就一律拼成 `http://`（见 protoOf）。 */
+    const out = await service.getItem(params.itemId, params.userId, req.headers.host || '', protoOf(req));
     service.applyUserData(out, params.userId, req);
     log.logResult(req, `条目详情 Users/…/Items/${params.itemId}`, out, q + (out.body && out.body.CatpawSource ? " 源=" + out.body.CatpawSource.Site : ""));
     return sendJson(res, out.status, out.body);
@@ -371,10 +394,10 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `播放信息 Items/${params.itemId}/PlaybackInfo`, denied, q);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
-    const out = await service.getPlaybackInfo(params.itemId, userIdOf(query), req.headers.host || '', service.tokenFrom(req).token);
+    const out = await service.getPlaybackInfo(params.itemId, userIdOf(query), req.headers.host || '', service.tokenFrom(req).token, protoOf(req));
     log.logResult(req, `播放信息 Items/${params.itemId}/PlaybackInfo`, out, q + " " + log.countOf(out, "MediaSources"));
     return sendJson(res, out.status, out.body);
   });
@@ -390,7 +413,7 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `拉流 Items/${params.itemId}/Stream`, denied);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
     const src = service.decodeSourceToken(params.token);
@@ -412,7 +435,7 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `拉流 Items/${params.itemId}/Stream`, denied);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
     const out = await service.resolveStream(params.itemId, query.get('src'), userIdOf(query), req);
@@ -434,7 +457,7 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `拉流 videos/${params.itemId}/${params.file}`, denied);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
     if (!/^stream(\.[a-z0-9]+)?$/i.test(params.file)) return notImplemented(req, res, { pathname, query });
@@ -491,7 +514,7 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `下载 Items/${params.itemId}/Download`, denied);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
     const out = await service.resolveStream(
@@ -509,7 +532,7 @@ module.exports = function routes(r) {
     const denied = service.authorize(req, userIdOf(query));
     if (denied) {
       log.logResult(req, `相似推荐 Items/${params.itemId}/Similar`, denied, q);
-      return sendJson(res, denied.status, denied.body);
+      return sendResult(res, denied);
     }
 
     const out = await service.getSimilar(params.itemId, userIdOf(query), query.get('Limit'));
@@ -577,6 +600,25 @@ module.exports = function routes(r) {
   };
   r.add('GET', '/api/emby/Items/:itemId/Images/:type', imagesByType);
   r.add('GET', '/api/emby/Items/:itemId/Images/:type/:index', imagesByType);
+
+  /**
+   * 用户头像 `GET /Users/{UserId}/Images/{type}` —— **豁免 token**（与条目图片同理）。
+   *
+   * 为什么需要它：客户端登录拿到 `User.PrimaryImageTag` 后就会来要这张图（实测 Lumenic/Capy 都发）。
+   * 真机回用户设置的真实头像；面板没有头像 → service 回一张按 userId 派生的**稳定纯色 PNG**。
+   * 只认 `Primary`，其余类型 404。
+   */
+  const userImagesByType = (req, res, { params }) => {
+    const out = service.userImage(params.userId, params.type);
+    const label = `用户头像 Users/${params.userId}/Images/${params.type}`;
+    if (out.buffer) {
+      log.logResult(req, label, { status: out.status, log: '默认图' });
+      return sendBuffer(res, out.status, out.buffer, out.contentType);
+    }
+    log.logResult(req, label, out);
+    return sendJson(res, out.status, out.body);
+  };
+  r.add('GET', '/api/emby/Users/:userId/Images/:type', userImagesByType);
 
   /* ---------------- 面板自用（非 Emby 客户端协议） ----------------
    * 这一节里的端点**都走面板门禁**（core/auth.js 的 EMBY_PANEL_RE）：Emby 客户端不该、

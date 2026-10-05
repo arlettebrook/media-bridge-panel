@@ -89,52 +89,115 @@ function parseClientHeader(raw) {
 }
 
 /**
+ * 用户名的「首字母」—— 真机 `User.Prefix` 就是首字母大写（实测 `dlushu` → `D`），
+ * 客户端在用户列表里按它分组/排序。空名回空串；取首个字符按码点取（别劈开代理对）。
+ */
+function prefixOf(username) {
+  const s = String(username || '').trim();
+  return s ? Array.from(s)[0].toUpperCase() : '';
+}
+
+/**
+ * 用户头像的 `PrimaryImageTag`。
+ *
+ * 真机给的是一个 32 位 hex 哈希（实测 `df425fabc51edbd0f541de1f8942c2e4`）。我们回
+ * `cpyav.<md5(serverId|用户名)>` —— 与条目图片 tag 的 `cpimg.` 一样是**自用前缀**，
+ * 一眼能认出是面板发的，而且对同一账号永远同值（客户端缓存才有效）。
+ * 值里不含密钥：md5 的输入就是 userId 本身（客户端本来就知道）。
+ */
+function userAvatarTag(username) {
+  return 'cpyav.' + userId(username);
+}
+
+/**
  * 组装 UserDto —— 登录响应里的 User 与 GET /Users/{id} 返回的是同一个对象，
- * 共用这里以保证两处字段一致。字段按 Emby 4.8 的 UserDto 常见项填充。
+ * 共用这里以保证两处字段一致。
+ *
+ * **字段集与取值严格对齐真机样本**（OkEmby 4.9.1.90 实测，见 docs/emby-compat.md「十、#2」）：
+ *   · 顶层只回真机那 13 个键；`HasConfiguredEasyPassword` / `EnableAutoLogin` 真机没有 → 删。
+ *   · `Prefix` / `DateCreated` / `PrimaryImageTag` / `PrimaryImageAspectRatio` 真机有 → 补。
+ *   · `Configuration` 取真机那 15 个键（`SubtitleMode:'Smart'`，含 HidePlayedInMoreLikeThis /
+ *     HidePlayedInSuggestions / ResumeRewindSeconds / IntroSkipMode；删掉真机没有的
+ *     SubtitleLanguagePreference / GroupedFolders / DisplayCollectionsView）。
+ *   · `Policy` 取真机那 44 个权限键，取值也照真机（非管理员、IsHidden、下载/转码/remux 全 false …）。
  */
 function buildUser(username, account) {
   const now = new Date().toISOString();
   return {
     Name: username,
     ServerId: serverId(),
+    Prefix: prefixOf(username),
+    DateCreated: (account && account.created_at) || now,
     Id: userId(username),
+    PrimaryImageTag: userAvatarTag(username),
     HasPassword: true,
     HasConfiguredPassword: true,
-    HasConfiguredEasyPassword: false,
-    EnableAutoLogin: false,
     LastLoginDate: (account && account.last_login_at) || now,
     LastActivityDate: now,
     Configuration: {
       PlayDefaultAudioTrack: true,
-      SubtitleLanguagePreference: '',
       DisplayMissingEpisodes: false,
-      GroupedFolders: [],
-      SubtitleMode: 'Default',
-      DisplayCollectionsView: false,
-      EnableLocalPassword: false,
+      SubtitleMode: 'Smart',
       OrderedViews: [],
       LatestItemsExcludes: [],
       MyMediaExcludes: [],
       HidePlayedInLatest: true,
+      HidePlayedInMoreLikeThis: false,
+      HidePlayedInSuggestions: false,
       RememberAudioSelections: true,
       RememberSubtitleSelections: true,
       EnableNextEpisodeAutoPlay: true,
+      ResumeRewindSeconds: 0,
+      IntroSkipMode: 'ShowButton',
+      EnableLocalPassword: false,
     },
     Policy: {
-      IsAdministrator: true,
-      IsHidden: false,
+      IsAdministrator: false,
+      IsHidden: true,
+      IsHiddenRemotely: true,
+      IsHiddenFromUnusedDevices: true,
       IsDisabled: false,
-      EnableAllFolders: true,
-      EnabledFolders: [],
-      EnableContentDownloading: true,
-      EnableMediaPlayback: true,
-      EnableAudioPlaybackTranscoding: true,
-      EnableVideoPlaybackTranscoding: true,
-      EnablePlaybackRemuxing: true,
+      LockedOutDate: 0,
+      AllowTagOrRating: false,
+      BlockedTags: [],
+      IsTagBlockingModeInclusive: false,
+      IncludeTags: [],
+      EnableUserPreferenceAccess: true,
+      AccessSchedules: [],
+      BlockUnratedItems: [],
       EnableRemoteControlOfOtherUsers: false,
       EnableSharedDeviceControl: false,
+      EnableRemoteAccess: true,
+      EnableLiveTvManagement: false,
+      EnableLiveTvAccess: true,
+      EnableMediaPlayback: true,
+      EnableAudioPlaybackTranscoding: false,
+      EnableVideoPlaybackTranscoding: false,
+      EnablePlaybackRemuxing: false,
+      EnableContentDeletion: false,
+      RestrictedFeatures: [],
+      EnableContentDeletionFromFolders: [],
+      EnableContentDownloading: false,
+      EnableSubtitleDownloading: false,
+      EnableSubtitleManagement: false,
       EnableSyncTranscoding: false,
+      EnableMediaConversion: false,
+      EnabledChannels: [],
+      EnableAllChannels: true,
+      EnabledFolders: [],
+      EnableAllFolders: true,
+      InvalidLoginAttemptCount: 0,
+      EnablePublicSharing: true,
+      RemoteClientBitrateLimit: 0,
+      AuthenticationProviderId: 'Emby.Server.Implementations.Library.DefaultAuthenticationProvider',
+      ExcludedSubFolders: [],
+      SimultaneousStreamLimit: 2,
+      EnabledDevices: [],
+      EnableAllDevices: true,
+      AllowCameraUpload: false,
+      AllowSharingPersonalItems: false,
     },
+    PrimaryImageAspectRatio: 1,
   };
 }
 
@@ -151,16 +214,19 @@ function serverName() {
   return instance.identityOf().serverName;
 }
 
-function publicInfo(req) {
-  const host = req.headers.host || '127.0.0.1:8088';
+/**
+ * 字段集严格对齐**真机样本**（两台实测一致）：只回
+ * `LocalAddresses` / `RemoteAddresses` / `ServerName` / `Version` / `Id` 五个字段。
+ * 两个地址数组真机为空（面板同样不对外广播直连地址），客户端据此回落到当前连接地址；
+ * 多出的 `LocalAddress` / `ProductName` / `OperatingSystem` / `StartupWizardCompleted` 已按真机删掉。
+ */
+function publicInfo() {
   return {
-    LocalAddress: 'http://' + host,
+    LocalAddresses: [],
+    RemoteAddresses: [],
     ServerName: serverName(),
     Version: EMBY_VERSION,
-    ProductName: 'Emby Server',
-    OperatingSystem: process.platform,
     Id: serverId(),
-    StartupWizardCompleted: true,
   };
 }
 
@@ -209,17 +275,51 @@ function authorize(req, requestedUserId) {
     db.touchSession(token);
     return null;
   }
-  return { status: 401, body: { error: '需要有效的 AccessToken（' + problem + '）' }, log: `token 校验不过：${problem}` };
+  return { status: 401, text: 'Access token is invalid or expired.', log: `token 校验不过：${problem}` };
+}
+
+/**
+ * 客户端来源地址 —— 真机 `SessionInfo.RemoteEndPoint` 回的是客户端 IP（实测形如 `113.194.246.0`）。
+ * 面板前面可能有反代（`X-Forwarded-For` 取第一个），否则用 TCP 对端地址；
+ * IPv4-mapped IPv6（`::ffff:1.2.3.4`）去掉前缀，回真机那样的纯 IPv4。
+ */
+function remoteEndPoint(req) {
+  const xff = String((req && req.headers && req.headers['x-forwarded-for']) || '').split(',')[0].trim();
+  const raw = xff || (req && req.socket && req.socket.remoteAddress) || '';
+  return String(raw).replace(/^::ffff:/, '');
+}
+
+/**
+ * 真机 `SessionInfo.InternalDeviceId` 是个数字（实测 171320）—— 由 DeviceId 派生一个**稳定**的
+ * 32 位内整数（同一台设备每次都同值，客户端据此认设备）。
+ */
+function internalDeviceId(deviceId) {
+  const h = crypto.createHash('md5').update(String(deviceId || '')).digest();
+  return h.readUInt32BE(0) % 1000000;
 }
 
 /**
  * POST /Users/AuthenticateByName —— 登录（多账号：按用户名查库 + scrypt 校验）
- * 返回 { status, body, log }；账号不存在 / 密码错都回 401（与 Emby 行为一致）
+ * 返回 { status, body, log }（JSON）或 { status, text, log }（纯文本，见下）；
+ * 账号不存在 / 密码错都回 401（与 Emby 行为一致）。
+ *
+ * **错误响应严格对齐真机**（OkEmby 4.9.1.90 实测，见 docs/emby-compat.md「十、#2」）：
+ *   · 缺 `X-Emby-Authorization`（拿不到 appName）→ 400 **纯文本** `Value cannot be null. (Parameter 'appName')`
+ *   · 用户名/密码不对 → 401 **纯文本** `无效用户名或密码。请重试。`（不区分哪个不匹配，避免暴露用户名是否存在）
  */
 function authenticate(req, body) {
   const username = String((body && (body.Username || body.username)) || '').trim();
   const password = String((body && (body.Pw || body.Password || body.password)) || '');
   const client = parseClientHeader(req.headers['x-emby-authorization']);
+
+  /* 真机先校验参数头（在任何账号逻辑之前），缺 appName 一律 400 纯文本 */
+  if (!client.Client) {
+    return {
+      status: 400,
+      text: "Value cannot be null. (Parameter 'appName')",
+      log: '缺 X-Emby-Authorization（appName）',
+    };
+  }
 
   if (!db.countAccounts()) {
     return {
@@ -234,7 +334,7 @@ function authenticate(req, body) {
     /* 只说"用户名或密码不正确"，**不要**分别标出哪个不匹配 —— 那等于告诉别人某个用户名存不存在 */
     return {
       status: 401,
-      body: { error: '用户名或密码不正确' },
+      text: '无效用户名或密码。请重试。',
       log: `校验失败（用户=${username || '(空)'}）`,
     };
   }
@@ -257,15 +357,37 @@ function authenticate(req, body) {
     log: `登录成功（${acc.username}${clientLabel ? ' · ' + clientLabel : ''}）`,
     body: {
       User: buildUser(acc.username, acc),
+      /* SessionInfo 的**键集与取值对齐真机那 20 个键**（缺了会让客户端的会话面板/设备列表残缺） */
       SessionInfo: {
+        PlayState: {
+          CanSeek: false,
+          IsPaused: false,
+          IsMuted: false,
+          RepeatMode: 'RepeatNone',
+          SleepTimerMode: 'None',
+          SubtitleOffset: 0,
+          Shuffle: false,
+          PlaybackRate: 1,
+        },
+        AdditionalUsers: [],
+        RemoteEndPoint: remoteEndPoint(req),
+        Protocol: 'HTTP/' + ((req && req.httpVersion) || '1.1'),
+        PlayableMediaTypes: [],
+        PlaylistIndex: 0,
+        PlaylistLength: 0,
         Id: crypto.randomBytes(16).toString('hex'),
+        ServerId: serverId(),
         UserId: userId(acc.username),
         UserName: acc.username,
+        UserPrimaryImageTag: userAvatarTag(acc.username),
         Client: client.Client,
+        LastActivityDate: now,
         DeviceName: client.Device,
+        InternalDeviceId: internalDeviceId(client.DeviceId),
         DeviceId: client.DeviceId,
         ApplicationVersion: client.Version,
-        LastActivityDate: now,
+        SupportedCommands: [],
+        SupportsRemoteControl: false,
       },
       AccessToken: token,
       ServerId: serverId(),
@@ -688,7 +810,7 @@ function getUser(requestedId) {
     if (!db.countAccounts()) {
       return { status: 401, body: { error: '面板还没有 Emby 账号' }, log: '还没有账号' };
     }
-    return { status: 404, body: { error: '用户不存在' }, log: 'id 不属于任何账号 → 404：' + requestedId };
+    return { status: 404, text: '找不到请求的用户。最近可能已从服务器中删除了。', log: 'id 不属于任何账号 → 404：' + requestedId };
   }
   return { status: 200, body: buildUser(acc.username, acc), log: 'ok（' + acc.username + '）' };
 }
@@ -2000,7 +2122,7 @@ async function getSimilar(itemId, requestedId, limit) {
  * 聚合只做补充：连不上 / 没配 → 元数据照常返回（日志写明原因），详情页不至于打不开。
  * 粒度说明：站源只有「剧」级条目（`vod_id` 是剧），**集的定位要等聚合层给 detail 契约**。
  */
-async function getItem(itemId, requestedId, host = '') {
+async function getItem(itemId, requestedId, host = '', proto = 'http') {
   const denied = assertUser(requestedId);
   if (denied) return denied;
 
@@ -2188,6 +2310,7 @@ async function getItem(itemId, requestedId, host = '') {
             buildMediaSource({
               itemId,
               host,
+              proto,
               siteLabel,
               line,
               runtimeTicks: found.RunTimeTicks,
@@ -2399,11 +2522,11 @@ function aspectRatioOf(w, h) {
  *
  * ⚠️ 真机 PlaybackInfo 里它还是**相对路径**（`/videos/...`），这里给绝对的 —— 同理：只多不少、不会解析错。
  */
-function directStreamUrl({ itemId, host, token, src, container }) {
+function directStreamUrl({ itemId, host, proto = 'http', token, src, container }) {
   if (!host) return '';
   const file = `stream${container ? '.' + container : ''}`;
   return (
-    `http://${host}/api/emby/videos/${encodeURIComponent(itemId)}/${file}` +
+    `${proto}://${host}/api/emby/videos/${encodeURIComponent(itemId)}/${file}` +
     `?MediaSourceId=${encodeURIComponent(src)}&Static=true` +
     (token ? `&api_key=${encodeURIComponent(token)}` : '')
   );
@@ -2438,7 +2561,7 @@ function itemLabelsOf(items) {
   return specs.map((s, i) => (dup.has(s) ? `${s || '播放项'} · 第 ${i + 1} 项` : s));
 }
 
-function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel = '', host = '', headers = {}, item, itemLabel = '' }) {
+function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel = '', host = '', proto = 'http', headers = {}, item, itemLabel = '' }) {
   /* 这个版本要播的那一项：电影 = 该线路下的某个播放项；剧集 = **定位到的这一集**。
    * 两者都带集名里源标的规格（容器/分辨率/编码/体积），也带**插件给它编的 `ref`**。 */
   const t = item || line.target || {};
@@ -2455,7 +2578,7 @@ function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel 
    * 前面挂**站点来源标签**（站点的完整 `name`，如 `木偶|4K`）—— 多站之后副标题（集名）常常逐字
    * 相同，光看集名分不出来源；标签放前面，长集名被客户端截断时也还看得见是哪个站。 */
   const rel = streamPath(itemId, src, `${siteLabel} · ${fileName}`);
-  const abs = host ? `http://${host}${rel}` : rel;
+  const abs = host ? `${proto}://${host}${rel}` : rel;
   const ms = {
     Id: src,
     Name: title,
@@ -2711,13 +2834,13 @@ function locatorLabel(type, p) {
   return `（非可播类型：${type}）`;
 }
 
-async function getPlaybackInfo(itemId, requestedId, host = '', token = '') {
+async function getPlaybackInfo(itemId, requestedId, host = '', token = '', proto = 'http') {
   const p = metaBridge.parseItemId(itemId);
   if (!isPlayableId(p)) {
     return { status: 404, body: { error: '只有「集」和「电影」有播放信息' }, log: `Id 不是集/电影 → 404：${itemId}` };
   }
 
-  const item = await getItem(itemId, requestedId, host);
+  const item = await getItem(itemId, requestedId, host, proto);
   if (item.status !== 200) return item;
 
   const sources = (item.body.MediaSources || []).map((m) =>
@@ -2725,7 +2848,7 @@ async function getPlaybackInfo(itemId, requestedId, host = '', token = '') {
       /* RequiredHttpHeaders 留空：源要求的请求头由**本层**在 Stream 端点里带上，客户端只管拉 */
       RequiredHttpHeaders: {},
       /* 直连播放地址：**只在这里给**（真机详情里没有它 —— 见 `directStreamUrl` 的注释） */
-      DirectStreamUrl: directStreamUrl({ itemId, host, token, src: m.Id, container: m.Container }),
+      DirectStreamUrl: directStreamUrl({ itemId, host, proto, token, src: m.Id, container: m.Container }),
     })
   );
   return {
@@ -3136,6 +3259,103 @@ function parseImageTag(itemId, tag) {
   return crypto.timingSafeEqual(Buffer.from(want), Buffer.from(got)) ? url : null;
 }
 
+/* ------------------------------------------------ 用户头像（本地生成的默认图） */
+
+/**
+ * PNG 生成 —— 只用 Node 内置 zlib，不引第三方库（本层一贯不引）。
+ *
+ * 为什么要生成：客户端登录后会去要 `Users/{id}/Images/Primary`（因为 UserDto 里带了
+ * `PrimaryImageTag`），面板没有真实头像，不给就会显示破图 —— 就按 userId 派生一张
+ * **稳定纯色**的方图顶上（同账号颜色永远不变，客户端缓存才有效）。
+ */
+
+/** CRC32 查表（PNG 每个 chunk 的末尾都要它） */
+const CRC_TABLE = (() => {
+  const t = new Int32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c;
+  }
+  return t;
+})();
+
+function crc32(buf) {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/** 一个 PNG chunk：长度(4) + 类型(4) + 数据 + CRC(类型+数据)(4) */
+function pngChunk(type, data) {
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(data.length, 0);
+  const typeBuf = Buffer.from(type, 'ascii');
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
+  return Buffer.concat([head, typeBuf, data, crc]);
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/** 生成 size×size 的纯色 PNG（8bit 真彩色；逐行 filter 0） */
+function solidPng(size, rgb) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(size, 0);
+  ihdr.writeUInt32BE(size, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type：truecolor RGB（10..12 = compression/filter/interlace，保持 0）
+  const row = Buffer.alloc(1 + size * 3); // 每行首字节 = filter 类型 0
+  for (let x = 0; x < size; x++) {
+    row[1 + x * 3] = rgb[0];
+    row[2 + x * 3] = rgb[1];
+    row[3 + x * 3] = rgb[2];
+  }
+  const raw = Buffer.concat(new Array(size).fill(row));
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+/** 头像缓存：账号是个位数、图又是纯色，生成一次就够 */
+const avatarPngCache = new Map();
+
+/**
+ * 用户默认头像：按 userId 前 6 位 hex 派生颜色，160×160。
+ * 三通道都压在 32..208 —— 太亮/太暗都不好看，也避免和面板界面撞色。
+ */
+function userAvatarPng(username) {
+  const id = userId(username);
+  const cached = avatarPngCache.get(id);
+  if (cached) return cached;
+  const n = parseInt(id.slice(0, 6), 16) || 0;
+  const rgb = [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff].map((v) => 32 + Math.floor((v / 255) * 176));
+  const png = solidPng(160, rgb);
+  avatarPngCache.set(id, png);
+  return png;
+}
+
+/**
+ * GET /Users/{UserId}/Images/{type} —— 用户头像（**豁免 AccessToken**，与条目图片同理：
+ * 实测有客户端取图不带任何凭证）。
+ *
+ * 真机这里回用户设置的头像；面板没有头像这个概念 → 回按 userId 派生的纯色默认图。
+ * 只认 `Primary`，其它类型 404；UserId 不属于任何账号也 404。
+ */
+function userImage(requestedId, type) {
+  const acc = resolveAccountById(requestedId);
+  if (!acc) {
+    return { status: 404, body: { error: '用户不存在' }, log: 'id 不属于任何账号 → 404：' + requestedId };
+  }
+  if (String(type || '').toLowerCase() !== 'primary') {
+    return { status: 404, body: { error: '没有这种头像：' + type }, log: '不支持的头像类型：' + type };
+  }
+  return { status: 200, buffer: userAvatarPng(acc.username), contentType: 'image/png' };
+}
+
 module.exports = {
   EMBY_VERSION,
   serverId,
@@ -3147,6 +3367,7 @@ module.exports = {
   authorize,
   assertUser,
   getUser,
+  userImage,
   getViews,
   getResume,
   recordPlayback,

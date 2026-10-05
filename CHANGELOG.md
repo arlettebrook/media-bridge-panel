@@ -3,6 +3,33 @@
 本文件记录值得用户注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.8.3] - 2026-10-05
+
+### 修复
+
+- **HTTPS 反代下绝对地址退成 `http://`**：`MediaSources[].Path` 与 `DirectStreamUrl` 只用请求的 `Host`
+  拼绝对 URL，而 `Host` 头里**没有协议** —— 面板挂在 HTTPS 反代后面时仍一律吐 `http://`，
+  客户端可能降级到 80 端口、或被浏览器的混合内容策略拦掉。现先读反代写入的 `X-Forwarded-Proto`、
+  缺省才回退 `http`（口径与聚合层的 `originOf` 一致）。实测：带 `X-Forwarded-Proto: https` 时两条地址均为
+  `https://`，不带头时仍为 `http://`。
+
+### 变更
+
+- **登录与握手响应按真机样本对齐**（逐条对照见 [docs/emby-compat.md](docs/emby-compat.md) 的「十、真机对照记录」）：
+  - `System/Info/Public` 只回真机那 5 个字段：补 `LocalAddresses` / `RemoteAddresses`（空数组），
+    删 `LocalAddress` / `ProductName` / `OperatingSystem` / `StartupWizardCompleted`。
+  - `User`（UserDto）补 `Prefix` / `DateCreated` / `PrimaryImageTag` / `PrimaryImageAspectRatio`，
+    删真机没有的 `HasConfiguredEasyPassword` / `EnableAutoLogin`；`Configuration` 取真机 15 键
+    （`SubtitleMode: Smart`），`Policy` 取真机 44 键（非管理员、`IsHidden`、下载与转码全 false 等）。
+  - `SessionInfo` 从 8 键补到真机 20 键（`PlayState` / `RemoteEndPoint` / `Protocol` / `InternalDeviceId` /
+    `SupportedCommands` / `UserPrimaryImageTag` 等）。
+- **登录与取用户的错误体改为纯文本**（真机如此）：缺 `X-Emby-Authorization` → 400
+  `Value cannot be null. (Parameter 'appName')`；用户名或密码不对 → 401 `无效用户名或密码。请重试。`
+  （不区分哪一个不匹配，避免暴露用户名是否存在）；`Users/{id}` 认不出 → 404 纯文本。
+- **新增用户头像端点** `GET /api/emby/Users/{UserId}/Images/{type}`（**豁免 AccessToken**，与条目图片同理）：
+  只认 `Primary`，回一张按 `UserId` 派生的**稳定纯色 PNG**（160×160，Node 内置 zlib 生成，不引三方库）。
+  `User.PrimaryImageTag` 现在有值，客户端登录后会来拉这张图，不给就是破图。
+
 ## [1.8.2] - 2026-10-05
 
 ### 修复
