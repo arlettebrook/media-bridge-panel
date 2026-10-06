@@ -213,8 +213,8 @@ function rowByFeed(feed) {
 const seen = new Map();
 const seenKey = (pluginId, rowId) => `${pluginId}\u0001${rowId}`;
 
-function remember(pluginId, rowId, items) {
-  if (items && items.length) seen.set(seenKey(pluginId, rowId), items);
+function remember(pluginId, rowId, items, total) {
+  if (items && items.length) seen.set(seenKey(pluginId, rowId), { items, total: Number(total) || 0 });
   if (seen.size > 500) seen.clear(); // 规模不需要 LRU，超了就整份丢（下次取到会再记）
 }
 
@@ -226,7 +226,17 @@ function remember(pluginId, rowId, items) {
  */
 function peekRowItems(pluginId, rowId) {
   const v = seen.get(seenKey(pluginId, rowId));
-  return v || null;
+  return v ? v.items : null;
+}
+
+/**
+ * 该行**最近一次取数时插件申报的总条数**（没有就 `null`）—— 同样**绝不触发上游**。
+ * 给 `Views` 的 `ChildCount` 用（见 `service.homeViewItem`）：客户端点开过这一行就有真实数，
+ * 没点开过就回退占位值（真假取舍写在那边）。
+ */
+function peekRowTotal(pluginId, rowId) {
+  const v = seen.get(seenKey(pluginId, rowId));
+  return v && v.total > 0 ? v.total : null;
 }
 
 /* --------------------------------------------------------- 条目归一化 */
@@ -368,7 +378,7 @@ async function listByQuery(query) {
   const n = normalizeItems(v.items);
   const declared = Number(v.total);
   const total = Number.isFinite(declared) && declared > 0 ? declared : n.items.length;
-  remember(parsed.pluginId, parsed.rowId, n.items);
+  remember(parsed.pluginId, parsed.rowId, n.items, total);
   return {
     items: n.items,
     total,
@@ -384,6 +394,7 @@ module.exports = {
   parseViewId,
   enabledRows,
   peekRowItems,
+  peekRowTotal,
   /** 首页插件原始条目 → HomeItem（output 插件 hostCall home.run 复用同一口径，勿再造一份） */
   normalizeItems,
   rowByFeed,

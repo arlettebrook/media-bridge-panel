@@ -25,6 +25,8 @@
  * 改密或删账号会作废该账号的所有 token。豁免：握手、登录、面板自用端点、501 通配（图片端点将来也要豁免）。
  */
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const zlib = require('zlib'); // 版本 Id 的载荷要压一道（客户端对 URL 长度有硬上限，见 catpawSourceId）
 const metaBridge = require('./meta-bridge');
 const agg = require('../agg/api'); // 聚合层的进程内调用面（原来是打自己的 /api/agg/*，会撞面板门禁 → 见那个文件顶部）
@@ -98,15 +100,28 @@ function prefixOf(username) {
 }
 
 /**
- * 用户头像的 `PrimaryImageTag`。
+ * 默认头像（品牌图标）—— 所有用户共用同一张图：`assets/default-avatar.png`（606×606 透明底）。
  *
- * 真机给的是一个 32 位 hex 哈希（实测 `df425fabc51edbd0f541de1f8942c2e4`）。我们回
- * `cpyav.<md5(serverId|用户名)>` —— 与条目图片 tag 的 `cpimg.` 一样是**自用前缀**，
- * 一眼能认出是面板发的，而且对同一账号永远同值（客户端缓存才有效）。
- * 值里不含密钥：md5 的输入就是 userId 本身（客户端本来就知道）。
+ * **懒读一次**：头像请求低频，不为它拖慢启动；读到后缓存字节与 tag。
+ * tag = 文件内容的 md5 —— 形状与真机的 `PrimaryImageTag` 同款（32 位 hex，真机实测就是这种），
+ * 而且**换图标文件 tag 就变**，客户端的图片缓存自动失效，不用手动管版本。
+ * 文件缺失/读失败 → `{png:null}`，调用方回 404（不崩服务）。
  */
-function userAvatarTag(username) {
-  return 'cpyav.' + userId(username);
+let brandAvatarCache;
+function brandAvatar() {
+  if (brandAvatarCache) return brandAvatarCache;
+  try {
+    const png = fs.readFileSync(path.join(__dirname, 'assets', 'default-avatar.png'));
+    brandAvatarCache = { png, tag: crypto.createHash('md5').update(png).digest('hex') };
+  } catch (e) {
+    brandAvatarCache = { png: null, tag: '', error: e };
+  }
+  return brandAvatarCache;
+}
+
+/** 用户头像的 `PrimaryImageTag`（品牌图标的内容哈希；所有用户同值，见 brandAvatar） */
+function userAvatarTag() {
+  return brandAvatar().tag;
 }
 
 /**
@@ -115,7 +130,9 @@ function userAvatarTag(username) {
  *
  * **字段集与取值严格对齐真机样本**（OkEmby 4.9.1.90 实测，见 docs/emby-compat.md「十、#2」）：
  *   · 顶层只回真机那 13 个键；`HasConfiguredEasyPassword` / `EnableAutoLogin` 真机没有 → 删。
- *   · `Prefix` / `DateCreated` / `PrimaryImageTag` / `PrimaryImageAspectRatio` 真机有 → 补。
+ *   · `Prefix` / `DateCreated` 真机有 → 补。
+ *   · `PrimaryImageTag` / `PrimaryImageAspectRatio` 真机有 → 补（用部署者提供的
+ *     品牌图标，见 `brandAvatar`；图标文件缺失时 tag 为空、不挂这两个键）。
  *   · `Configuration` 取真机那 15 个键（`SubtitleMode:'Smart'`，含 HidePlayedInMoreLikeThis /
  *     HidePlayedInSuggestions / ResumeRewindSeconds / IntroSkipMode；删掉真机没有的
  *     SubtitleLanguagePreference / GroupedFolders / DisplayCollectionsView）。
@@ -123,13 +140,12 @@ function userAvatarTag(username) {
  */
 function buildUser(username, account) {
   const now = new Date().toISOString();
-  return {
+  const u = {
     Name: username,
     ServerId: serverId(),
     Prefix: prefixOf(username),
     DateCreated: (account && account.created_at) || now,
     Id: userId(username),
-    PrimaryImageTag: userAvatarTag(username),
     HasPassword: true,
     HasConfiguredPassword: true,
     LastLoginDate: (account && account.last_login_at) || now,
@@ -197,8 +213,15 @@ function buildUser(username, account) {
       AllowCameraUpload: false,
       AllowSharingPersonalItems: false,
     },
-    PrimaryImageAspectRatio: 1,
   };
+  /* 头像两键随图标文件走：文件在就挂（方形图，比例 1）；读不到就不挂 ——
+   * 不挂 tag 客户端不会去拉，显它自己的默认占位（见 brandAvatar）。 */
+  const avatarTag = userAvatarTag();
+  if (avatarTag) {
+    u.PrimaryImageTag = avatarTag;
+    u.PrimaryImageAspectRatio = 1;
+  }
+  return u;
 }
 
 /** GET /System/Info/Public —— 客户端握手 */
@@ -379,7 +402,8 @@ function authenticate(req, body) {
         ServerId: serverId(),
         UserId: userId(acc.username),
         UserName: acc.username,
-        UserPrimaryImageTag: userAvatarTag(acc.username),
+        /* 文件缺失时 tag 为 '' → JSON 序列化省略该键（同 buildUser 的挂法） */
+        UserPrimaryImageTag: userAvatarTag(),
         Client: client.Client,
         LastActivityDate: now,
         DeviceName: client.Device,
@@ -827,11 +851,13 @@ function getUser(requestedId) {
  *
  * 数据取自 registry 快照（不加载插件代码、不起沙箱）；没有启用的插件行时回空 ——
  * 与留白时期的空响应形状完全一致，客户端不受影响。
+ *
+ * **不校验 requestedId**：真机对 Views 不看 UserId —— 有效 token + 任意/不存在的
+ * UserId 都回 200 全量库（OkEmby 实测，见 docs/emby-compat.md「十、#4」）。
+ * 路由层 `authorize` 已保证 token 有效，这里无需再查账号（原来的 `assertUser`
+ * 在这条路上本来就是死代码：能过 authorize 的 token 必然对应存在的账号）。
  */
-function getViews(requestedId) {
-  const denied = assertUser(requestedId);
-  if (denied) return denied;
-
+function getViews() {
   const items = home.enabledRows().map(homeViewItem);
   return {
     status: 200,
@@ -850,8 +876,9 @@ function getViews(requestedId) {
  * （`docs/emby-compat.md` 有实测值）。每个值的来源都写在下面各自那一行上 ——
  * **推不出来的一律不填**，不为凑字段编值。
  *
- * 唯一**刻意不给**的是 `ParentId`：真机 25/25 都是 `"2"`（服务器根节点），
- * 本实现根本没有那个节点 —— 给了就是指向一个不存在的东西，客户端顺着它去取只会拿到空。
+ * `ParentId` 按真机补**占位值** `"2"`（真机 25/25 都是它，指服务器根聚合节点；本层没有
+ * 那个节点，值是占位 —— 用户已拍板 4-1：字段集与真机一致优先，客户端顺着它取父级会拿到
+ * 501/404，但实测客户端基本不这么干）。
  */
 function homeViewItem(r) {
   const id = home.viewId(r.pluginId, r.rowId);
@@ -909,6 +936,8 @@ function homeViewItem(r) {
     ProviderIds: {},
     IsFolder: true,
     Type: 'CollectionFolder',
+    /* 真机 25/25 都带 `"2"`（服务器根聚合节点）。**占位值**：本层没有那个节点（见函数头注释 4-1） */
+    ParentId: '2',
     UserData: emptyViewUserData(),
     DisplayPreferencesId: guid,
     BackdropImageTags: [],
@@ -922,6 +951,12 @@ function homeViewItem(r) {
    * ⚠️ 该字段曾经**刻意不给**（当时担心客户端不认），实测真机每个库都给 ⇒ 给了更贴近真机。
    * 若哪个客户端反而异常，**第一个该试的就是把这一行去掉**。 */
   if (r.collectionType) item.CollectionType = r.collectionType;
+
+  /* `ChildCount`：真机 12/12 都有（样本全=1，疑似每库挂一个虚拟子文件夹），客户端拿它
+   * 判断空库/画角标。**真实条数优先**：该行被取过内容后，面板内存里就留着插件申报的总数
+   * （`peekRowTotal`，客户端点开过就有，不为它打上游）；还没取过的行回退**占位值 1**
+   * （取 1 不取 0：0 会被客户端当空库）。用户已拍板 4-2。 */
+  item.ChildCount = home.peekRowTotal(r.pluginId, r.rowId) || 1;
 
   if (cover) {
     item.ImageTags = { Primary: tagAndRemember(id, 'Primary', 0, cover) };
@@ -979,33 +1014,6 @@ function getStudios() {
 }
 
 /**
- * 这个 `Items` 查询**会不会真的返回数据**？
- *
- * 只有「认得出是本面板发出去的库 Id」（`ParentId=catpawhome_…`）且不是收藏/已播放时，才会去向
- * 首页模块要数据；其余分支一律**如实回空**。
- *
- * **为什么需要它**：**回空的响应不该校验账号** ——
- * 没有数据可保护，校验只会有坏处：客户端不带 token 时白吃一个 401，而它本该拿到一个空列表。
- * 所以校验只挂在"真会出数据"的那条支路上。
- *
- * ⚠️ 路由层（`routes.js` 决定要不要 `authorize`）与 `getItems` 用的是**同一个函数**，
- * 别各写一份判断 —— 两处一旦漂移，就会出现"校验了但回空"或"出数据却没校验"。
- */
-function itemsWillReturnData(query) {
-  const val = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
-  /* 收藏：仍然一条数据都没有 → 不校验账号；
-   * **已看：现在会出真数据**（读 `playback` 表）⇒ 必须校验，否则未鉴权就能读到
-   * 某个账号的观看记录（跨账号泄漏）。这条判据被路由层与 `getItems` 共用，改一次两边同步。 */
-  if (/IsFavorite/i.test(val('Filters'))) return false;
-  if (/IsPlayed/i.test(val('Filters'))) return true;
-  if (home.parseViewId(val('ParentId'))) return true;
-  if (searchTermOf(query)) return true; // 按名字搜（SearchTerm，见 getItems 的搜索分支）
-  if (searchProviderId(query)) return true; // 按外部 id 搜索（见 getItems 的搜索分支）
-  /* 推荐查询：**只有真的有行接它**才算"会出数据"（没行接 → 回空 → 也就不该校验账号） */
-  return !!home.rowByFeed(feedOfQuery(query));
-}
-
-/**
  * 客户端在按**外部 id** 找条目吗？把 `AnyProviderIdEquals` 解成一张**候选表**。
  *
  * 这个参数是**逗号分隔的多值**，语义是"任一条对上就算"（Emby 的 OR）——
@@ -1021,8 +1029,8 @@ function itemsWillReturnData(query) {
  * 回 `{ refs, skipped }`：`refs` 保序去重、至多 `PROVIDER_REF_MAX` 条（上限是挡"客户端拿一长串
  * 外部 id 刷成一长串上游请求"）；`skipped` 是每条没认出来的原文与原因，供日志点名。
  *
- * **判据只此一处**：`getItems` 的搜索分支与 `itemsWillReturnData`（决定要不要校验账号）都用它，
- * 别各写一份正则（两处一旦漂移，就会出现"出数据却没校验"）。
+ * **判据只此一处**：`getItems` 的搜索分支用它认 `AnyProviderIdEquals`，
+ * 别各写一份正则（多值/形状规则漂移会让检索链路静默失效）。
  */
 const PROVIDER_REF_RE = /^([A-Za-z][A-Za-z0-9]*)\.([A-Za-z0-9][A-Za-z0-9._-]*)$/;
 const PROVIDER_REF_MAX = 8;
@@ -1055,11 +1063,6 @@ function searchProviderRefs(query) {
   return { refs, skipped };
 }
 
-/** 第一个候选（没有就回 null）—— 只判"是不是这条查询"的地方用它，别自己再解析一遍 */
-function searchProviderId(query) {
-  return searchProviderRefs(query).refs[0] || null;
-}
-
 /**
  * 客户端在**按名字搜条目**吗？`SearchTerm=斗破苍穹` → 回那个词，否则回 `''`。
  *
@@ -1071,7 +1074,7 @@ function searchProviderId(query) {
  * 列表项只有 11 个字段（`Id/Name/Type/ImageTags/UserData/…`）—— 说明它就是"给搜索框列卡片"，
  * 不是详情。本实现的形状更全（超集不会出错，见指南「四」）。
  *
- * **判据只此一处**：`getItems` 的搜索分支与 `itemsWillReturnData`（决定要不要校验账号）都用它。
+ * **判据只此一处**：`getItems` 的搜索分支用它认 `SearchTerm`。
  */
 function searchTermOf(query) {
   const val = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
@@ -1367,7 +1370,7 @@ function getItemCounts() {
  *
  * 插件行取数失败 → **照实回失败码**（与上游同一取向：不编占位数据、不回空的假成功）。
  */
-async function getItems(requestedId, query) {
+async function getItems(req, requestedId, query) {
   const val = (key) => (query && typeof query.get === 'function' ? query.get(key) || '' : '');
   const empty = (log) => ({ status: 200, body: { Items: [], TotalRecordCount: 0 }, log });
 
@@ -1376,21 +1379,22 @@ async function getItems(requestedId, query) {
   const filters = val('Filters');
   if (/IsFavorite/i.test(filters)) return empty(`Filters=${filters}（没有收藏数据 → 空）`);
   if (/IsPlayed/i.test(filters)) {
-    const acc = resolveAccountById(requestedId);
-    if (!acc) return empty('Filters=IsPlayed（账号认不出 → 空）');
+    /* 账号从 **token** 认（权威），UserId 只是兜底 —— 5-2 起本端点不校验 UserId（对齐真机） */
+    const accountId = accountIdFor(req, requestedId);
+    if (!accountId) return empty('Filters=IsPlayed（账号认不出 → 空）');
     const want = val('IncludeItemTypes');
-    const rows = db.listPlayed(acc.id, limitOf(query, 50)).filter((r) => {
+    const rows = db.listPlayed(accountId, limitOf(query, 50)).filter((r) => {
       if (!want) return true;
       const p = metaBridge.parseItemId(r.item_id);
       if (!p) return false;
       return p.type === 'movie' ? /movie/i.test(want) : /episode|series/i.test(want);
     });
-    return progressList(rows, acc.id, 'Filters=IsPlayed');
+    return progressList(rows, accountId, 'Filters=IsPlayed');
   }
 
   /* ---- 按名字搜：`SearchTerm=…`（见 `searchTermOf` 那段）----
    * SenPlayer 的搜索框打的就是这条；早期落到"没有可识别的查询参数 → 空"。 */
-  if (searchTermOf(query)) return getSearchItems(requestedId, query);
+  if (searchTermOf(query)) return getSearchItems(query);
 
   /* ---- 搜索/定位：`AnyProviderIdEquals={域}.{编号}` —— 按**外部 id** 找那一条 ----
    *
@@ -1451,13 +1455,8 @@ async function getItems(requestedId, query) {
   }
   const effVid = feedRow ? home.parseViewId(effQuery.get('ParentId')) : vid;
 
-  /* ⚠️ **只在"真的会返回数据"这条路上校验账号**。
-   * 回空的分支没数据可保护，校验只会有坏处 —— 不带 token 的客户端白吃一个 401。
-   * 判据收敛在 `itemsWillReturnData()` 一处，路由层用的是同一个函数，不会漂移。 */
-  if (itemsWillReturnData(query)) {
-    const denied = assertUser(requestedId);
-    if (denied) return denied;
-  }
+  /* token 已在路由层**一律**验过（5-1 对齐真机：无 token 一律 401，不分支路）；
+   * **不比对 UserId**（5-2 对齐真机：真机对 Items 只验 token，合法但不存在的 UserId 也照回 200）。 */
 
   /* 列表数据交给首页模块：它只认自己发出去的库 Id（`catpawhome_…`），其余回 null = 不归它管。
    * **分页也一起透传**（`StartIndex`/`Limit` 进 `ctx`）—— emby 层**不切片**：
@@ -1516,13 +1515,9 @@ const LATEST_DEFAULT_LIMIT = 20;
  * 取不到 → **照实回失败码**（与详情/相似同一取向，不编占位条目）：
  * 一个类型失败、另一个有结果时，回有结果的那部分并在日志里写明（部分失败 ≠ 整条失败）。
  */
-async function getSearchItems(requestedId, query) {
+async function getSearchItems(query) {
   const val = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
   const term = searchTermOf(query);
-
-  /* 真会出数据 ⇒ 校验账号（与 `itemsWillReturnData()` 同口径，那条判据已包含 SearchTerm） */
-  const denied = assertUser(requestedId);
-  if (denied) return denied;
 
   const types = searchTypesOf(val('IncludeItemTypes'));
   const limit = Math.min(Math.max(1, Number(val('Limit')) || SEARCH_DEFAULT_LIMIT), SEARCH_MAX_LIMIT);
@@ -1614,15 +1609,11 @@ async function getSearchItems(requestedId, query) {
  * 真机那条会跨所有库给结果，它靠的是自己的片库索引；这里没有索引，
  * 要凑就得把每一行都跑一遍（10 次上游），那是拿代价换一个答不准的答案。
  */
-async function getLatest(requestedId, query) {
+async function getLatest(query) {
   const val = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
   const vid = home.parseViewId(val('ParentId'));
 
-  /* 与 `Items` 同一条口径：只在"真会出数据"的路上校验账号（判据共用一个函数，别各写一份） */
-  if (itemsWillReturnData(query)) {
-    const denied = assertUser(requestedId);
-    if (denied) return denied;
-  }
+  /* token 已在路由层**一律**验过、**不比对 UserId**（6-1/6-2 对齐真机，与 `getItems` 同口径）。 */
 
   if (!vid) return { status: 200, body: [], log: 'ParentId 不属于本面板的库 → 空数组（如实）' };
 
@@ -3259,101 +3250,35 @@ function parseImageTag(itemId, tag) {
   return crypto.timingSafeEqual(Buffer.from(want), Buffer.from(got)) ? url : null;
 }
 
-/* ------------------------------------------------ 用户头像（本地生成的默认图） */
-
-/**
- * PNG 生成 —— 只用 Node 内置 zlib，不引第三方库（本层一贯不引）。
- *
- * 为什么要生成：客户端登录后会去要 `Users/{id}/Images/Primary`（因为 UserDto 里带了
- * `PrimaryImageTag`），面板没有真实头像，不给就会显示破图 —— 就按 userId 派生一张
- * **稳定纯色**的方图顶上（同账号颜色永远不变，客户端缓存才有效）。
- */
-
-/** CRC32 查表（PNG 每个 chunk 的末尾都要它） */
-const CRC_TABLE = (() => {
-  const t = new Int32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t[n] = c;
-  }
-  return t;
-})();
-
-function crc32(buf) {
-  let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
-
-/** 一个 PNG chunk：长度(4) + 类型(4) + 数据 + CRC(类型+数据)(4) */
-function pngChunk(type, data) {
-  const head = Buffer.alloc(4);
-  head.writeUInt32BE(data.length, 0);
-  const typeBuf = Buffer.from(type, 'ascii');
-  const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
-  return Buffer.concat([head, typeBuf, data, crc]);
-}
-
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-
-/** 生成 size×size 的纯色 PNG（8bit 真彩色；逐行 filter 0） */
-function solidPng(size, rgb) {
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(size, 0);
-  ihdr.writeUInt32BE(size, 4);
-  ihdr[8] = 8; // bit depth
-  ihdr[9] = 2; // color type：truecolor RGB（10..12 = compression/filter/interlace，保持 0）
-  const row = Buffer.alloc(1 + size * 3); // 每行首字节 = filter 类型 0
-  for (let x = 0; x < size; x++) {
-    row[1 + x * 3] = rgb[0];
-    row[2 + x * 3] = rgb[1];
-    row[3 + x * 3] = rgb[2];
-  }
-  const raw = Buffer.concat(new Array(size).fill(row));
-  return Buffer.concat([
-    PNG_SIGNATURE,
-    pngChunk('IHDR', ihdr),
-    pngChunk('IDAT', zlib.deflateSync(raw)),
-    pngChunk('IEND', Buffer.alloc(0)),
-  ]);
-}
-
-/** 头像缓存：账号是个位数、图又是纯色，生成一次就够 */
-const avatarPngCache = new Map();
-
-/**
- * 用户默认头像：按 userId 前 6 位 hex 派生颜色，160×160。
- * 三通道都压在 32..208 —— 太亮/太暗都不好看，也避免和面板界面撞色。
- */
-function userAvatarPng(username) {
-  const id = userId(username);
-  const cached = avatarPngCache.get(id);
-  if (cached) return cached;
-  const n = parseInt(id.slice(0, 6), 16) || 0;
-  const rgb = [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff].map((v) => 32 + Math.floor((v / 255) * 176));
-  const png = solidPng(160, rgb);
-  avatarPngCache.set(id, png);
-  return png;
-}
+/* ------------------------------------------------ 用户头像（品牌图标） */
 
 /**
  * GET /Users/{UserId}/Images/{type} —— 用户头像（**豁免 AccessToken**，与条目图片同理：
  * 实测有客户端取图不带任何凭证）。
  *
- * 真机这里回用户设置的头像；面板没有头像这个概念 → 回按 userId 派生的纯色默认图。
- * 只认 `Primary`，其它类型 404；UserId 不属于任何账号也 404。
+ * **改用部署者提供的品牌图标**：所有用户共用 `assets/default-avatar.png`
+ * （606×606、透明底），字节直接回 200。tag 见 `brandAvatar()` / `userAvatarTag()` —— 与
+ * UserDto.PrimaryImageTag、SessionInfo.UserPrimaryImageTag 三处同源，换文件即全链失效。
+ * 文件缺失/读失败 → **404**（不崩服务，客户端各级对无头像都有兜底）。
+ *
+ * 注：`type` 被**忽略** —— 真机请求头的形状是 `.../Images/Primary?...`，其余 type 真机也回主图，
+ * 统一回同一张即可。
  */
 function userImage(requestedId, type) {
-  const acc = resolveAccountById(requestedId);
-  if (!acc) {
-    return { status: 404, body: { error: '用户不存在' }, log: 'id 不属于任何账号 → 404：' + requestedId };
+  const av = brandAvatar();
+  if (!av.png) {
+    return {
+      status: 404,
+      body: { error: '头像文件缺失' },
+      log: `用户头像 ${requestedId}/Images/${type} → 404（assets/default-avatar.png 读不到）`,
+    };
   }
-  if (String(type || '').toLowerCase() !== 'primary') {
-    return { status: 404, body: { error: '没有这种头像：' + type }, log: '不支持的头像类型：' + type };
-  }
-  return { status: 200, buffer: userAvatarPng(acc.username), contentType: 'image/png' };
+  return {
+    status: 200,
+    buffer: av.png,
+    contentType: 'image/png',
+    log: `用户头像 ${requestedId}/Images/${type} → 200 品牌图标（${av.png.length}B, tag=${av.tag.slice(0, 8)}…）`,
+  };
 }
 
 module.exports = {
@@ -3376,7 +3301,6 @@ module.exports = {
   getStudios,
   getNextUp,
   getItemCounts,
-  itemsWillReturnData,
   applyUserData,
   getItems,
   getLatest,

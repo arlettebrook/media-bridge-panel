@@ -8,7 +8,8 @@
  *   GET  /api/emby/Users/{UserId}            取用户资料
  *   GET  /api/emby/Users/{UserId}/Views      媒体库列表（每个启用的首页插件行 = 一个库；不再是留白）
  *   GET  /api/emby/Users/{UserId}/Items/Resume   继续观看（读 `playback` 表的未看完条目；必须注册在 Items/{ItemId} 之前）
- *   GET  /api/emby/Users/{UserId}/Items      条目列表（列表数据由首页模块决定：认 ParentId=<库Id>；其余如实空）
+ *   GET  /api/emby/Users/{UserId}/Items      条目列表（列表数据由首页模块决定：认 ParentId=<库Id>；其余如实空；
+ *                                            **AccessToken 一律校验**（5-1 起对齐真机，不再分支路）；只验 token 不比对 UserId（5-2））
  *   GET  /api/emby/Users/{UserId}/Items/{ItemId}  单条详情（元数据 + 源绑定走本模块设置里的聚合地址）
  *   POST /api/emby/Users/{UserId}/Items/{ItemId}/HideFromResume  「从继续观看里移除 / 恢复」（`Hide=false` 恢复）
  *   POST|DELETE /api/emby/Users/{UserId}/PlayedItems/{ItemId}    「标记已看 / 未看」（POST=已看、DELETE=未看）
@@ -28,7 +29,8 @@
  *   GET  /api/emby/Shows/{Id}/Seasons        剧的季列表（**占位**：插件的 seasons[]；UserId 在 query 里）
  *   GET  /api/emby/Shows/{Id}/Episodes       某一季的分集（**占位**：插件的取季动作；UserId/SeasonId 在 query 里）
  *   GET  /api/emby/Items/{Id}/Images/{type}  图片（**豁免 token**；tag = `cpimg.<base64url(URL)>.<签名>`，验签不过 404；**一律 302** 到原图；支持 `/Images/{type}/{index}`）
- *   GET  /api/emby/Users/{UserId}/Images/{type}  用户头像（**豁免 token**；只认 `Primary`，回按 userId 派生的纯色默认 PNG）
+ *   GET  /api/emby/Users/{UserId}/Images/{type}  用户头像（**豁免 token**；**回品牌图标**
+ *                                                `assets/default-avatar.png`，tag = 文件内容 md5；文件缺失 404，见 service.userImage）
  *   GET  /api/emby/Items/{Id}/Similar        相似推荐（按条目坐标反查上游，归 emby 层）
  *
  * 面板自用（不是 Emby 客户端协议，但同样必须注册在通配之前）—— **都走面板门禁**：
@@ -209,14 +211,16 @@ module.exports = function routes(r) {
   /* 媒体库列表：每个「启用的」首页插件行 = 一个库（已不再是留白端点） */
   r.add('GET', '/api/emby/Users/:userId/Views', (req, res, { params, query }) => {
     const q = log.queryBrief(query);
-    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, params.userId);
+    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401。
+     * **不比对 userId** —— 真机对 Views 不看 UserId（有效 token + 任意 userId 都回 200，
+     * 实测见 docs/emby-compat.md「十、#4」），authorize 只验 token 就够。 */
+    const denied = service.authorize(req);
     if (denied) {
       log.logResult(req, `媒体库 Users/${params.userId}/Views`, denied, q);
       return sendResult(res, denied);
     }
 
-    const out = service.getViews(params.userId);
+    const out = service.getViews();
     log.logResult(req, `媒体库 Users/${params.userId}/Views`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });
@@ -245,7 +249,7 @@ module.exports = function routes(r) {
    *
    * **不校验 token / UserId**：**回空的响应没有数据可保护**，
    * 校验只会有坏处 —— 客户端不带 token 时白吃一个 401，而它本该拿到一个空列表。
-   * 同口径的还有 `Items/Resume` 与 `Items` 里那些回空的分支（见 `service.itemsWillReturnData`）。
+   * （`Items` / `Items/Latest` 自 5-1/6-1 起已改为一律校验，本条仍保持豁免。）
    */
   r.add('GET', '/api/emby/Studios', (req, res, { query }) => {
     const q = log.queryBrief(query);
@@ -291,19 +295,18 @@ module.exports = function routes(r) {
   /* 条目列表：列表数据由首页模块决定（认 ParentId=<库Id>）；收藏/已播放如实空；其余查询如实空 */
   r.add('GET', '/api/emby/Users/:userId/Items', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
-    /* AccessToken 守卫**只挂在这条真会出数据的路上**（见 `service.itemsWillReturnData`）：
-     * 收藏/已播放、以及认不出的查询都是**如实回空**，回空没有数据可保护，
-     * 校验只会有坏处 —— 客户端不带 token 时白吃一个 401，而它本该拿到空列表。
-     * ⚠️ 判据与 `service.getItems` 内部用的是**同一个函数**，别在这里另写一份。 */
-    if (service.itemsWillReturnData(query)) {
-      const denied = service.authorize(req, params.userId);
-      if (denied) {
-        log.logResult(req, `条目列表 Users/${params.userId}/Items`, denied, q);
-        return sendResult(res, denied);
-      }
+    /* AccessToken **一律校验**（5-1 对齐真机：真机对 Items 的任何查询无 token 都是 401 纯文本，
+     * 不分"回空/出数据"支路 —— 正常客户端都带 token，无人被误伤；
+     * 「收藏」后续实现出真数据时本就要校验，口径不变）。
+     * **只验 token、不比对 UserId**（5-2 对齐真机：真机对 Items 不校验 UserId，
+     * 合法但不存在的 UserId + 有效 token → 200 照回数据）。 */
+    const denied = service.authorize(req);
+    if (denied) {
+      log.logResult(req, `条目列表 Users/${params.userId}/Items`, denied, q);
+      return sendResult(res, denied);
     }
 
-    const out = await service.getItems(params.userId, query);
+    const out = await service.getItems(req, params.userId, query);
     service.applyUserData(out, params.userId, req);
     log.logResult(req, `条目列表 Users/${params.userId}/Items`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
@@ -319,16 +322,15 @@ module.exports = function routes(r) {
    */
   r.add('GET', '/api/emby/Users/:userId/Items/Latest', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
-    /* 与 `Items` 同一条口径：只在"真会出数据"的路上校验账号（判据共用 `itemsWillReturnData`） */
-    if (service.itemsWillReturnData(query)) {
-      const denied = service.authorize(req, params.userId);
-      if (denied) {
-        log.logResult(req, `最新条目 Users/${params.userId}/Items/Latest`, denied, q);
-        return sendResult(res, denied);
-      }
+    /* AccessToken **一律校验**、**不比对 UserId** —— 与 `Items` 同口径（6-1/6-2 对齐真机，
+     * 见 #5 的 5-1/5-2：无 token 一律 401；合法但不存在的 UserId + 有效 token → 200）。 */
+    const denied = service.authorize(req);
+    if (denied) {
+      log.logResult(req, `最新条目 Users/${params.userId}/Items/Latest`, denied, q);
+      return sendResult(res, denied);
     }
 
-    const out = await service.getLatest(params.userId, query);
+    const out = await service.getLatest(query);
     service.applyUserData(out, params.userId, req);
     log.logResult(req, `最新条目 Users/${params.userId}/Items/Latest`, out, q + " " + log.countOf(out, "items"));
     return sendJson(res, out.status, out.body);
@@ -604,21 +606,17 @@ module.exports = function routes(r) {
   /**
    * 用户头像 `GET /Users/{UserId}/Images/{type}` —— **豁免 token**（与条目图片同理）。
    *
-   * 为什么需要它：客户端登录拿到 `User.PrimaryImageTag` 后就会来要这张图（实测 Lumenic/Capy 都发）。
-   * 真机回用户设置的真实头像；面板没有头像 → service 回一张按 userId 派生的**稳定纯色 PNG**。
-   * 只认 `Primary`，其余类型 404。
+   * **回部署者提供的品牌图标**：`assets/default-avatar.png`，所有用户共用同一张；
+   * UserDto.PrimaryImageTag / SessionInfo.UserPrimaryImageTag 与其内容 md5 同源（见 service）。
+   * 文件缺失 → service 回 404，这里照常分发。
+   * （原先按 userId 派生纯色 PNG 的实现在 git 61b3d0d 里。）
    */
-  const userImagesByType = (req, res, { params }) => {
+  r.add('GET', '/api/emby/Users/:userId/Images/:type', (req, res, { params }) => {
     const out = service.userImage(params.userId, params.type);
-    const label = `用户头像 Users/${params.userId}/Images/${params.type}`;
-    if (out.buffer) {
-      log.logResult(req, label, { status: out.status, log: '默认图' });
-      return sendBuffer(res, out.status, out.buffer, out.contentType);
-    }
-    log.logResult(req, label, out);
+    log.logResult(req, `用户头像 Users/${params.userId}/Images/${params.type}`, out);
+    if (out.buffer) return sendBuffer(res, out.status, out.buffer, out.contentType);
     return sendJson(res, out.status, out.body);
-  };
-  r.add('GET', '/api/emby/Users/:userId/Images/:type', userImagesByType);
+  });
 
   /* ---------------- 面板自用（非 Emby 客户端协议） ----------------
    * 这一节里的端点**都走面板门禁**（core/auth.js 的 EMBY_PANEL_RE）：Emby 客户端不该、

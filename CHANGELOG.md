@@ -3,6 +3,22 @@
 本文件记录值得用户注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.8.4] - 2026-10-06
+
+### 变更
+
+- **Emby 客户端协议继续按真机对齐**（逐条对照与取样见 [docs/emby-compat.md](docs/emby-compat.md) 的「十、真机对照记录」）：
+  - **`Users/{UserId}` 不再核对 UserId 与 token 是否同一人**：实测真机不校验，只要有有效 token，
+    UserId 换成任意合法值照样回数据。`Views` 也同步放宽（`authorize(req)` 不再比对 userId）。
+  - **`Items` / `Items/Latest` 收紧守卫**：无 token 一律 **401**（原来部分空查询分支会「照常回空」）；
+    userId 与 `Views` 同口径放宽。两条端点的推荐/收藏/已看/搜索等分支形状逐一对过真机样本。
+  - **`Views` 补齐字段**：`ParentId` 给占位值 `"2"`；`ChildCount` 优先用该行**已知的真实条数**
+    （首页插件记过就有），没记过时回退 `1`。
+- **用户头像改用部署者提供的品牌图标**：`GET /api/emby/Users/{UserId}/Images/{type}` 不再回按 `UserId`
+  派生的纯色 PNG，改为统一回 `server/modules/emby/assets/default-avatar.png`（606×606 透明底，所有用户
+  共用一张）。`User.PrimaryImageTag` / `SessionInfo.UserPrimaryImageTag` = **该文件内容的 md5**
+  （32 位 hex，与真机同形状）—— 换图标文件即自动失效客户端图片缓存，无需手动改版本号。
+
 ## [1.8.3] - 2026-10-05
 
 ### 修复
