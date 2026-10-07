@@ -543,7 +543,49 @@ function parseEpisodeMeta(raw) {
   else if (/\bhdr\b/i.test(s)) out.videoRange = 'HDR';
   else if (/\bhlg\b/i.test(s)) out.videoRange = 'HLG';
 
+  /* 来源（WEB-DL / BluRay / HDTV / DVD）：集名里写了才认 */
+  if (/\b(web-?dl|webrip)\b/i.test(s)) out.source = 'WEB-DL';
+  else if (/\b(bluray|blu-?ray|bdrip)\b/i.test(s)) out.source = 'BluRay';
+  else if (/\bhdtv\b/i.test(s)) out.source = 'HDTV';
+  else if (/\bdvd\b/i.test(s)) out.source = 'DVD';
+
   return out;
+}
+
+/* 规格 token → 标准文件名（scene naming）写法。`parseEpisodeMeta` 为了填 Emby DTO 用的是
+ * 引擎枚举（`hevc` / `eac3` / `DOVI`…），文件名副标题则换成圈内通行写法（`H.265` / `DDP` / `DV`…）。
+ * 认不出的值原样大写兜底，不编。 */
+const NAME_CODEC = { hevc: 'H.265', h264: 'H.264', av1: 'AV1' };
+const NAME_AUDIO = { eac3: 'DDP', ac3: 'DD', truehd: 'TrueHD', dts: 'DTS', aac: 'AAC', flac: 'FLAC' };
+const NAME_RANGE = { DOVI: 'DV' };
+
+/**
+ * 用解析出的规格拼一个标准文件名
+ * （`标题.年份.季集.分辨率.来源.音频(含声道).Atmos.动态范围.视频编码.容器`）。
+ * `title` / `year` 来自搜索标题（`rawTitle`），规格来自 `parseEpisodeMeta`；
+ * 缺哪个字段就跳过哪段，不编。音频与声道并成一段（`DDP` + `5.1` → `DDP5.1`），与样例一致。
+ */
+function buildStandardName(title, year, meta, season, episode) {
+  const parts = [];
+  if (title) parts.push(title);
+  if (year) parts.push(year);
+  if (season !== undefined && season !== null && episode !== undefined && episode !== null) {
+    parts.push(`S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`);
+  } else if (episode !== undefined && episode !== null) {
+    parts.push(`E${String(episode).padStart(2, '0')}`);
+  }
+  const video = meta.videoCodec ? (NAME_CODEC[meta.videoCodec] || meta.videoCodec.toUpperCase()) : '';
+  const audioBase = meta.audioCodec ? (NAME_AUDIO[meta.audioCodec] || meta.audioCodec.toUpperCase()) : '';
+  const audio = `${audioBase}${meta.channelLayout || ''}`;
+  const range = meta.videoRange ? (NAME_RANGE[meta.videoRange] || meta.videoRange) : '';
+  if (meta.height) parts.push(`${meta.height}p`);
+  if (meta.source) parts.push(meta.source);
+  if (audio) parts.push(audio);
+  if (meta.atmos) parts.push('Atmos');
+  if (range) parts.push(range);
+  if (video) parts.push(video);
+  const ext = meta.container || 'mkv';
+  return parts.length ? `${parts.join('.')}.${ext}` : '';
 }
 
 /** 变体的标注后缀：取名字里**括号段的内容**拼一句（`蜘蛛侠（臻彩）` → `臻彩`，多个用空格连）。 */
@@ -696,6 +738,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
     out.stats.sources = 1;
     /* 产出前滤掉规则不匹配的线路（快路径与正常路径**都要做**，见 `applyLineFilter`） */
     if (lf.raw) applyLineFilter(out, lf);
+    fillStandardNames(out, opts.name, opts.year, season, episode);
     out.elapsedMs = Date.now() - t0;
     return out;
   }
@@ -979,8 +1022,34 @@ async function aggregateDetail(sources, sites, opts = {}) {
   /* 「这份详情对客户端有没有用」= **过滤后**至少有一条能列出来 ——
    * `api.js` 的 `cacheableLines` 读它决定存不存这份线路结果（见 ADR-0025 / ADR-0032）。 */
   out.stats.usable = usableItems;
+
+  fillStandardNames(out, opts.name, opts.year, season, episode);
   out.elapsedMs = Date.now() - t0;
   return out;
+}
+
+/** 给每个 item/target 拼标准文件名（`标题.年份.季集.规格.容器`），供 emby 层当 Path 末段。
+ * 遍历所有 detail 的 target/items，插件给了的字段优先，没给的用解析出的兜底。 */
+function fillStandardNames(out, name, year, season, episode) {
+  const fillDetail = (detail) => {
+    for (const line of (detail && detail.lines) || []) {
+      for (const x of [].concat(line.items || [], line.target ? [line.target] : [])) {
+        if (x.standardName) continue;
+        const meta = {};
+        for (const k of ['height', 'source', 'videoCodec', 'audioCodec', 'atmos', 'videoRange', 'channelLayout', 'container']) {
+          if (x[k] !== undefined && x[k] !== null && x[k] !== '' && x[k] !== 0 && x[k] !== false) meta[k] = x[k];
+        }
+        x.standardName = buildStandardName(name, year, meta, season, episode);
+      }
+    }
+  };
+  for (const site of out.sites) {
+    /* 代表条目与**同片别名变体**各有一份 detail（变体也有自己的 `lines` / `target`，
+     * emby 层两条都展开成版本行，见 `getItem`）—— 漏掉变体就会出现「同一个站有的版本有标准名、
+     * 有的还是原始文件名」（实测：`三体 S01E10` 代表条目 0 线路、10 条变体在扛，副标题全没拼上）。 */
+    fillDetail(site.detail);
+    for (const v of site.variants || []) fillDetail(v.detail);
+  }
 }
 
 const NON_HTTP_URL = /^(push|magnet|ed2k|thunder|ftp|rtmp):/i;

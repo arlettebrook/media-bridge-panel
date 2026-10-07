@@ -4,6 +4,7 @@
  *
  * 只做已实现端点所需的事：
  *   GET  /api/emby/System/Info/Public        握手：告诉客户端这是个 Emby 服务器
+ *   GET  /api/emby/System/Info               完整服务器信息（**诚实子集**：只给面板真有的字段，见 systemInfo）
  *   POST /api/emby/Users/AuthenticateByName  登录：校验面板账号，发一个 AccessToken
  *   GET  /api/emby/Users/{UserId}            取用户资料（客户端登录后紧接着就会要）
  *   GET  /api/emby/Users/{UserId}/Views      媒体库列表（每个启用的插件行 = 一个库，见 getViews）
@@ -51,6 +52,16 @@ function serverId() {
 }
 
 /**
+ * 当前实例允不允许下载 —— 实例级开关（见 instance.js），**默认开**。
+ * 驱动三处：握手 `Policy.EnableContentDownloading`、条目 `CanDownload`、
+ * `Items/{ItemId}/Download` 端点门禁，三处口径必须一致（说支持就得真给下）。
+ */
+function allowDownload() {
+  const inst = instance.current();
+  return !inst || inst.allowDownload === undefined ? true : !!inst.allowDownload;
+}
+
+/**
  * 用户 Id：由「服务器 Id + 用户名」派生，稳定且无需额外存储（多账号各自不同）。
  * 归一化走 db.normName —— 登录、查重、UserId 必须同一套规则，否则会出现
  * 「登录成功但 /Users/{id} 404」（用户名带大小写/全角时最明显）。
@@ -79,15 +90,64 @@ function resolveAccountById(requestedId) {
   return null;
 }
 
-/** 解析客户端的 X-Emby-Authorization：MediaBrowser Client="…", Device="…", DeviceId="…", Version="…" */
+/**
+ * 取授权头里某个 `Key=值`。
+ *
+ * **真机对引号可选**（实测 nyamedia 4.8.0.62：`Client="Filmly"` 与 `Client=Filmly` 都 200），
+ * 面板原先只认带引号的写法，客户端省掉引号就取不到 appName、登录被误判 400（真机反而放行）。
+ * 故两种都收：优先带引号的整段，其次取到逗号为止（真机这串以逗号分隔字段，值里不含逗号）。
+ * `Device` 不会误吃 `DeviceId=`（`Device` 后面是 `I` 不是 `=`）。
+ */
+function pickHeaderValue(text, key) {
+  /* `text` 可能是 `undefined`：调用方（`tokenFrom`）按名字取头，缺哪个名字就是 `undefined`。
+   * 直接 `undefined.match` 会把**整个请求**打成 500（只剩 `api_key`、不带 `X-Emby-Authorization`
+   * 的客户端，实测就踩这条）—— 这里如实当"取不到"（Boundary 上的防御）。 */
+  const m = String(text || '').match(new RegExp(key + '\\s*=\\s*(?:"([^"]*)"|([^",]*))', 'i'));
+  if (!m) return '';
+  return (m[1] !== undefined ? m[1] : m[2]).trim();
+}
+
+/** 解析客户端的 X-Emby-Authorization：MediaBrowser Client="…", Device="…", DeviceId="…", Version="…"（引号可省） */
 function parseClientHeader(raw) {
   const out = { Client: '', Device: '', DeviceId: '', Version: '' };
   const text = String(raw || '');
   for (const key of ['Client', 'Device', 'DeviceId', 'Version']) {
-    const m = text.match(new RegExp(key + '="([^"]*)"', 'i'));
-    if (m) out[key] = m[1];
+    out[key] = pickHeaderValue(text, key);
   }
   return out;
+}
+
+/**
+ * 取 URL query 里某个参数（字段名**大小写不敏感**，对齐真机 ASP.NET 的绑定口径）。
+ *
+ * Emby 允许客户端把 appName 放在 query（如 `?X-Emby-Client=…`）而不是授权头里 ——
+ * 实测 Filmly / 网易爆米花就只发 query、头里**没有** `Client=`（见 docs/emby-realdevice/02-…）。
+ * 面板原先只看头，遇到这类客户端把登录误判成「缺 appName」400；真机却放行。
+ */
+function queryParam(req, name) {
+  const qs = String((req && req.url) || '');
+  const start = qs.indexOf('?');
+  if (start === -1) return '';
+  const want = name.toLowerCase();
+  for (const pair of qs.slice(start + 1).split('&')) {
+    if (!pair) continue;
+    const eq = pair.indexOf('=');
+    const key = eq === -1 ? pair : pair.slice(0, eq);
+    let k = key;
+    try {
+      k = decodeURIComponent(key);
+    } catch {
+      /* 非法转义就按原样比 */
+    }
+    if (k.toLowerCase() !== want) continue;
+    const val = eq === -1 ? '' : pair.slice(eq + 1);
+    try {
+      return decodeURIComponent(val.replace(/\+/g, ' '));
+    } catch {
+      return val;
+    }
+  }
+  return '';
 }
 
 /**
@@ -193,7 +253,8 @@ function buildUser(username, account) {
       EnableContentDeletion: false,
       RestrictedFeatures: [],
       EnableContentDeletionFromFolders: [],
-      EnableContentDownloading: false,
+      /* 跟随实例级「下载」开关（默认开）；与条目 `CanDownload`、Download 端点同一口径 */
+      EnableContentDownloading: allowDownload(),
       EnableSubtitleDownloading: false,
       EnableSubtitleManagement: false,
       EnableSyncTranscoding: false,
@@ -254,6 +315,64 @@ function publicInfo() {
 }
 
 /**
+ * 本机入口地址 —— 从请求 `Host` 头取、去掉端口（与 routes.js 拼「连接地址」用的对外主机名同一份实现）。
+ * 真机 `LocalAddress` 回的是服务器自己的内网 IP；面板不对外广播直连地址，照实回客户端连进来的那个主机名。
+ * 取不到回环；IPv6 字面量（`[::1]:8096`）只取方括号里的部分。
+ */
+function hostOf(req) {
+  const h = String((req && req.headers && req.headers.host) || '').trim();
+  if (!h) return '127.0.0.1';
+  if (h.startsWith('[')) return h.slice(0, h.indexOf(']') + 1);
+  return h.split(':')[0];
+}
+
+/**
+ * 面板运行所在的操作系统 —— 照 Emby 的展示写法（真机样本为 `Linux`）。
+ * Node 的 `process.platform` 取值（`linux` / `darwin` / `win32` …）与 Emby 不同，做一次映射；
+ * 没覆盖到的平台原样回（照实，不编）。
+ */
+function operatingSystem() {
+  const names = { linux: 'Linux', darwin: 'OSX', win32: 'Windows', freebsd: 'FreeBSD' };
+  return names[process.platform] || process.platform;
+}
+
+/**
+ * GET /System/Info —— 带 token 的完整服务器信息（客户端登录后拿它判断"这台服务器有哪些能力"）。
+ *
+ * **诚实子集**（取舍见 [ADR-0057](docs/adr/0057-emby-system-info-honest-subset.md) 与
+ * docs/emby-realdevice/20-system-info.md）：端点认领，但字段**只给面板真有的** ——
+ * 面板不是 Emby 服务端：本地媒体库扫描 / 转码 / 自重启 / 自更新 / Wake-on-LAN 一概没有，
+ * 对应能力位**一律如实 `false`**；两个地址数组照 `publicInfo` 回空。
+ * `WebSocketPortNumber` / `HttpServerPortNumber` / `HttpsPortNumber` / `SupportsLocalPortConfiguration` /
+ * `WanAddress` / `SystemUpdateLevel` / `OperatingSystemDisplayName` / `HardwareAccelerationRequiresPremiere`
+ * 这些面板**没有对应物**的字段**不回**（不编造数值），故字段集小于真机 4.8 的 25 个。
+ */
+function systemInfo(req) {
+  return {
+    /* 能力位：面板没有的能力一律如实 false（不是"关掉了"，是根本没有） */
+    HasPendingRestart: false,
+    IsShuttingDown: false,
+    SupportsLibraryMonitor: false,
+    CanSelfRestart: false,
+    CanSelfUpdate: false,
+    CanLaunchWebBrowser: false,
+    SupportsHttps: false,
+    HasUpdateAvailable: false,
+    SupportsAutoRunAtStartup: false,
+    /* 面板自己 */
+    ServerName: serverName(),
+    Version: EMBY_VERSION,
+    Id: serverId(),
+    OperatingSystem: operatingSystem(),
+    /* 地址：入口主机名（请求 Host 去端口）+ 与握手同口径的空数组 */
+    LocalAddress: hostOf(req),
+    LocalAddresses: [],
+    RemoteAddresses: [],
+    CompletedInstallations: [],
+  };
+}
+
+/**
  * 从请求里取客户端带来的 AccessToken —— Emby 客户端三种带法都认：
  *   ① 头 `X-Emby-Token`（绝大多数请求）
  *   ② 头 `X-Emby-Authorization` 里的 `Token="…"`（部分客户端把 token 塞进那串）
@@ -263,11 +382,11 @@ function tokenFrom(req) {
   const h = (req && req.headers) || {};
   const direct = String(h['x-emby-token'] || '').trim();
   if (direct) return { token: direct, from: 'x-emby-token' };
-  /* MediaBrowser / Emby 授权头：`Client="…", Device="…", Token="…"`
+  /* MediaBrowser / Emby 授权头：`Client="…", Device="…", Token="…"`（值引号可省，见 parseClientHeader）
    *   客户端实测发在 `X-Emby-Authorization`；官方文档写的是 `Authorization` —— 两个都看 */
   for (const name of ['x-emby-authorization', 'authorization']) {
-    const m = /Token="([^"]+)"/i.exec(String(h[name] || ''));
-    if (m) return { token: m[1].trim(), from: name };
+    const v = pickHeaderValue(h[name], 'Token');
+    if (v) return { token: v, from: name };
   }
   try {
     const q = new URL(String((req && req.url) || ''), 'http://local').searchParams.get('api_key');
@@ -322,25 +441,50 @@ function internalDeviceId(deviceId) {
 }
 
 /**
+ * 从请求体里按字段名取值，**大小写不敏感**：真机是 .NET 反序列化，字段名换大小写都认
+ * （实测 `Pw` / `pw` 都登录成功，见 docs/emby-realdevice/02-…）；面板手写取值时照此对齐，
+ * 免得客户端换个拼写（如 HamHub 发 `pw`）就登不上。`names` 按优先级排列，
+ * 返回第一个「存在且非空」的值，都没有则回 ''。
+ */
+function pickBodyField(body, names) {
+  if (!body || typeof body !== 'object') return '';
+  const keys = Object.keys(body);
+  for (const want of names) {
+    const hit = keys.find((k) => k.toLowerCase() === want.toLowerCase());
+    if (hit !== undefined) {
+      const v = body[hit];
+      if (v !== undefined && v !== null && v !== '') return v;
+    }
+  }
+  return '';
+}
+
+/**
  * POST /Users/AuthenticateByName —— 登录（多账号：按用户名查库 + scrypt 校验）
  * 返回 { status, body, log }（JSON）或 { status, text, log }（纯文本，见下）；
  * 账号不存在 / 密码错都回 401（与 Emby 行为一致）。
  *
  * **错误响应严格对齐真机**（OkEmby 4.9.1.90 实测，见 docs/emby-compat.md「十、#2」）：
- *   · 缺 `X-Emby-Authorization`（拿不到 appName）→ 400 **纯文本** `Value cannot be null. (Parameter 'appName')`
+ *   · 缺 appName 头（`X-Emby-Authorization` / `Authorization` 都没有）→ 400 **纯文本** `Value cannot be null. (Parameter 'appName')`
  *   · 用户名/密码不对 → 401 **纯文本** `无效用户名或密码。请重试。`（不区分哪个不匹配，避免暴露用户名是否存在）
+ *
+ * 请求体字段名**大小写不敏感**（对齐真机 .NET 反序列化）：`Username`、`Pw`（兼容 `Password`）任意大小写均可。
+ * appName 可从 `X-Emby-Authorization` **或** `Authorization` 任一取（真机两头都认，见 docs/emby-realdevice/02-…）；
+ * 两头都没有 `Client=` 时再回退到 query `X-Emby-Client`（真机如此，Filmly / 网易爆米花就靠这一手）。
  */
 function authenticate(req, body) {
-  const username = String((body && (body.Username || body.username)) || '').trim();
-  const password = String((body && (body.Pw || body.Password || body.password)) || '');
-  const client = parseClientHeader(req.headers['x-emby-authorization']);
+  const username = String(pickBodyField(body, ['Username'])).trim();
+  const password = String(pickBodyField(body, ['Pw', 'Password']));
+  const client = parseClientHeader(req.headers['x-emby-authorization'] || req.headers['authorization']);
+  /* 头里没有就找 query：真机 appName 取头 `Client=` 优先、缺了退 query `X-Emby-Client`（见 docs/emby-realdevice/02-…） */
+  if (!client.Client) client.Client = queryParam(req, 'X-Emby-Client');
 
   /* 真机先校验参数头（在任何账号逻辑之前），缺 appName 一律 400 纯文本 */
   if (!client.Client) {
     return {
       status: 400,
       text: "Value cannot be null. (Parameter 'appName')",
-      log: '缺 X-Emby-Authorization（appName）',
+      log: '缺 appName（X-Emby-Authorization / Authorization 头与 X-Emby-Client query 都没有）',
     };
   }
 
@@ -489,6 +633,11 @@ function briefIds(items, max = 5) {
   return `（${ids.slice(0, max).join(', ')}${ids.length > max ? ` …共 ${ids.length} 条` : ''}）`;
 }
 
+/** 这个账号收藏了这条吗（读 `favorite` 表，见 ADR-0058）；读进度与 `UserData.IsFavorite` 都问它 */
+function favoriteOf(accountId, itemId) {
+  return !!(accountId && itemId && db.getFavorite(accountId, itemId));
+}
+
 /**
  * 库里这条的记录 → `{ userData, runtimeTicks }`；**没有记录返回 null**（调用方保持空形状）。
  *
@@ -497,21 +646,25 @@ function briefIds(items, max = 5) {
  *   · 客户端画进度条主要靠它 —— 只给 `PlaybackPositionTicks` 而条目又没有 `RunTimeTicks` 时，
  *     界面上就是**光秃秃没有进度条**（对比真机发现的那次）。
  * `LastPlayedDate` 用进度行最后一次更新的时间（就是"最后观看时间"）。
+ *
+ * `IsFavorite` 是**真值**（查 `favorite` 表，见 ADR-0058）—— 一条只有收藏、没有进度的条目
+ * 也要给出正确的 `UserData`，所以「进度行」与「收藏行」任一存在就返回非 null。
  */
 function progressOf(accountId, itemId) {
   if (!accountId || !itemId) return null;
   const r = db.getPlayback(accountId, itemId);
-  if (!r) return null;
-  const position = Math.max(0, Number(r.position_ticks) || 0);
-  const runtime = Math.max(0, Number(r.runtime_ticks) || 0);
+  const isFav = favoriteOf(accountId, itemId);
+  if (!r && !isFav) return null;
+  const position = Math.max(0, Number(r && r.position_ticks) || 0);
+  const runtime = Math.max(0, Number(r && r.runtime_ticks) || 0);
   const userData = {
-    IsFavorite: false,
-    PlayCount: Number(r.play_count) || 0,
+    IsFavorite: isFav,
+    PlayCount: Number(r && r.play_count) || 0,
     PlaybackPositionTicks: position,
-    Played: !!r.played,
+    Played: !!(r && r.played),
   };
   if (position > 0 && runtime > 0) userData.PlayedPercentage = (position / runtime) * 100;
-  if (r.updated_at) userData.LastPlayedDate = String(r.updated_at).replace(/\.\d+Z$/, '.0000000Z'); // 真机是 7 位小数
+  if (r && r.updated_at) userData.LastPlayedDate = String(r.updated_at).replace(/\.\d+Z$/, '.0000000Z'); // 真机是 7 位小数
   return { userData, runtimeTicks: runtime };
 }
 
@@ -539,6 +692,9 @@ function applyProgressToItem(item, prog) {
  *
  * 剧级条目（`{域}_{编号}_tv`）**不补任何东西**：进度记在集上，而"整剧是否看完"要知道总集数，
  * 本层不知道 —— 宁可不给，也不编（ADR-0008）。
+ *
+ * 季条目额外补 `UserData.UnplayedItemCount`（本季未看集数；真机有，见 docs/emby-compat.md #7-3）：
+ * 它要按「剧 + 季」聚合已看集数，而进度是按集记账的 —— 季自身没有进度行，靠 `item.Id` 取不到。
  */
 function applyUserData(out, requestedUserId, req) {
   const accountId = accountIdFor(req, requestedUserId);
@@ -546,6 +702,12 @@ function applyUserData(out, requestedUserId, req) {
   const patch = (item) => {
     if (!item || !item.Id) return;
     applyProgressToItem(item, progressOf(accountId, item.Id));
+    if (item.Type === 'Season' && item.SeriesId && Number.isFinite(item.IndexNumber) && Number.isFinite(item.ChildCount)) {
+      const played = db.countPlayedInSeason(accountId, item.SeriesId, item.IndexNumber);
+      item.UserData = Object.assign({}, item.UserData || emptyUserData(), {
+        UnplayedItemCount: Math.max(0, item.ChildCount - played),
+      });
+    }
   };
   const b = out.body;
   if (Array.isArray(b)) b.forEach(patch);
@@ -739,6 +901,213 @@ function setPlayed(req, requestedUserId, rawItemId, played) {
   };
 }
 
+/**
+ * 收藏时把「列表要用的元数据」按坐标从元数据插件**快照**下来（见 ADR-0058）。
+ *
+ * 与进度不同：这是**写时一次**（点收藏那一下），所以可以打上游；读侧只读这份快照，0 上游请求。
+ * 按 `shape` 分派 —— 电影 / 剧 / 季 / 集**都认**（真机四类都能收藏，见 docs/emby-realdevice/21-favorite-items.md #21-6）。
+ * 取不到（上游没有这条 / 反查失败）→ `{ ok:false, error }`，调用方按「认不出」处理：**204 不写库**。
+ *
+ * 快照里只放**列表字段**（标题 / 年份 / 简介 / 评分 / 图片路径 / 集数 / 剧名…），不放 rich（硬约束③）。
+ * **图片存路径、不存地址**：读时按当前域的 `imageBase` 现拼（硬约束见 ADR-0058）。
+ */
+async function favoriteSnapshot(p) {
+  const { domain, entryId } = p;
+  if (p.shape === 'movie' || p.shape === 'show') {
+    const look = await metaBridge.lookup({ type: p.type, entryId, domain });
+    if (!look.ok) return { ok: false, error: look.error };
+    const it = look.item;
+    return {
+      ok: true,
+      snap: {
+        shape: p.shape,
+        domain,
+        entryId,
+        title: it.title,
+        year: it.year,
+        overview: it.overview,
+        communityRating: it.communityRating,
+        posterPath: it.posterPath,
+        backdropPath: it.backdropPath,
+        originalTitle: it.originalTitle,
+        genres: it.genres,
+        seasonCount: it.seasonCount,
+      },
+    };
+  }
+
+  /* 季 / 集都要那份剧详情：季名字与剧名在同一次 `withSeasons` 里带回；集的分集数据另走 season 接口。 */
+  const showLook = await metaBridge.lookup({ type: 'tv', entryId, withSeasons: true, domain });
+  if (!showLook.ok) return { ok: false, error: showLook.error };
+  const show = showLook.item;
+
+  if (p.shape === 'season') {
+    const s = (show.seasons || []).find((x) => Number(x.seasonNumber) === Number(p.season));
+    if (!s) return { ok: false, error: { code: 'NOT_FOUND', status: 404, message: `上游没有 S${p.season}` } };
+    return {
+      ok: true,
+      snap: {
+        shape: 'season',
+        domain,
+        entryId,
+        seasonNumber: p.season,
+        title: s.name || `第 ${p.season} 季`,
+        year: s.year,
+        premiereDate: s.premiereDate,
+        overview: s.overview,
+        communityRating: s.rating,
+        posterPath: s.posterPath || show.posterPath, // 季海报缺失时退回剧海报（与 getSeasons 同口径）
+        episodeCount: s.episodeCount,
+        seriesTitle: show.title || '',
+      },
+    };
+  }
+
+  if (p.shape !== 'episode') return { ok: false, error: { code: 'BAD_ID', status: 400, message: '认不出的收藏对象' } };
+  const seasonLook = await metaBridge.lookupSeason({ entryId, season: p.season, domain });
+  if (!seasonLook.ok) return { ok: false, error: seasonLook.error };
+  const e = (seasonLook.item.episodes || []).find((x) => Number(x.episodeNumber) === Number(p.episode));
+  if (!e) return { ok: false, error: { code: 'NOT_FOUND', status: 404, message: `上游没有 S${p.season}E${p.episode}` } };
+  return {
+    ok: true,
+    snap: {
+      shape: 'episode',
+      domain,
+      entryId,
+      seasonNumber: p.season,
+      episodeNumber: p.episode,
+      title: e.name || `第 ${p.episode} 集`,
+      year: e.year,
+      premiereDate: e.premiereDate,
+      overview: e.overview,
+      communityRating: e.rating,
+      stillPath: e.stillPath,
+      runtimeMinutes: e.runtimeMinutes,
+      seasonName: seasonLook.item.name || `第 ${p.season} 季`,
+      seriesTitle: show.title || '',
+    },
+  };
+}
+
+/**
+ * 快照 → 一条列表 `BaseItemDto`（`Filters=IsFavorite` 读侧用，**纯 CPU、0 上游请求**）。
+ *
+ * 按 `shape` 分派：电影 / 剧走 `leanItemDto`（与列表项同一形状），季 / 集仿 `getSeasons` / `getEpisodes`
+ * 用 `baseItem` 拼（同一套字段，只是数据来自快照）。认不出的形状 → null，调用方跳过并计数。
+ */
+function favoriteDto(snap) {
+  if (!snap || !snap.domain) return null;
+  const domain = snap.domain;
+
+  if (snap.shape === 'movie' || snap.shape === 'show') {
+    return leanItemDto({
+      type: snap.shape === 'movie' ? 'movie' : 'tv',
+      domain,
+      entryId: snap.entryId,
+      parentId: defaultLibraryId(),
+      title: snap.title,
+      year: snap.year,
+      overview: snap.overview,
+      communityRating: snap.communityRating,
+      posterPath: snap.posterPath,
+      backdropPath: snap.backdropPath,
+      originalTitle: snap.originalTitle,
+      genres: snap.genres,
+      seasonCount: snap.seasonCount,
+    });
+  }
+
+  if (snap.shape === 'season') {
+    const item = baseItem({
+      id: metaBridge.itemId(domain, 'tv', snap.entryId, snap.seasonNumber),
+      parentId: defaultLibraryId(),
+      name: snap.title,
+      type: 'Season',
+      year: snap.year,
+      premiereDate: snap.premiereDate,
+      overview: snap.overview,
+      communityRating: snap.communityRating,
+      providerIds: { [metaBridge.providerIdKey(domain)]: String(snap.entryId) },
+      posterUrl: metaBridge.imageUrlOf(domain, 'w500', snap.posterPath),
+    });
+    item.Genres = []; // 上游的季没有 genres（与 getSeasons 一致）
+    item.ChildCount = snap.episodeCount;
+    item.IndexNumber = snap.seasonNumber;
+    item.SeriesId = metaBridge.itemId(domain, 'tv', snap.entryId);
+    item.SeriesName = snap.seriesTitle || '';
+    return item;
+  }
+
+  if (snap.shape !== 'episode') return null;
+  const item = baseItem({
+    id: metaBridge.itemId(domain, 'tv', snap.entryId, snap.seasonNumber, snap.episodeNumber),
+    parentId: defaultLibraryId(),
+    name: snap.title,
+    type: 'Episode',
+    year: snap.year,
+    premiereDate: snap.premiereDate,
+    overview: snap.overview,
+    communityRating: snap.communityRating,
+    providerIds: { [metaBridge.providerIdKey(domain)]: String(snap.entryId) },
+    posterUrl: metaBridge.imageUrlOf(domain, 'w300', snap.stillPath),
+  });
+  item.IsFolder = false;
+  item.IndexNumber = snap.episodeNumber;
+  item.ParentIndexNumber = snap.seasonNumber;
+  item.SeriesId = metaBridge.itemId(domain, 'tv', snap.entryId);
+  item.SeasonId = metaBridge.itemId(domain, 'tv', snap.entryId, snap.seasonNumber);
+  item.SeasonName = snap.seasonName || `第 ${snap.seasonNumber} 季`;
+  item.SeriesName = snap.seriesTitle || '';
+  if (snap.runtimeMinutes) item.RunTimeTicks = snap.runtimeMinutes * 600000000;
+  if (snap.stillPath) item.PrimaryImageAspectRatio = 1.7777778;
+  return item;
+}
+
+/**
+ * `POST|DELETE /Users/{UserId}/FavoriteItems/{ItemId}` ——「收藏 / 取消收藏」。
+ *
+ *   · 收藏（`POST`）→ 把**列表元数据快照**（`favoriteSnapshot`）落 `favorite` 表（覆盖写）；
+ *   · 取消（`DELETE`）→ 删掉那一行。
+ *
+ * 与进度**刻意不对称**（见 ADR-0058）：收藏是低频显式动作，所以**写时快照**、读侧 0 上游请求；
+ * 进度是高频心跳，读侧才反查上游。两条路都回 **200 + 该条目的 `UserData`**（真机同此，见 #21-1）。
+ * Id 认不出 / 反查不到 → **204 且不写库**（#21-2，与三条上报同口径）；一律**校验 token**（#21-3）。
+ */
+async function setFavorite(req, requestedUserId, rawItemId, favorite) {
+  const denied = authorize(req, requestedUserId);
+  if (denied) return denied;
+  const sess = sessionOf(req);
+  if (!sess) return { status: 401, body: { error: '需要有效的 AccessToken' }, log: 'token 校验不过' };
+
+  const p = metaBridge.parseItemId(String(rawItemId || '').trim());
+  if (!p) {
+    return { status: 204, body: null, log: `FavoriteItems 的 ItemId 认不出 → 不写库：${rawItemId || '(空)'}` };
+  }
+  const itemId = metaBridge.itemId(p.domain, p.type, p.entryId, p.season, p.episode);
+
+  if (!favorite) {
+    const removed = db.removeFavorite(sess.account_id, itemId);
+    return {
+      status: 200,
+      body: userDataOf(sess.account_id, itemId),
+      log: `取消收藏 ${itemId}` + (removed ? '' : '（本来就没收藏）'),
+    };
+  }
+
+  const snap = await favoriteSnapshot(p);
+  if (!snap.ok) {
+    const why = (snap.error && snap.error.code) || '反查失败';
+    return { status: 204, body: null, log: `收藏 ${itemId} → 元数据取不到（${why}）→ 不写库` };
+  }
+  const had = !!db.getFavorite(sess.account_id, itemId);
+  db.upsertFavorite(sess.account_id, itemId, JSON.stringify(snap.snap));
+  return {
+    status: 200,
+    body: userDataOf(sess.account_id, itemId),
+    log: `收藏 ${itemId}「${snap.snap.title}」（写时快照列表元数据）` + (had ? '（本来就收藏了）' : ''),
+  };
+}
+
 /** 账号被删时清掉它的进度（`/api/emby/accounts` 的删除走 `db.removeAccount`，那里已经带了） */
 
 /**
@@ -877,7 +1246,7 @@ function getViews() {
  * **推不出来的一律不填**，不为凑字段编值。
  *
  * `ParentId` 按真机补**占位值** `"2"`（真机 25/25 都是它，指服务器根聚合节点；本层没有
- * 那个节点，值是占位 —— 用户已拍板 4-1：字段集与真机一致优先，客户端顺着它取父级会拿到
+ * 那个节点，值是占位 —— 字段集与真机一致优先（4-1）：客户端顺着它取父级会拿到
  * 501/404，但实测客户端基本不这么干）。
  */
 function homeViewItem(r) {
@@ -953,10 +1322,12 @@ function homeViewItem(r) {
   if (r.collectionType) item.CollectionType = r.collectionType;
 
   /* `ChildCount`：真机 12/12 都有（样本全=1，疑似每库挂一个虚拟子文件夹），客户端拿它
-   * 判断空库/画角标。**真实条数优先**：该行被取过内容后，面板内存里就留着插件申报的总数
-   * （`peekRowTotal`，客户端点开过就有，不为它打上游）；还没取过的行回退**占位值 1**
-   * （取 1 不取 0：0 会被客户端当空库）。用户已拍板 4-2。 */
-  item.ChildCount = home.peekRowTotal(r.pluginId, r.rowId) || 1;
+   * 判断空库/画角标。**真实条数优先**，两级取数，都不为它打上游：
+   *   ① 行在 `rows` 里**申报的库总数**（`r.total`）—— 客户端还没点开这个库就有真数；
+   *   ② 该行被取过内容后，面板内存里留着的插件申报总数（`peekRowTotal`）。
+   * 两个都拿不到才回退**占位值 1**（取 1 不取 0：0 会被客户端当空库，4-2）。
+   * 申报口径见首页插件指南的 `rows.total`；插件拿不准就不申报，别编（ADR-0008）。 */
+  item.ChildCount = r.total > 0 ? r.total : home.peekRowTotal(r.pluginId, r.rowId) || 1;
 
   if (cover) {
     item.ImageTags = { Primary: tagAndRemember(id, 'Primary', 0, cover) };
@@ -976,9 +1347,13 @@ function homeViewItem(r) {
  * **必须校验账号**（与 `getStudios` 那种"回空"端点不同）：这里回的是**某个账号的观看记录**，
  * 不校验就是跨账号泄漏（ADR-0009：回真数据的端点必须校验）。没有记录时照样回空列表 + 200 ——
  * "这台服务器上还没看过任何东西"本来就是 Emby 的合法状态。
+ *
+ * **只验 token、不比对 `UserId`**（13-1 起对齐真机）：真机对「有效 token + 合法 Guid 但不存在的 UserId」
+ * 照常回 200（全 0 guid 实测），`UserId` 只当参数。属读取类，适用「只验 token」的自动对齐例外；
+ * 观看记录**按 token 解出的账号**取（`accountIdFor`：token 优先），传别人的 `UserId` 也只看到自己 token 账号的记录。
  */
 async function getResume(requestedId, req, query) {
-  const denied = authorize(req, requestedId);
+  const denied = authorize(req);
   if (denied) return denied;
   const accountId = accountIdFor(req, requestedId);
   if (!accountId) return { status: 200, body: { Items: [], TotalRecordCount: 0 }, log: '账号认不出 → 空' };
@@ -1133,24 +1508,61 @@ function searchRowDto(row, type) {
 }
 
 /**
- * 客户端有没有在问「要一些推荐」？—— 认得出就回 `'random'`，认不出回 `''`。
+ * 客户端有没有在问「**轮播推荐位**」？—— 认得出回 `'random'`，认不出回 `''`。
  *
- * **为什么需要这个**：有些客户端首页顶部那块**轮播图**不用库 Id —— 它发的是一条
- * 无 `ParentId` 的 `SortBy=IsFavoriteOrLiked,Random`（实测 Rex 首页第一发，比 `Views` 还早）。
- * 这类查询早期一律回空，于是轮播图没素材、整块不显示。
+ * **为什么需要这个**：轮播推荐位**不带库 Id**（实测 Rex 首页第一发，比 `Views` 还早），
+ * 早期一律回空、首页没素材。这条路由到**插件声明了 `feed: 'random'` 的那一行**
+ * （内容仍然由模块决定）；没有插件声明 → 回空（不挑一行顶上，见 [ADR-0054]）。
  *
- * 判据只有三条，都不猜：**没有 `ParentId` + 没有 `Filters` + `SortBy` 里含 `IsFavoriteOrLiked`**。
- * 认出来之后**路由到插件声明了 `feed: 'random'` 的那一行**（内容仍然是模块决定的）；
- * 没有插件声明 → 回空（不挑一行顶上）。
+ * ⚠️ 另一族「**裸列表查询**」不归这里 —— 早期一度被塞进同一支（ADR-0054），
+ * 予初Emby 真机实测证明那是错的：真机对这条回的是**顶层库列表**而非条目。
+ * 现归 `libraryQueryOf`（回库列表，见 [ADR-0055]）。
  *
- * ⚠️ 语义：这条 query 的原意是"用户收藏或喜欢的、随机"。本层**没有收藏数据**，
+ * **别抢别支**：指名了库（含**不是本面板的** `ParentId`）、`Filters` / `SearchTerm` /
+ * `AnyProviderIdEquals`（含认不出的那串）/ `Ids`（按条目 id 点名要，不是"要一批条目"）/
+ * 计数探针（`typeCountProbeOf`）/ 裸列表查询（`libraryQueryOf`）
+ * —— 这些都各自有支路，本函数一律让开；让开之后各自照旧处理。
+ *
+ * ⚠️ 语义：`IsFavoriteOrLiked` 那条 query 的原意是"用户收藏或喜欢的、随机"。本层**没有收藏数据**，
  * 所以只能按「随机推荐」理解 —— 给的是随机热门，**不是**用户的收藏（文档中不要写成收藏）。
  */
 function feedOfQuery(query) {
   const val = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
-  if (home.parseViewId(val('ParentId'))) return ''; // 指名了库 → 走正常路
-  if (val('Filters')) return ''; // 收藏/已播放有自己的一支，别抢
-  return /isfavoriteorliked/i.test(val('SortBy')) ? 'random' : '';
+  if (val('ParentId')) return ''; // 指名了库（含不是本面板的）→ 走正常路
+  if (val('Filters')) return ''; // 收藏 / 已播放有自己的一支
+  if (searchTermOf(query)) return ''; // 按名字搜有自己的一支
+  if (val('AnyProviderIdEquals')) return ''; // 按外部 id 定位（含认不出的）有自己的一支
+  if (val('Ids')) return ''; // 按条目 id 点名要 → 不是"要一批条目"，维持回空
+  if (typeCountProbeOf(query)) return ''; // 按类型计数探针有自己的一支
+  if (libraryQueryOf(query)) return ''; // 裸列表查询有自己的一支（回库列表）
+  return 'random'; // 走到这里 = 轮播推荐位
+}
+
+/**
+ * 认「无 `ParentId` 的**裸列表查询**」：客户端没指名任何库、也没指名任何条目 / 搜索 / 筛选，
+ * 只是"要一批东西"（只带 `ExcludeItemTypes` / `StartIndex` / `Limit` / `Fields` 这类通用参数）。
+ *
+ * **真机口径的由来**：予初Emby（4.9.5.0）实测这条查询回的是**顶层库列表** —— 26 个
+ * `CollectionFolder`，与 `GET /Users/{id}/Views` 一字不差（同样的 Id / Name / Type）。
+ * 即 Emby 对「无 `ParentId` 且**不递归**」的 `Items` 查询，默认回根节点的直接子级 = 那些库；
+ * 想要条目，客户端得带 `Recursive=true`（轮播推荐位那条就带）。爆米花（Filmly）首页入口
+ * 走的就是这条 ⇒ 面板照真机回库列表（`getViews()`），**不复用 `feed: 'random'`**（那会回条目）。
+ *
+ * 判据取**最窄**那一档，只命中真机样本这一族、不动别的支路：无 `ParentId`、无 `SortBy`、
+ * 非 `Recursive=true`，且无 `Filters` / `SearchTerm` / `AnyProviderIdEquals` / `Ids`、
+ * 不是计数探针。带 `SortBy`（轮播）或 `Recursive=true` 的都让开、维持原路。
+ */
+function libraryQueryOf(query) {
+  const val = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
+  if (val('ParentId')) return false;
+  if (val('SortBy')) return false;
+  if (/^true$/i.test(val('Recursive').trim())) return false;
+  if (val('Filters')) return false;
+  if (searchTermOf(query)) return false;
+  if (val('AnyProviderIdEquals')) return false;
+  if (val('Ids')) return false;
+  if (typeCountProbeOf(query)) return false;
+  return true;
 }
 
 /** 复制一份 query 并塞进 `ParentId`（不改原件：日志要打客户端**原样**发的参数） */
@@ -1171,10 +1583,12 @@ function withParentId(query, parentId) {
  *
  * 参数：`SeriesId` 可选（SenPlayer 实测会带，只问某一部剧）、`UserId` 在 query；
  * `MediaTypes` / `Recursive` / `Fields` 忽略，`Limit` 只用来截断条数。
- * **必须校验账号**（回的是某个账号的观看记录）。
+ * **只验 token**（15-1 起对齐真机：有效 token + 错配 / 不存在的 `UserId` 也回 200，
+ * 不 401；与 `Items/Resume` 同口径）。观看记录仍按 token 解出的账号取（`accountIdFor`
+ * 以 token session 为准），**不引入跨账号可见性**。
  */
 async function getNextUp(requestedId, req, query) {
-  const denied = authorize(req, requestedId);
+  const denied = authorize(req);
   if (denied) return denied;
   if (!accountIdFor(req, requestedId)) {
     return { status: 200, body: { Items: [], TotalRecordCount: 0 }, log: '账号认不出 → 空' };
@@ -1333,52 +1747,155 @@ const ITEM_COUNT_FIELDS = [
 /**
  * GET /Items/Counts —— 全库各类条目的数量
  *
- * **回全 0**（口径是"如实回空"）。这里要说清一件事，免得日后误解：
+ * **只填 `MovieCount` / `SeriesCount` / `EpisodeCount`，其余字段留 0。**
  *
- *   **全 0 的意思是"数不出来"，不是"库是空的"。** 服务端没有片库索引（列表数据由首页插件
- *   在请求时现跑，见 `getStudios` 的同款说明），所以这个数**根本算不出来**。而 `ItemCounts`
- *   的形状里没有"未知"这个取值（14 个字段都是数字），只能填 0。
+ *   - 电影 / 剧集 / 集数：取**首页插件申报的库规模**（`home.libraryTotals()`，按库类型归并）。
+ *     这是插件自己报的**整个库的规模**（与 `run` 的 `total` 同口径，见 ADR-0051/0052），
+ *     不是"这一页/这一榜有多少条"。`EpisodeCount` 来自剧库行申报的 `episodes`（见 ADR-0053）。
+ *   - 其余字段：面板没有片库索引，**数不出来**，如实留 0。`ItemCounts` 的形状里没有"未知"
+ *     这种取值（14 个字段都是数字），只能填 0 —— **0 的意思是"数不出来"，不是"库是空的"**。
+ *   - 连这几类都拿不到（插件没申报该类型的规模）时，那个字段也是 0，同样含义。
  *
- *   为什么不去凑：唯一的数据来源是各插件行返回的 `total`（如 `top_rated` 报 11216）—— 那是
- *   **上游榜单的总数，不是本面板库里的数量**，拿它当"库里有 11216 部片"是**编数据**，比 0 更糟。
- *
- * 参数（`ParentId` 等）全忽略 —— 给哪个范围数都一样是 0。
- * **不校验账号**：回空没有数据可保护（同 `getResume` / `getStudios`）。
+ * 参数（`ParentId` 等）全忽略 —— 这个端点回的是实例级的总数，不分范围。
+ * **AccessToken 由路由层校验**（16-1 起对齐真机：真机无 token / 无效 token → 401；有效 token +
+ * 任意 UserId → 200）。计数是内容数据、与用户无关，故**只验 token、不比对 UserId**。
  */
 function getItemCounts() {
   const body = {};
   for (const k of ITEM_COUNT_FIELDS) body[k] = 0;
-  return { status: 200, body, log: '没有片库索引 → 全 0（如实：数不出来，不是库空）' };
+  const totals = home.libraryTotals();
+  if (totals.movies !== null) body.MovieCount = totals.movies;
+  if (totals.tvshows !== null) body.SeriesCount = totals.tvshows;
+  if (totals.episodes !== null) body.EpisodeCount = totals.episodes;
+  const got = [];
+  if (totals.movies !== null) got.push(`电影 ${totals.movies}`);
+  if (totals.tvshows !== null) got.push(`剧集 ${totals.tvshows}`);
+  if (totals.episodes !== null) got.push(`集数 ${totals.episodes}`);
+  return {
+    status: 200,
+    body,
+    log: got.length
+      ? `首页插件申报的库规模 → ${got.join(' / ')}；其余字段 0（数不出来）`
+      : '首页插件没申报库规模 → 全 0（数不出来，不是库空）',
+  };
+}
+
+/**
+ * 认「按类型计数」探针：`IncludeItemTypes` 归一后是**单一** `Movie` 或 `Series`，且**没有**
+ * `ParentId` / `AnyProviderIdEquals`（`Filters` / `SearchTerm` 在 `getItems` 里已先返回，到不了这）。
+ * 命中回 `libraryTotals()` 的键（`movies` / `tvshows`，与 `Items/Counts` 同一口径）；其余回 `null`。
+ *
+ * 只认**单类型** —— `Movie,Series` 这类多值不猜（真机怎么合并没有样本）。
+ */
+function typeCountProbeOf(query) {
+  const get = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
+  if (get('ParentId') || get('AnyProviderIdEquals')) return null;
+  const want = get('IncludeItemTypes').trim();
+  if (/^movie$/i.test(want)) return 'movies';
+  if (/^series$/i.test(want)) return 'tvshows';
+  return null;
+}
+
+/**
+ * 条目列表的**唯一分派**：认这条 query 归哪一支 —— 「哪条 query 归哪一支」的判定只此一处，
+ * `getItems` 照它给的支路干活（次序与判据都收在这里，收敛不改正负）。
+ *
+ * 次序即优先级（与既有行为一字不差）：
+ *   ① `Filters=IsFavorite` → `favorite`（读 `favorite` 表）
+ *   ② `Filters=IsPlayed`   → `played`（读 `playback` 表）
+ *   ③ `SearchTerm`         → `search`（按名字搜）
+ *   ④ `AnyProviderIdEquals` 有可识别候选 → `provider`（按外部 id 定位一条）
+ *   ⑤ 裸列表查询（`libraryQueryOf`）→ `views`（回顶层库列表，[ADR-0055]）
+ *   ⑥ `feedOfQuery` 认出的轮播推荐位 → `feed`（交给插件声明的那一行）
+ *   ⑦ 其余 → `delegate`（交给首页模块；取不到时再用 `probe` / `skipped` 兜底）
+ *
+ * 回的是**支路描述**（分支名 + 该支路要用的入参），无副作用、不打日志 —— 「归哪一支」与
+ * 「怎么干」分开，后者仍住在 `getItems`。
+ */
+function itemsQueryBranch(query) {
+  const val = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
+  const filters = val('Filters');
+  if (/IsFavorite/i.test(filters)) return { branch: 'favorite', filters };
+  if (/IsPlayed/i.test(filters)) return { branch: 'played' };
+  if (searchTermOf(query)) return { branch: 'search' };
+  const providerRefs = searchProviderRefs(query);
+  if (providerRefs.refs.length) return { branch: 'provider', refs: providerRefs.refs, skipped: providerRefs.skipped };
+  if (libraryQueryOf(query)) return { branch: 'views' };
+  const feed = feedOfQuery(query);
+  if (feed) return { branch: 'feed', feed };
+  return { branch: 'delegate', probe: typeCountProbeOf(query), skipped: providerRefs.skipped };
 }
 
 /**
  * GET /Users/{UserId}/Items —— 条目列表
  *
  * **列表数据由首页模块决定，emby 层只做端点映射与 DTO 转换**（见
- * docs/emby-home-plugin.md）。分支共五条：
+ * docs/emby-home-plugin.md）。分支如下：
  *   - `SearchTerm=<词>` → **按名字搜**（元数据插件搜索；SenPlayer 的搜索框走这条）
  *   - `AnyProviderIdEquals={域}.{编号}` → **按外部 id 搜一条**（回一条带本面板 Id 的条目，客户端接着进详情）。
  *     该参数可**逗号分隔多值**，语义是"任一条对上就算"（见 `searchProviderRefs`）：按序逐个试，先命中先返回
  *   - `ParentId=<catpawhome_…>`（本面板发给客户端的媒体库 Id，见 getViews）→ `home.listByQuery` 跑对应插件行
- *   - 无 `ParentId` 的「推荐」查询（`SortBy` 含 `IsFavoriteOrLiked`）→ 路由到插件声明了 `feed` 的行
- *   - `Filters=IsPlayed` → 读 `playback` 表（**已看的条目，真数据**）；`Filters=IsFavorite` → 仍如实回空
- *   - 其余查询（含认不出的 `AnyProviderIdEquals`）→ **如实回空**
+ *   - 无 `ParentId` 且 `SortBy` 含 `IsFavoriteOrLiked` 的**轮播推荐位** → 路由到插件声明了
+ *     `feed` 的行（判据见 `feedOfQuery`），回行内**条目**（见 [ADR-0054]）
+ *   - 无 `ParentId` 的**裸列表查询**（只带 `ExcludeItemTypes` / `StartIndex` / `Limit` / `Fields`，
+ *     无 `SortBy` / `Recursive`）→ 回**顶层库列表**（即 `Views` 那份），对齐真机（判据见
+ *     `libraryQueryOf`，见 [ADR-0055]）
+ *   - `Filters=IsPlayed` → 读 `playback` 表（**已看的条目，真数据**）；`Filters=IsFavorite` → 读 `favorite` 表
+ *     （**收藏的条目，真数据；快照重建，0 上游请求**，见 ADR-0058）
+ *   - 无 `ParentId` 的「按类型计数」探针（`IncludeItemTypes` 归一后是单一 `Movie` / `Series`）→
+ *     取插件申报的库规模回 `TotalRecordCount`
+ *   - 其余查询（含认不出的 `AnyProviderIdEquals`、`Ids=…`）→ **如实回空**
  *
  * **分页是协议的事，但 emby 层不做切片**：客户端给的 `StartIndex` / `Limit` **原样透传给模块**
  * （进 `ctx.startIndex` / `ctx.limit`），取哪一页由**插件**决定；模块回来的 `total` 直接当
  * `TotalRecordCount`。`SortBy` / `Recursive` / `IncludeItemTypes` 忽略 —— 插件返回的顺序就是它想要的顺序。
  *
  * 插件行取数失败 → **照实回失败码**（与上游同一取向：不编占位数据、不回空的假成功）。
+ *
+ * 上面的分支次序与判据收在 `itemsQueryBranch`（**唯一分派处**）—— 本函数只按它给的支路干活。
  */
 async function getItems(req, requestedId, query) {
   const val = (key) => (query && typeof query.get === 'function' ? query.get(key) || '' : '');
   const empty = (log) => ({ status: 200, body: { Items: [], TotalRecordCount: 0 }, log });
 
-  /* 用户级筛选：`IsPlayed` 现在**有真数据**（进度已落库）；`IsFavorite` 仍然没有
-   * （收藏需要写端点，没做）—— 两者分开处理，别一起回空。 */
-  const filters = val('Filters');
-  if (/IsFavorite/i.test(filters)) return empty(`Filters=${filters}（没有收藏数据 → 空）`);
-  if (/IsPlayed/i.test(filters)) {
+  /* **归哪一支只此一处**（见 `itemsQueryBranch`）：这里只按它给的支路把活干完。 */
+  const branch = itemsQueryBranch(query);
+
+  /* 用户级筛选：`IsPlayed` 读 `playback` 表；`IsFavorite` 读 `favorite` 表 —— 都是**真数据**。 */
+  if (branch.branch === 'favorite') {
+    /* 账号从 **token** 认（权威），UserId 只是兜底 —— 与 IsPlayed 同口径，本端点不校验 UserId */
+    const accountId = accountIdFor(req, requestedId);
+    if (!accountId) return empty('Filters=IsFavorite（账号认不出 → 空）');
+    /* 收藏是**写时快照**：读侧只查库 + 纯 CPU 重建 DTO，**0 上游请求**（见 ADR-0058） */
+    const want = val('IncludeItemTypes');
+    const rows = db.listFavorites(accountId, limitOf(query, 50));
+    const items = [];
+    let skipped = 0;
+    for (const r of rows) {
+      let snap = null;
+      try {
+        snap = JSON.parse(r.payload);
+      } catch {
+        snap = null; // 快照坏了（不该发生）→ 跳过并计数，不静默吞
+      }
+      const it = favoriteDto(snap);
+      if (!it) {
+        skipped += 1;
+        continue;
+      }
+      if (want && !new RegExp(it.Type, 'i').test(want)) continue;
+      items.push(it);
+    }
+    return {
+      status: 200,
+      body: { Items: items, TotalRecordCount: items.length },
+      log:
+        `Filters=IsFavorite：库里 ${rows.length} 条 → 列出 ${items.length} 条（快照重建，0 上游请求）` +
+        (skipped ? `（${skipped} 条快照不可用，未列出）` : '') +
+        briefIds(items),
+    };
+  }
+  if (branch.branch === 'played') {
     /* 账号从 **token** 认（权威），UserId 只是兜底 —— 5-2 起本端点不校验 UserId（对齐真机） */
     const accountId = accountIdFor(req, requestedId);
     if (!accountId) return empty('Filters=IsPlayed（账号认不出 → 空）');
@@ -1394,7 +1911,7 @@ async function getItems(req, requestedId, query) {
 
   /* ---- 按名字搜：`SearchTerm=…`（见 `searchTermOf` 那段）----
    * SenPlayer 的搜索框打的就是这条；早期落到"没有可识别的查询参数 → 空"。 */
-  if (searchTermOf(query)) return getSearchItems(query);
+  if (branch.branch === 'search') return getSearchItems(query);
 
   /* ---- 搜索/定位：`AnyProviderIdEquals={域}.{编号}` —— 按**外部 id** 找那一条 ----
    *
@@ -1415,8 +1932,9 @@ async function getItems(req, requestedId, query) {
    * 类型从 `IncludeItemTypes` 推（`Series`→tv / `Movie`→movie；都没给 → tv，照旧例）；
    * 取不到 → **照实回失败码**（`metaFailure`，不编占位条目）。
    */
-  const refQuery = searchProviderRefs(query);
-  if (refQuery.refs.length) {
+  /* 候选来自分类器（`refs` 只在该走 `provider` 支时非空；`skipped` 供兜底日志点名） */
+  const refQuery = { refs: branch.refs || [], skipped: branch.skipped || [] };
+  if (branch.branch === 'provider') {
     const include = val('IncludeItemTypes');
     const type = /series/i.test(include) ? 'tv' : /movie/i.test(include) ? 'movie' : 'tv';
     /* **OR 语义：按候选顺序逐个试，先命中先返回**。跳过项（前缀没注册、形状不对）点名写进日志，
@@ -1443,17 +1961,20 @@ async function getItems(req, requestedId, query) {
     return metaFailure(last.error, last.what);
   }
 
-  const vid = home.parseViewId(val('ParentId'));
+  /* 无 `ParentId` 的**裸列表查询**（Filmly / 网易爆米花首页首发）→ 照真机回**顶层库列表**：
+   * 予初Emby 实测这条与 `GET /Users/{id}/Views` 一字不差（26 个 `CollectionFolder`），
+   * 真机对「无 `ParentId` 且不递归」的 `Items` 默认回根的直接子级 = 那些库（见 `libraryQueryOf`、[ADR-0055]）。 */
+  if (branch.branch === 'views') return getViews();
 
-  /* 客户端"不要库 Id、只要推荐"的查询（见 `feedOfQuery`）→ 路由到插件声明了对应 `feed` 的那一行。
-   * **没有插件声明就什么都不做**，后面照常回空。 */
-  const feed = feedOfQuery(query);
-  const feedRow = feed ? home.rowByFeed(feed) : null;
+  /* 'feed' / 'delegate' 都走「交给首页模块」这一条路：客户端"不要库 Id、只要推荐"的
+   * **轮播推荐位**（见 `feedOfQuery`）路由到插件声明了对应 `feed` 的那一行；没有插件声明
+   * （`rowByFeed` 回 null）时与 delegate 同路，照常交给模块、取不到再兜底。 */
+  const feedRow = branch.branch === 'feed' ? home.rowByFeed(branch.feed) : null;
   const effQuery = feedRow ? withParentId(query, home.viewId(feedRow.pluginId, feedRow.rowId)) : query;
   if (feedRow) {
-    console.log(`  ↪ emby 推荐行：「${feed}」查询（无 ParentId）→ ${feedRow.pluginId}/${feedRow.rowId}（由插件声明 feed 决定，非写死）`);
+    console.log(`  ↪ emby「${branch.feed}」行（无 ParentId 的轮播推荐位）→ ${feedRow.pluginId}/${feedRow.rowId}（由插件声明 feed 决定，非写死）`);
   }
-  const effVid = feedRow ? home.parseViewId(effQuery.get('ParentId')) : vid;
+  const effVid = feedRow ? home.parseViewId(effQuery.get('ParentId')) : home.parseViewId(val('ParentId'));
 
   /* token 已在路由层**一律**验过（5-1 对齐真机：无 token 一律 401，不分支路）；
    * **不比对 UserId**（5-2 对齐真机：真机对 Items 只验 token，合法但不存在的 UserId 也照回 200）。 */
@@ -1469,6 +1990,21 @@ async function getItems(req, requestedId, query) {
     return homeFailure(e, effVid ? `${effVid.pluginId}/${effVid.rowId}` : val('ParentId'));
   }
   if (!got) {
+    /* 无 `ParentId` 的「按类型数个数」探针 —— Rex 等客户端首页拿它读「总统计」：
+     *   Items?Recursive=true&IncludeItemTypes=Movie|Series&Limit=1&SortBy=SortName&SortOrder=Ascending
+     * 真机实测就是回该类型的库总数（itsmygo：Movie 255 / Series 189；nyamedia：714 / 1635），
+     * 客户端只读 `TotalRecordCount`（`Limit=1` 是探针的痕迹，顺手要的那 1 条它不看）。
+     * 面板没有按类型的条目索引，但**插件已按库类型申报了规模**（`Items/Counts` 用的同一份
+     * `libraryTotals()`）—— 直接拿来用：不编数、不加契约。`Items` 照旧回空（不给样本条目）。 */
+    const probe = branch.probe || null;
+    if (probe && home.libraryTotals()[probe] !== null) {
+      const total = home.libraryTotals()[probe];
+      return {
+        status: 200,
+        body: { Items: [], TotalRecordCount: total },
+        log: `IncludeItemTypes=${probe === 'movies' ? 'Movie' : 'Series'}（无 ParentId，按类型计数探针）→ 总数 ${total}（取首页插件申报的库规模，同 Items/Counts）`,
+      };
+    }
     const provider = val('AnyProviderIdEquals');
     if (!provider) return empty('没有可识别的查询参数 → 空');
     /* 走到这里 = 这一串外部 id **一条候选都没认出来**（有候选的话上面那支早就返回了）。
@@ -1736,17 +2272,17 @@ function metaFailure(error, what) {
  * 只认剧的 Id（`{域}_{编号}_tv`），季条目 Id 为 `{域}_{编号}_tv_s{n}`（与 itemId/parseItemId 互逆）。
  * 季数据来自同一次详情请求（响应里本来就有 seasons[]），不额外多打一次。
  *
- * 特别篇（`season_number === 0`）**本轮不返回** —— 注意上游的季 `name` 是本地化文案
- * （zh-CN 下特别篇叫「特别篇」），所以判定只看 season_number，绝不能匹配名字。见指南「七」的待定条。
+ * 特别篇（`season_number === 0`）**照真机返回** —— 注意上游的季 `name` 是本地化文案
+ * （zh-CN 下特别篇叫「特别篇」），所以判定只看 season_number，绝不能匹配名字。见指南「十」#7-1。
+ *
+ * `UserId` 只当兜底（见指南「十」#7-2）：真机在「有效 token + 合法但不存在的 UserId」下仍回 200，
+ * 故不做账号校验，观看看进度由 `applyUserData` 按 token 解出的账号补。
  *
  * 上游取不到 → 照实回失败（与 Items 同一取向，不编占位季）。
  */
-async function getSeasons(showId, requestedId) {
-  const denied = assertUser(requestedId);
-  if (denied) return denied;
-
+async function getSeasons(showId) {
   const parsed = metaBridge.parseItemId(showId);
-  if (!parsed || parsed.type !== 'tv' || parsed.season !== null) {
+  if (!parsed || parsed.shape !== 'show') {
     return { status: 404, body: { error: '没有这个剧' }, log: `Id 不是剧 → 404：${showId}` };
   }
   const entryId = parsed.entryId;
@@ -1758,7 +2294,7 @@ async function getSeasons(showId, requestedId) {
 
   const show = look.item;
   const items = (show.seasons || [])
-    .filter((s) => Number.isFinite(s.seasonNumber) && s.seasonNumber > 0)
+    .filter((s) => Number.isFinite(s.seasonNumber))
     .map((s) => {
       const item = baseItem({
         id: metaBridge.itemId(domain, 'tv', entryId, s.seasonNumber),
@@ -1779,7 +2315,9 @@ async function getSeasons(showId, requestedId) {
       return item;
     });
 
-  const gap = items.length !== show.seasonCount ? ` 上游报 ${show.seasonCount} 季` : '';
+  /* 上游的 `seasonCount` 只数常规季（不含特别篇），对账时也只看常规季，免得把特别篇算成多出来的 */
+  const regular = items.filter((i) => i.IndexNumber > 0).length;
+  const gap = regular !== show.seasonCount ? ` 上游报 ${show.seasonCount} 季` : '';
   return {
     status: 200,
     body: { Items: items, TotalRecordCount: items.length },
@@ -1792,6 +2330,8 @@ async function getSeasons(showId, requestedId) {
  *
  * 入参形态（实测）：路径 `Id` 是剧 Id（`{域}_{编号}_tv`），`UserId` 与 `SeasonId` 都在 query，
  * 另有 `EnableTotalRecordCount` / 一长串 `Fields`（忽略 —— 只回手里有的）。
+ * `UserId` **不参与鉴权**（8-2 起对齐真机：有效 token + 不存在/不匹配的 UserId 也回 200）——
+ * 只在 `applyUserData` 里当**进度兜底**。
  *
  * 季必须能唯一确定：`SeasonId` 取自上一步 Seasons 发出去的季 Id（`{域}_{编号}_tv_s{n}`），
  * 且条目编号要与路径里的剧一致。定不下来就**回空 + 日志写明原因** —— 与 Items 同类处理：
@@ -1799,18 +2339,16 @@ async function getSeasons(showId, requestedId) {
  *
  * 分集 Id = `{域}_{编号}_tv_s{n}_e{m}`（与 itemId/parseItemId 互逆）。
  * 分集数据必须走 season 接口（剧接口只有 seasons[] 汇总，没有 episodes[]），见 metaBridge.lookupSeason。
+ * 剧名（`SeriesName`）**额外 lookup 一次**取（命中插件缓存、不额外打上游）—— 见指南「十」#8-3。
  */
-async function getEpisodes(showId, requestedId, seasonId) {
-  const denied = assertUser(requestedId);
-  if (denied) return denied;
-
+async function getEpisodes(showId, seasonId) {
   const show = metaBridge.parseItemId(showId);
   /* ⚠️ **路径里给「季 Id」也算数**（真机实测容错）：
    * 官方文档写的是 `Shows/{Id}/Episodes` 里 Id = **剧**，但真机（`emby.example.com`）实测
    * `Shows/{季Id}/Episodes?SeasonId={季Id}` **同样回 200**（212 条，与剧 Id 那条一模一样）——
    * 而 Lumenic/1.0.0 打的就是这种（面板日志里 3 次 `Id 不是剧 → 404：{域}_{编号}_tv_s5`）。
    * 季 Id 里本来就带着剧号与季号，信息不缺，没有理由拒。 */
-  if (!show || show.type !== 'tv' || show.episode !== null) {
+  if (!show || (show.shape !== 'show' && show.shape !== 'season')) {
     return { status: 404, body: { error: '没有这个剧' }, log: `Id 不是剧 → 404：${showId}` };
   }
   const pathSeason = show.season; // 路径给的是季 → 剧号与季号都从它来
@@ -1841,7 +2379,12 @@ async function getEpisodes(showId, requestedId, seasonId) {
   const seasonKey = metaBridge.itemId(show.domain, 'tv', show.entryId, n);
   const seasonName = look.item.name || `第 ${n} 季`;
 
-  /* 不填 SeriesName：那要再打一次剧接口，而客户端是在剧/季页里发的这条请求，本来就知道剧名 */
+  /* 剧名（`SeriesName`）：真机每条集都带（见指南「十」#8-3），故照 `progressItem` 的做法再 `lookup` 一次取剧名 ——
+   * 走的是元数据插件自己的缓存，实际不额外打上游。
+   * ⚠️ 查不到**不影响主结构**：只少一个可选字段，分集照常返回（回退原则，见指南「四」）。 */
+  const showLook = await metaBridge.lookup({ type: 'tv', entryId: show.entryId, domain: show.domain });
+  const seriesName = showLook.ok ? showLook.item.title || '' : '';
+
   const items = (look.item.episodes || [])
     .filter((e) => Number.isFinite(e.episodeNumber))
     .map((e) => {
@@ -1862,6 +2405,7 @@ async function getEpisodes(showId, requestedId, seasonId) {
       item.SeriesId = showKey;
       item.SeasonId = seasonKey;
       item.SeasonName = seasonName;
+      item.SeriesName = seriesName;
       if (e.runtimeMinutes) item.RunTimeTicks = e.runtimeMinutes * 600000000; // 1 分钟 = 6×10⁸ ticks
       if (e.stillPath) item.PrimaryImageAspectRatio = 1.7777778; // 剧照是 16:9；baseItem 给的是海报比例，这里改回来
       return item;
@@ -2074,13 +2618,13 @@ async function richItemDto(type, entryId, domain = metaBridge.defaultDomain()) {
  * 反查回来的关联内容**，不是"这台服务器上有什么" —— 所以不走首页模块。
  * 数据就来自详情那次 lookup 的 `recommendations`（**同一次上游请求**，不额外打）。
  *
- * ⚠️ 响应形状按 `QueryResult<BaseItemDto>`（`{Items, TotalRecordCount}`）实现，**待客户端实测复核**：
- * 官方这边没有可靠文档，若客户端不渲染，第一个要试的是 `RecommendationDto[]` 那种分组形状。
+ * **AccessToken 由路由层校验、且只验 token、不比对 `UserId`**（17-1 起对齐真机，见「十」#17）：
+ * 端点是**取上游的关联内容**（内容数据、与具体用户无关），真机实测不校验 `UserId`（错配 / 不存在 / 不带 → 均 200）。
+ * 进度仍由路由层 `applyUserData(out, userId, req)` 按 **token 解出的账号**补（`accountIdFor` token 优先）。
+ *
+ * 响应形状 = `QueryResult<BaseItemDto>`（`{Items, TotalRecordCount}`），经真机实测复核（形状一致 ✓）。
  */
-async function getSimilar(itemId, requestedId, limit) {
-  const denied = assertUser(requestedId);
-  if (denied) return denied;
-
+async function getSimilar(itemId, limit) {
   const p = metaBridge.parseItemId(itemId);
   if (!p) return { status: 404, body: { error: '没有这个条目' }, log: `Id 认不出 → 404：${itemId}` };
 
@@ -2113,10 +2657,7 @@ async function getSimilar(itemId, requestedId, limit) {
  * 聚合只做补充：连不上 / 没配 → 元数据照常返回（日志写明原因），详情页不至于打不开。
  * 粒度说明：站源只有「剧」级条目（`vod_id` 是剧），**集的定位要等聚合层给 detail 契约**。
  */
-async function getItem(itemId, requestedId, host = '', proto = 'http') {
-  const denied = assertUser(requestedId);
-  if (denied) return denied;
-
+async function getItem(itemId, host = '', proto = 'http') {
   const p = metaBridge.parseItemId(itemId);
   if (!p) return { status: 404, body: { error: '没有这个条目' }, log: `Id 认不出 → 404：${itemId}` };
 
@@ -2125,14 +2666,16 @@ async function getItem(itemId, requestedId, host = '', proto = 'http') {
   let name = '';
   let year = '';
 
-  if (p.season !== null) {
+  /* 按 `shape` 分派：季 / 集复用列表实现再挑出那一条；剧 / 影直接按域坐标反查（rich 版）。
+   * 「哪种 id 归哪一支」只此一处（见 meta-bridge 的 parseItemId 回的 `shape`）。 */
+  if (p.shape === 'season' || p.shape === 'episode') {
     const showKey = metaBridge.itemId(p.domain, 'tv', p.entryId);
-    if (p.episode !== null) {
-      const out = await getEpisodes(showKey, requestedId, metaBridge.itemId(p.domain, 'tv', p.entryId, p.season));
+    if (p.shape === 'episode') {
+      const out = await getEpisodes(showKey, metaBridge.itemId(p.domain, 'tv', p.entryId, p.season));
       if (out.status !== 200) return out;
       found = (out.body.Items || []).find((i) => i.Id === itemId);
     } else {
-      const out = await getSeasons(showKey, requestedId);
+      const out = await getSeasons(showKey);
       if (out.status !== 200) return out;
       found = (out.body.Items || []).find((i) => i.Id === itemId);
     }
@@ -2351,6 +2894,9 @@ async function getItem(itemId, requestedId, host = '', proto = 'http') {
       Invalid: lfStat.invalid,
     };
   }
+  /* 版本标题全局去重：flag 单段化后可能有同名版本（同站不同包、每集大小恰好相同），
+   * 撞名才补分辨率/编码/版本序号；只补撞名组，不撞不添（见 ensureUniqueSourceNames）。 */
+  ensureUniqueSourceNames(sources);
   if (sources.length) found.MediaSources = sources;
 
   /* ---- 条目级：把**所选线路**的事实提到条目上（真机就是这么给的）----
@@ -2364,7 +2910,17 @@ async function getItem(itemId, requestedId, host = '', proto = 'http') {
       if (first.Container) found.Container = first.Container;
       if (first.Size) found.Size = first.Size;
       if (first.Bitrate) found.Bitrate = first.Bitrate;
-      if (first.MediaStreams && first.MediaStreams.length) found.MediaStreams = first.MediaStreams;
+      if (first.MediaStreams && first.MediaStreams.length) {
+        found.MediaStreams = first.MediaStreams;
+        /* 条目级 `Width`/`Height`：真机电影条目顶层就给（`3840`/`2160`）。数据来源是片源插件
+         * 申报的 `width`/`height`（插件契约已声明该字段，面板解析进视频流后提到条目级）；
+         * **插件没给就没有这俩字段** —— 面板不从集名正则反推，避免与真机"扫过文件"的语义混淆。 */
+        const vid = first.MediaStreams.find((s) => s.Type === 'Video' && s.Width && s.Height);
+        if (vid) {
+          found.Width = vid.Width;
+          found.Height = vid.Height;
+        }
+      }
       if (first.Path) found.Path = first.Path;
       /* `FileName` 用**源给的真文件名**（`target.name`，如 `10间敢死队.2026.2160p….mkv`）——
        * 真机给的就是文件名。早期从版本 `Path` 末段取，而那是"站点标签 · 文件名"的副标题，
@@ -2524,32 +3080,72 @@ function directStreamUrl({ itemId, host, proto = 'http', token, src, container }
 }
 
 /**
- * 电影多版本时，版本行标题要能**区分**同一条线路下的各个播放项 —— 用源标的规格拼一句短标签。
- * 读不出规格就返回空（调用方退回「第 N 项」，不编）。例：`5.0GB 1080p`。
+ * 体积前缀：播放项带体积（agg 从集名 `[..GB/MB]` 解析，或插件直接给 `sizeBytes`）时，
+ * 标题最前面挂十进制大小（与播放器副标题同一口径，GB = 10⁹）：`[8.0G]` / `[943M]`；
+ * 没有体积返回空串（不标，不编）。
+ * ≥1GB 保留一位小数，<1GB 取整 MB。
  */
-function itemSpecLabel(t) {
-  const bits = [];
-  if (t.sizeBytes) {
-    bits.push(t.sizeBytes >= 1024 ** 3 ? `${(t.sizeBytes / 1024 ** 3).toFixed(1)}GB` : `${Math.round(t.sizeBytes / 1024 ** 2)}MB`);
-  }
-  if (t.width && t.height) bits.push(t.height >= 2000 ? '4K' : `${t.height}p`);
-  return bits.join(' ');
+function sizeTag(t) {
+  const n = Number(t && t.sizeBytes) || 0;
+  if (!n) return '';
+  if (n >= 10 ** 9) return `[${(n / 10 ** 9).toFixed(1)}G]`;
+  return `[${Math.round(n / 10 ** 6)}M]`;
 }
 
 /**
- * 一条线路下**全部播放项**的短标签（电影专用）：规格互不相同就直接用规格；
- * 有重复（同一部片的两个压制版本体积+分辨率一样）或读不出规格时，补 `· 第 N 项` 保证**互不相同** ——
+ * 电影多版本短标签用的**清晰度**部分。体积已统一放标题前缀（`sizeTag`），这里不再重复。
+ * 读不出清晰度返回空（调用方退回「第 N 项」，不编）。例：`1080p`。
+ */
+function itemSpecLabel(t) {
+  if (t.width && t.height) return t.height >= 2000 ? '4K' : `${t.height}p`;
+  return '';
+}
+
+/**
+ * 一条线路下**全部播放项**的短标签（电影专用）：清晰度互不相同就直接用清晰度；
+ * 有重复（同一部片的两个压制版本体积+清晰度一样）或读不出时，补 `· 第 N 项` 保证**互不相同** ——
  * 标题撞名的后果是客户端里几条版本长得一模一样（同片变体已经踩过一次）。
+ * ⚠️ 去重判据仍是「体积 + 清晰度」：体积显示在前缀，但同清晰度、不同体积的两个版本
+ *    靠前缀区分，不该再补「第 N 项」。
  */
 function itemLabelsOf(items) {
   const specs = items.map((t) => itemSpecLabel(t));
+  const keys = items.map((t, i) => `${Number(t.sizeBytes) || 0}|${specs[i]}`);
   const seen = new Set();
   const dup = new Set();
-  for (const s of specs) {
-    if (!s || seen.has(s)) dup.add(s);
-    seen.add(s);
+  for (const k of keys) {
+    if (seen.has(k)) dup.add(k);
+    seen.add(k);
   }
-  return specs.map((s, i) => (dup.has(s) ? `${s || '播放项'} · 第 ${i + 1} 项` : s));
+  return keys.map((k, i) => (dup.has(k) ? `${specs[i] || '播放项'} · 第 ${i + 1} 项` : specs[i]));
+}
+
+/**
+ * 版本标题**全局不撞名**。flag 单段化后，同站不同包靠播放项自己的结构化规格区分
+ * （每集 [大小] 前缀通常已经不同）；若仍有完全同名的版本，按「分辨率 → 编码 → 第 N 版本」
+ * 从该版本视频流的字段补一段，只补撞名的组，不撞不添噪。
+ * 同步改视频流的 DisplayTitle：它就是版本列表里那一行的标题位，与 ms.Name 同源。
+ */
+function ensureUniqueSourceNames(msList) {
+  const groups = new Map();
+  msList.forEach((ms, i) => {
+    if (!groups.has(ms.Name)) groups.set(ms.Name, []);
+    groups.get(ms.Name).push(i);
+  });
+  for (const idxs of groups.values()) {
+    if (idxs.length < 2) continue;
+    idxs.forEach((idx, k) => {
+      const ms = msList[idx];
+      const v = (ms.MediaStreams || []).find((s) => s.Type === 'Video') || null;
+      const bits = [];
+      if (v && v.Height) bits.push(v.Height >= 2000 ? '4K' : `${v.Height}p`);
+      if (v && v.Codec) bits.push(String(v.Codec).toUpperCase());
+      bits.push(`第 ${k + 1} 版本`);
+      const next = `${ms.Name} · ${bits.join(' · ')}`;
+      ms.Name = next;
+      if (v) v.DisplayTitle = next;
+    });
+  }
 }
 
 function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel = '', host = '', proto = 'http', headers = {}, item, itemLabel = '' }) {
@@ -2563,12 +3159,13 @@ function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel 
    * 同片别名（`（臻彩）`/`（4K 偷跑）`）**必须**进标题位：同一部片的两个条目常常线路名完全一样
    * （`虎斑|4K · 夸克原画` × 2），不加后缀又变成"分不清哪条是哪条"（同类问题已出现过）。
    * 电影多版本（`itemLabel`）同理：同一条线路下挂着 4 个压制版本时，不加规格就是 4 行一模一样。 */
-  const title = `${siteLabel} · ${line.flag}${variantLabel ? ` · ${variantLabel}` : ''}${itemLabel ? ` · ${itemLabel}` : ''}`;
-  const fileName = t.name || `${line.flag}.mkv`;
-  /* Path 末段 = 版本行的**副标题**（客户端取「解码后最后一个 `/` 之后」，见 streamPath）：
-   * 前面挂**站点来源标签**（站点的完整 `name`，如 `木偶|4K`）—— 多站之后副标题（集名）常常逐字
-   * 相同，光看集名分不出来源；标签放前面，长集名被客户端截断时也还看得见是哪个站。 */
-  const rel = streamPath(itemId, src, `${siteLabel} · ${fileName}`);
+  /* 体积前缀挂最前面（`[1G]` / `[743M]`）；这项没体积信息就不带，其余标题结构不变 */
+  const sizePrefix = sizeTag(t);
+  const title = `${sizePrefix ? `${sizePrefix} ` : ''}${siteLabel} · ${line.flag}${variantLabel ? ` · ${variantLabel}` : ''}${itemLabel ? ` · ${itemLabel}` : ''}`;
+  /* Path 末段 = 版本行的**副标题**（客户端取「解码后最后一个 `/` 之后」，见 streamPath）。
+   * 优先用 agg 拼好的 `standardName`（`标题.年份.季集.规格.容器`），没有就退到原始文件名。 */
+  const fileName = t.standardName || t.name || `${line.flag}.mkv`;
+  const rel = streamPath(itemId, src, fileName);
   const abs = host ? `${proto}://${host}${rel}` : rel;
   const ms = {
     Id: src,
@@ -2825,13 +3422,13 @@ function locatorLabel(type, p) {
   return `（非可播类型：${type}）`;
 }
 
-async function getPlaybackInfo(itemId, requestedId, host = '', token = '', proto = 'http') {
+async function getPlaybackInfo(itemId, host = '', token = '', proto = 'http') {
   const p = metaBridge.parseItemId(itemId);
   if (!isPlayableId(p)) {
     return { status: 404, body: { error: '只有「集」和「电影」有播放信息' }, log: `Id 不是集/电影 → 404：${itemId}` };
   }
 
-  const item = await getItem(itemId, requestedId, host, proto);
+  const item = await getItem(itemId, host, proto);
   if (item.status !== 200) return item;
 
   const sources = (item.body.MediaSources || []).map((m) =>
@@ -2869,16 +3466,14 @@ async function getPlaybackInfo(itemId, requestedId, host = '', token = '', proto
  * 回的是回环地址，插件要拿它拼成"客户端够得着的那台机器"）；另取一份 `origin`（协议 + Host）
  * 给 `proxy` 档的清单改写用 —— 改出来的子地址必须是**绝对**的，且要落在客户端正在打的那个端口上
  * （见 `finishStream`）。
+ *
+ * **鉴权只在路由层的 `authorize` 做**（只验 token，见 #12-1）：这里不再比对 `UserId` ——
+ * 拉流 / 下载是取字节的读取类端点，真机同样忽略 query 里的 `UserId`。
  */
-async function resolveStream(itemId, src, requestedId, req) {
+async function resolveStream(itemId, src, req) {
   const clientHost = (req && req.headers && req.headers.host) || '';
   /* 清单改写用的绝对来源（协议 + Host）—— `proxy` 档的子地址必须落在这个上面 */
   const origin = req ? streamKernel.originOf(req) : '';
-  /* 有 UserId 就校验，没有也不拦（客户端拉流不保证带上它） */
-  if (requestedId) {
-    const denied = assertUser(requestedId);
-    if (denied) return denied;
-  }
 
   const p = metaBridge.parseItemId(itemId);
   if (!isPlayableId(p)) {
@@ -3077,9 +3672,10 @@ function baseItem(f) {
   item.LockData = false;
   item.LockedFields = [];
   item.CanDelete = false;
-  /* 与握手 policy 对齐（`EnableContentDownloading: true`），而且 `Items/{ItemId}/Download` 真做了 ——
-   * 这两处必须一致，否则客户端"说支持又不给下"。`CanDelete` 保持 false（删除确实没有）。 */
-  item.CanDownload = true;
+  /* 与握手 policy（`EnableContentDownloading`）和 `Items/{ItemId}/Download` 端点同一口径，
+   * 跟随实例级「下载」开关（默认开）—— 三处必须一致，否则客户端"说支持又不给下"。
+   * `CanDelete` 保持 false（删除确实没有）。 */
+  item.CanDownload = allowDownload();
   item.LocalTrailerCount = 0;
   /* 真机**电影**条目两处（列表 + 详情）都带它 = 0；本层确实没有预告片/花絮这类附加内容，
    * 所以 0 是真话。（真机的**剧集**条目不给这个字段，给了也无害 —— 真机自己都不保证有。） */
@@ -3284,9 +3880,12 @@ function userImage(requestedId, type) {
 module.exports = {
   EMBY_VERSION,
   serverId,
+  allowDownload,
   userId,
   buildUser,
   publicInfo,
+  systemInfo,
+  hostOf,
   authenticate,
   tokenFrom,
   authorize,
@@ -3298,6 +3897,7 @@ module.exports = {
   recordPlayback,
   setHiddenFromResume,
   setPlayed,
+  setFavorite,
   getStudios,
   getNextUp,
   getItemCounts,

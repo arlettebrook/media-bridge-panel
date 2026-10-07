@@ -19,6 +19,8 @@
 | [ARCHITECTURE.md](../ARCHITECTURE.md) | 分层与依赖方向、目录结构、模块清单、模块设置 | 参考 |
 | [develop.md](develop.md) | 开发环境、新增模块、API 契约、面板鉴权、数据目录、实现要点 | 参考 |
 | [emby-compat.md](emby-compat.md) | Emby 兼容层：端点清单、DTO 形状、失败语义、客户端差异 | 参考 |
+| [emby-realdevice/](emby-realdevice/) | Emby 真机对照记录：一条端点一份（索引在 [emby-compat.md](emby-compat.md)「十」） | 参考 |
+| [emby-semantics.md](emby-semantics.md) | Emby 语义类清单：一类语义的入口端点 / 唯一实现 / DTO 形状 / 真机样本，附扇出敏感支路 | 参考 |
 | [media-bridge-plugins](https://github.com/dlushu/media-bridge-plugins)（**另一个仓库**） | 插件源码、打包工具与插件文档：**插件契约**、首页插件的行与条目规范、架构讨论存档、施工批次计划 | 参考 + 原理 |
 | [adr/](adr/) | 设计决策记录（背景 / 决定 / 理由 / 备选 / 后果） | 原理 |
 | [CHANGELOG.md](../CHANGELOG.md) | 版本变更 | 参考 |
@@ -31,3 +33,4 @@
 - 注释与文档的书写规范见 [CONTRIBUTING.md](../CONTRIBUTING.md#文档与注释的书写规范)，
   由 `npm run check` 检查。
 - 决策类内容不写在参考文档里：参考文档写"是什么、怎么用"，决策写进 [adr/](adr/)。
+- 用 AI 代理改代码时，"这次改动要同步哪份文档"以 [AGENTS.md](../AGENTS.md) 为准。

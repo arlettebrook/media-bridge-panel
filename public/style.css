@@ -213,19 +213,36 @@ select {
 /* 展开的原生列表由系统绘制，但能染色的地方染一下（Firefox/部分 Chrome 生效） */
 select option { background: var(--field-bg); color: var(--fg); }
 
-/* 文件选择框（首页插件上传）：让那个原生按钮看起来像本项目的 .btn */
-input[type='file'] { width: 100%; font: inherit; color: var(--fg-dim); }
+/* 文件选择框（插件上传）：整块做成和上面那些输入框一样的"可填的格"。
+ * ⚠️ 上面那条通用字段规则把 `type=file` 排除在外，所以**外层这圈底 / 描边 / 圆角 / 34px 高度得在这里补**——
+ * 只给里面那颗原生按钮写样式的话，它整体就像一颗孤零零的按钮浮在卡片上，跟同一行的 md5 框既不齐也不像一类。 */
+input[type='file'] {
+  width: 100%;
+  font: inherit;
+  color: var(--fg-dim);
+  background: var(--field-bg);
+  border: 1px solid var(--field-line);
+  border-radius: 9px;
+  padding: 0 10px;
+  height: 34px;
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+}
+input[type='file']:focus-visible { outline: none; border-color: var(--accent-2); box-shadow: 0 0 0 2px var(--accent-ring); }
+/* 里面那颗原生按钮：压成一颗小按钮，落在 34px 的框里上下都留得住边 */
 input[type='file']::file-selector-button {
   font: inherit;
   margin-right: 10px;
-  height: 30px;
+  height: 26px;
   padding: 0 12px;
-  border-radius: 9px;
-  background: var(--field-bg);
+  box-sizing: border-box;
+  border-radius: 7px;
+  background: var(--bg-3);
   border: 1px solid var(--field-line);
   color: var(--fg);
   cursor: pointer;
 }
+input[type='file']::file-selector-button:hover { border-color: var(--accent-2); color: var(--accent); }
 
 .chk { display: flex; align-items: center; gap: 6px; color: var(--fg-dim); font-size: 13px; white-space: nowrap; }
 .chk input[type='checkbox'], .chk input[type='radio'] { accent-color: var(--accent-2); width: 14px; height: 14px; }
@@ -757,8 +774,10 @@ pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
   .view { padding: 16px 16px calc(36px + env(safe-area-inset-bottom)); }
   .view.nopad { padding: 0; }
 
-  /* 触控友好：输入框 16px 可避免 iOS 聚焦时自动放大（选择器与上面那条保持同一个范围） */
+  /* 触控友好：输入框 16px 可避免 iOS 聚焦时自动放大（选择器与上面那条保持同一个范围；
+   * 文件选择框也得跟着长到 40px，否则它在同一行里比旁边的框矮一截） */
   input:not([type='checkbox'], [type='radio'], [type='file']),
+  input[type='file'],
   select,
   textarea { font-size: 16px; height: 40px; padding-left: 12px; padding-right: 12px; }
   select { padding-right: 32px; }

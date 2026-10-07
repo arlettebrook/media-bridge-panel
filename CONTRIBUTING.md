@@ -90,6 +90,7 @@
 | [docs/](docs/index.md) | 开发者：分模块的详细文档 |
 | [docs/adr/](docs/adr/) | 设计决策记录 |
 | [CHANGELOG.md](CHANGELOG.md) | 版本变更 |
+| [AGENTS.md](AGENTS.md) | AI 编码代理：改动后必须同步的文档清单 |
 
 ## 许可
 

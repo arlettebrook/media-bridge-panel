@@ -17,11 +17,13 @@
  *
  * 什么时候跑：
  *   ① 每 `speedTestHours` 小时（默认 6）自动一轮 —— **跑完才排下一次**，不会因为一轮慢而堆起来；
+ *      开机那一轮是"2 分钟后**且源已起来**"（见 `scheduleBoot`）；
  *   ② 手动（面板按钮 → `POST /api/agg/site-test/start`；可带 `keys` 只测当前筛选出来的站）。
  *
  * ⚠️ 原先还有第三条"**某个源起来/重启之后**只测那个源的站点" —— 这一版**去掉了**：
  * 源实例现在活在源插件里，面板收不到"它起来了"这件事（插件不反向通知面板）。
- * 开机那一轮（延迟 2 分钟）会覆盖到自启的实例；要立刻看到数字就点单站那个「测速」按钮。
+ * 开机那一轮会覆盖到自启的实例（源还在起就往后顺延，见 `scheduleBoot`）；
+ * 要立刻看到数字就点单站那个「测速」按钮。
  *
  * 结果**直接覆盖上一次**（单槽，不留历史），所以界面上没有"第几次测速"这种东西 ——
  * 要看的永远是"这一轮测出来多少"。
@@ -35,6 +37,10 @@ const CONCURRENCY = 3;
 const DEFAULTS = { enabled: true, hours: 6 };
 /** 开机后先等 2 分钟再跑第一轮（与插件里那份自动更新同一口径：等面板自己先稳下来） */
 const BOOT_DELAY_MS = 2 * 60 * 1000;
+/** 开机那一轮：到点发现源还在起，就隔这么久再看一眼 */
+const BOOT_RETRY_MS = 30 * 1000;
+/** 开机那一轮等源的上限：等到这里还在起就照跑（如实测、如实记，不再等） */
+const BOOT_WAIT_MAX_MS = 10 * 60 * 1000;
 
 let timer = null;
 let booted = false;
@@ -246,6 +252,61 @@ function schedule(delayMs) {
   if (timer.unref) timer.unref();
 }
 
+/**
+ * 还有源在起吗 —— 开机那一轮的闸门（判据与理由见 `scheduleBoot` 的注记）。
+ *
+ * 只看站点清单里 `sources[].status`：插件进程自己没加载完、或它托管的源实例还在起，
+ * 那一行都是 `starting`。**永久起不来的实例是 `error` / `stopped`**，不算"还在起"。
+ */
+async function sourcesStarting() {
+  try {
+    const { sources } = await api.loadSites();
+    return (sources || []).some((s) => s.status === 'starting');
+  } catch {
+    /* 问不出来就当它不在起：到点照跑，如实测、如实记（不因为一次问不动就把这一轮丢了） */
+    return false;
+  }
+}
+
+/**
+ * 开机那一轮的排期：到点先看源起没起，还在起就隔 `BOOT_RETRY_MS` 再看，直到 `deadline`。
+ *
+ * **为什么不能"到 2 分钟就测"**：插件进程报 `ready` 只代表它的入口加载完了 —— 它托管的
+ * 源实例（下包 / 起进程 / 端口 bind）要几十秒到几分钟，而且是**一个个串着起**的。
+ * 实例没起来时站点清单里根本没有它的站点（`sites` 只报拉得到站点表的实例），
+ * 那一轮测出来的不是"站况"而是"起没起来"，还会把好站记成失败（`shouldSkip` 据此跳过它，
+ * 一路跳到下一轮）。面板看不到实例本身，只能透过站点清单那一行的 `status` 看它还在不在起。
+ *
+ * 到 `deadline` 还在起就**照跑**：等下去也未必等得到（比如实例就是起不来），
+ * 如实测、如实记比无限期推迟有用。
+ */
+function scheduleBoot(delayMs, deadline, { announce = true } = {}) {
+  clearTimer();
+  if (!cfg().enabled) return;
+  st.nextRunAt = Date.now() + delayMs;
+  timer = setTimeout(async () => {
+    timer = null;
+    if (Date.now() < deadline && (await sourcesStarting())) {
+      if (announce) {
+        console.log(
+          `  · agg 测速：源还在起，开机这一轮先等 —— 每 ${BOOT_RETRY_MS / 1000}s 看一眼，` +
+            `最多等到开机后 ${Math.round(BOOT_WAIT_MAX_MS / 60000)} 分钟`
+        );
+      }
+      scheduleBoot(BOOT_RETRY_MS, deadline, { announce: false });
+      return;
+    }
+    const r = start({ reason: 'timer' });
+    /* 撞上正在跑的一轮（例如手动点的那一轮）时**必须重排** —— 理由同 `schedule()` */
+    if (r.busy) {
+      console.log('  · agg 测速：到点了但上一轮还在跑 —— 一分钟后重试');
+      schedule(60 * 1000);
+    }
+  }, delayMs);
+  /* 别让一个定时器把进程吊着不退出（理由同 `schedule()`） */
+  if (timer.unref) timer.unref();
+}
+
 /** 设置变了就按新配置重排（「保存」→ core 调 onSettingsChange） */
 function apply() {
   const { enabled, hours } = cfg();
@@ -272,12 +333,12 @@ function boot() {
     return;
   }
   console.log(
-    `  ↻ agg 测速：每 ${hours} 小时自动测一轮（${Math.round(BOOT_DELAY_MS / 60000)} 分钟后先跑一次；` +
-      `全部站点 · ${CONCURRENCY} 并发 · 单站 ${api.SPEED_TEST_TIMEOUT_MS / 1000}s 超时 · 随机片名）`
+    `  ↻ agg 测速：每 ${hours} 小时自动测一轮（${Math.round(BOOT_DELAY_MS / 60000)} 分钟后先跑一次，` +
+      `源没起来就往后顺延；全部站点 · ${CONCURRENCY} 并发 · 单站 ${api.SPEED_TEST_TIMEOUT_MS / 1000}s 超时 · 随机片名）`
   );
-  /* 开机这一轮是"2 分钟后"，不是"6 小时后" —— 只把"排的是哪个配置"记下来，下一轮起才按小时排 */
+  /* 开机这一轮是"2 分钟后（且源已起来）"，不是"6 小时后" —— 只把"排的是哪个配置"记下来，下一轮起才按小时排 */
   armed = { enabled: true, hours };
-  schedule(BOOT_DELAY_MS);
+  scheduleBoot(BOOT_DELAY_MS, Date.now() + BOOT_WAIT_MAX_MS);
 }
 
 /**

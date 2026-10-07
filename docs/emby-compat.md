@@ -17,6 +17,7 @@
 - 需要新端点时的顺序固定：**日志里先看到它 → 由部署者指定 → 才实现 → 记入本文档「已实现端点」表**。
 - 本文档是端点清单的唯一来源；代码里不放未经指定的端点。
 - **「留白端点」不算违反本条**：可以明确要求「端点通、数据空」——此时只返回 Emby 的合法空响应，并在代码与本文档里标注「留白」。判断标准是**这个决定由部署者做出**，不是实现方推测「先返回个空壳应该没错」。
+- **补之前先划范围**：只补「这条 API 背后的能力属于面板」的端点（**界内**）；属于官方服务器自身能力的（转码、本地库扫描、用户权限 / 家长控制等）属**界外**，一律不认领。范围与判据见 [ADR-0056](adr/0056-emby-compat-scope.md)。
 
 ### 另一条：项目未发布 —— 不为「迁移 / 旧状态」妥协
 
@@ -81,7 +82,7 @@
 ### 未实现端点（501）的形状
 
 ```
-✘ emby 未实现#12 GET /api/emby/System/Info?api_key=…&X-Emby-Token=… [VidHub/3.0.6]
+✘ emby 未实现#12 GET /api/emby/System/Ext/ServerDomains?api_key=…&X-Emby-Token=… [SenPlayer/6.1.8]
 ```
 
 一行：序号 + 方法 + 完整路径 + **query**（截断 400 字符）+ 客户端。响应体：
@@ -146,7 +147,7 @@ docker logs -t media-bridge-panel              # 带时间戳
 6. 实现后，该端点返回正常响应，并把一条记录填进下面「已实现端点」表。
 
 > 日志里所有 `501` 的端点 = 客户端想要、但还没有的端点。按需要挑，不必全补。
-> 例外：已记进「六、明确无视的请求」的，连提都不用提。
+> 例外：已记进「六、界外：明确不认领的请求」的，连提都不用提。
 
 ## 四、实现一个端点时的要求
 
@@ -154,14 +155,20 @@ docker logs -t media-bridge-panel              # 带时间戳
 - 端点必须注册在通配路由 `ANY /api/emby/*rest` **之前**，否则会被通配吞掉。
 - emby 层只依赖**聚合层**的接口，且是**进程内直调**：`require('../agg/api')` 拿 `detail()` / `play()`，**不再打自己的 `/api/agg/*`** —— 那条自调用不带面板 cookie，会被面板门禁（`core/auth.js` 的 `needsAuth`，`/api/` 开头一律要登录）挡成 **401**，表现为"每条详情只回元数据、播放链路全断"，而日志里只写 `UPSTREAM_HTTP http://127.0.0.1:<端口>`，看不出是 401。`/api/agg/detail` / `/play` 两个端点仍保留给前端与外部用，与 emby 层**共用 `agg/api.js` 里同一套编排**。
 - 协议细节（`vod_play_from` 的 `$$$`、`vod_play_url` 的 `#`/`$`、`push://`、`play.url` 既可能是字符串也可能是数组）**留在聚合层**，emby 层不要重复解析——需要哪种形状时，先让聚合层提供对应的对外契约。
+- **元数据插件是「可选能力」，查不到不能动主结构（回退原则）**：**emby 层不认识、也不该认识是哪个元数据插件**
+  —— 前端可换插件，各家能给的字段本就不同（有的给 logo，有的连背景只有一张；同名字段未必人人都有）。
+  由此两条硬约束：
+  ① **不为任何插件特调** —— 字段按数据通路该有就有、没给就没有，emby 层不猜、不补、更不为"某家插件缺这个字段"写特例分支；
+  ② **可选字段缺失只降级、不牵连**：图片、标签这类"锦上添花"的字段，有就填、没有就**照常省略**，**绝不影响主结构**
+  （`Id`/`Name`/`Type`/`ParentId`/季集坐标/播放链路/数组字段容器一律照旧成立）。
+  与上面「不知道就空字段」同一条口径，只是把"哪个字段"换成"哪个插件"：**插件差异止步于取数，不要渗进 DTO 的形状**。
 - 响应尽量贴 Emby 客户端的期望（字段名、大小写、分页参数），以客户端实测为准。
-- **回空的响应不校验账号**（既定口径）：**没有数据可保护，校验只会有坏处** ——
-  客户端不带 token 时会白白收到一个 401，而它本该拿到一个空列表。所以校验只挂在**真会返回数据**的路上。
-  现在还适用的有：`GET /Studios`、`GET /Items/Counts`、`Users/{UserId}/Items` 里 `Filters=IsFavorite`
-  与认不出的查询（判据收敛在 `service.itemsWillReturnData()` 一处，路由层与 `service.getItems` 共用）。
-  **真数据的端点永远校验**（`Views` / `Items?ParentId=<本面板的库>` / 详情 / 季集 / **观看进度那一族** ——
-  无 token 一律 401）。⚠️ `Items?Filters=IsPlayed` 自 [0023](adr/0023-playback-progress.md) 起**出真数据**，
-  因此它也从"不校验"挪进了"必须校验"。
+- **端点一律校验 AccessToken**（现行口径，取代早先的"回空不校验"）：真机对齐后不再按"这个查询会不会出数据"分档 ——
+  `Items`（「十」#5）、`Items/Latest`（#6）、`Studios`（#14）、`Items/Counts`（#16）等**无 / 无效 token 一律 401 纯文本**。
+  早先的"回空不校验"取向及其判据函数 `service.itemsWillReturnData()` **已作废 / 已删**（[ADR-0009](adr/0009-unauthenticated-empty-responses.md) 后记）
+  —— 正常客户端都带 token，无人被误伤；收藏等曾按「待补」对待的端点现已出真数据，本就该校验，口径一致。
+  **唯一豁免**是握手类（`System/Info/Public` / `System/Ping`）、登录、面板自用端点、501 通配与图片端点，
+  各豁免理由见 `server/modules/emby/routes.js` 头部与本文「五」。
 - ⚠️ **DTO 要给"完整形状"—— 客户端会因为缺字段而整条失败**（由 SenPlayer 实测发现，**这条代价最大**）：
   - **症状**：客户端拿到 `200` 之后**不再发任何后续请求**（正常时点开一条会紧跟一条 `Similar`），
     界面提示「网络错误 / 当前媒体库不存在该项目」。**它不是在抱怨某个字段为空，而是整条响应解不出来。**
@@ -194,30 +201,34 @@ docker logs -t media-bridge-panel              # 带时间戳
 | 方法 | 路径 | 入参 | 响应 | 依据 |
 |---|---|---|---|---|
 | GET | `/api/emby/System/Info/Public` | 无 | 握手信息：`ServerName`（**= 该实例的 `name`**，在面板「Emby → 实例」页的编辑弹窗里改；留空回落 `媒体桥`（`core/branding.js` 的 `name`））/ `Version(4.8.0.0)` / `Id` / `LocalAddresses`(空) / `RemoteAddresses`(空)。**字段集对齐真机样本**（两台真机实测只回这 5 个字段；`LocalAddress` / `ProductName` / `OperatingSystem` / `StartupWizardCompleted` 已按真机删除） | 部署者指定（客户端需先握手）；字段集以真机样本为准（方案 A，见「十、真机对照记录」#1） |
-| POST | `/api/emby/Users/AuthenticateByName` | `{Username, Pw}`（兼容 `Password`）；头 `X-Emby-Authorization`（真机靠它取 `appName`，缺则 400） | 200 `{User, SessionInfo, AccessToken, ServerId}`；**缺 `X-Emby-Authorization` → 400 纯文本** `Value cannot be null. (Parameter 'appName')`；账号未设置或校验不过 → **401 纯文本** `无效用户名或密码。请重试。`（对齐真机，见「十、#2」） | 部署者指定（日志 #6 抓到该端点） |
-| GET | `/api/emby/Users/{UserId}` | 路径参数 `UserId` | 200 `UserDto` 本体（不包层）；Id 不匹配 → 404；未设账号 → 401 | 部署者指定（客户端登录后紧接着就会要） |
+| GET | `/api/emby/System/Info` | 无 | 200 **完整服务器信息**（**诚实子集**：只回面板真有的 **17** 个字段 —— `ServerName` / `Version(4.8.0.0)` / `Id` / `OperatingSystem`（面板运行 OS）/ `LocalAddress`（请求 `Host` 去端口）/ `LocalAddresses`(空) / `RemoteAddresses`(空) / `CompletedInstallations`(空)，能力位 `HasPendingRestart` / `IsShuttingDown` / `SupportsLibraryMonitor` / `CanSelfRestart` / `CanSelfUpdate` / `CanLaunchWebBrowser` / `SupportsHttps` / `HasUpdateAvailable` / `SupportsAutoRunAtStartup` **一律 `false`**）；面板无对应物的 `SystemUpdateLevel` / `OperatingSystemDisplayName` / `SupportsLocalPortConfiguration` / `WebSocketPortNumber` / `HttpServerPortNumber` / `HttpsPortNumber` / `HardwareAccelerationRequiresPremiere` / `WanAddress` **不回**；**只验 token、不比对 UserId**（与 `Studios` / `Items/Counts` 同口径） | 部署者指定（新客户端 **Filmly/2.12.11-439** 登录后打到 501）；字段取舍见 [ADR-0057](adr/0057-emby-system-info-honest-subset.md)；**真机对照见「十」#20：真机 4.8 / 4.9 同构 25 字段，面板取诚实子集、字段集小于真机** |
+| GET | `/api/emby/System/Ping` | 无 | **200 `text/plain`**，body 常量 `Emby Server`（11 字节，**非 JSON**）；**豁免 AccessToken**（连通性探针，要求 token 会让探针失败） | 部署者指定（新客户端 **Lenna/1.0.16** 的连通性探针，落到 501 后接线）；**真机对照见「十」#19：予初Emby / OkEmby / nyamedia 回 200 纯文本 `Emby Server` 且免鉴权，itsmygo 要 token（无 / 无效 → 401 JSON `{"error":"unauthorized"}`）—— 对齐多数、豁免 token，itsmygo 差异登记不复刻** |
+| POST | `/api/emby/Users/AuthenticateByName` | `{Username, Pw}`（字段名**大小写不敏感**，兼容 `Password`）；appName 取 `X-Emby-Authorization` **或** `Authorization` 头里的 `Client=`（两头都认，值**引号可省**），**头里取不到时回退 query `X-Emby-Client`**（真机同此，Filmly / 网易爆米花靠这一手，见「十」#2）；四处都取不到 appName 则 400 | 200 `{User, SessionInfo, AccessToken, ServerId}`；**缺 appName → 400 纯文本** `Value cannot be null. (Parameter 'appName')`；账号未设置或校验不过 → **401 纯文本** `无效用户名或密码。请重试。`（对齐真机，见「十、#2」） | 部署者指定（日志 #6 抓到该端点） |
+| GET | `/api/emby/Users/{UserId}` | 路径参数 `UserId` | 200 `UserDto` 本体（不包层）；Id 与 token 不符 → **401**（`authorize` 先拦；同规则下 authorize 过了必命中账号，故实现里的 404 分支实际不可达）；未设账号 → 401 | 部署者指定（客户端登录后紧接着就会要）；**真机对照见「十」#9：真机按 UserId 解析、不是「只验 token」，故不适用「只验 token」的自动对齐例外；判定维持现状、不放开跨账号，见 [ADR-0048](adr/0048-emby-userid-not-identity.md)** |
 | GET | `/api/emby/Users/{UserId}/Views` | 路径参数 `UserId`；客户端另带 `?IncludeExternalContent=false`（忽略） | 200 `QueryResult<BaseItemDto>`：**每个「启用」的首页插件行 = 一个库**，每项 `Id=catpawhome_<base64url(插件id\|行id)>`、`Name=行标题`、`Type=CollectionFolder`、`IsFolder=true`，**其余字段按真机逐项补齐（含封面 + `CollectionType`，见「五」下面那条）**；没有启用的插件行 → 空 `{Items:[],TotalRecordCount:0}`（与留白时期形状一致）；**只验 token、不比对 UserId**（4-3 起对齐真机）；未设账号 → 401 | 部署者指定（由「留白」改为插件行的媒体库；其后补齐字段与封面） |
-| GET | `/api/emby/Users/{UserId}/Items` | `ParentId=<库Id>`（面板发给客户端的 `catpawhome_…`，见 Views）；**`SortBy` 含 `IsFavoriteOrLiked` 且无 `ParentId`（「推荐」查询，喂首页轮播图）**；`StartIndex`/`Limit`（**原样透传给模块**，emby 不切片）；`Filters` | 200 `QueryResult<BaseItemDto>`：`ParentId` 是本面板的库 → **跑对应插件行**、HomeItem→BaseItemDto（`TotalRecordCount` = **模块返回的 `total`**）；**「推荐」查询 → 跑插件声明了 `feed: 'random'` 的那一行**；`Filters=IsPlayed` → 已看真数据（`playback` 表）；`Filters=IsFavorite` → 空（无收藏数据）；**`AnyProviderIdEquals={域}.{编号}` → 按外部 id 搜一条**（`{域}` 是元数据域 id，Emby 惯例；回 1 条带本面板 Id 的条目，见「五」）；**`SearchTerm=<词>` → 按名字搜**（上游 `search/tv`+`search/movie`，回带本面板 Id 的多条，见「五」的「搜索」那条）；其余查询 → 空；**插件行取数失败 → 照实回失败码**；**AccessToken 一律校验**（5-1 起对齐真机：无 token 一律 401 纯文本，不再分"回空/出数据"支路）；**只验 token、不比对 UserId**（5-2 起对齐真机） | 部署者指定（改为「**列表数据由首页模块决定**」，emby 层只做端点映射 + 翻译；其后接上「推荐」查询与「按名字搜」） |
+| GET | `/api/emby/Users/{UserId}/Items` | `ParentId=<库Id>`（面板发给客户端的 `catpawhome_…`，见 Views）；**无 `ParentId` 的「轮播推荐位」**（`SortBy` 含 `IsFavoriteOrLiked`，如 Rex 首页第一发）；**无 `ParentId` 的「裸列表查询」**（只带 `ExcludeItemTypes`/`StartIndex`/`Limit`/`Fields`、不递归，如 Filmly / 网易爆米花首页）；`StartIndex`/`Limit`（**原样透传给模块**，emby 不切片）；`Filters` | 200 `QueryResult<BaseItemDto>`：`ParentId` 是本面板的库 → **跑对应插件行**、HomeItem→BaseItemDto（`TotalRecordCount` = **模块返回的 `total`**）；**「轮播推荐位」→ 跑插件声明了 `feed: 'random'` 的那一行**；**「裸列表查询」→ 回顶层库列表**（`service.libraryQueryOf()` 命中即走 `Views` 那支，与 `Views` 一字不差，对齐真机 —— 真机对「无 `ParentId` 且不递归」的 `Items` 默认回根的直接子级）；`Filters=IsPlayed` → 已看真数据（`playback` 表）；`Filters=IsFavorite` → **收藏真数据（`favorite` 表，快照重建、0 上游请求，见 [ADR-0058](adr/0058-favorite-items.md)）**；**`AnyProviderIdEquals={域}.{编号}` → 按外部 id 搜一条**（`{域}` 是元数据域 id，Emby 惯例；回 1 条带本面板 Id 的条目，见「五」）；**`SearchTerm=<词>` → 按名字搜**（上游 `search/tv`+`search/movie`，回带本面板 Id 的多条，见「五」的「搜索」那条）；其余查询 → 空；**插件行取数失败 → 照实回失败码**；**AccessToken 一律校验**（5-1 起对齐真机：无 token 一律 401 纯文本，不再分"回空/出数据"支路）；**只验 token、不比对 UserId**（5-2 起对齐真机） | 部署者指定（改为「**列表数据由首页模块决定**」，emby 层只做端点映射 + 翻译；其后接上「推荐」查询、「按名字搜」；裸列表查询经真机校正后回库列表，见 [ADR-0055](adr/0055-bare-items-query-returns-views.md)） |
 | GET | `/api/emby/Users/{UserId}/Items/Latest` | 路径参数 `UserId`；`ParentId=<库Id>`；`Limit`（**缺省 20**，真机默认值）、`StartIndex`（有效）；`Fields`/`Recursive`/`MediaTypes`/`IsPlayed`/`EnableImageTypes`（忽略） | 200 **裸数组** `BaseItemDto[]`（**不是 `QueryResult`**，真机实测响应直接以 `[` 开头）：`ParentId` 是本面板的库 → **跑对应插件行**、顺序**由模块决定**（emby 层不排序、不筛"入库时间"）；`ParentId` 不是本面板的库（含不带）→ **空数组**；**插件行取数失败 → 照实回失败码**；**AccessToken 一律校验**（6-1 起对齐真机）；**只验 token、不比对 UserId**（6-2 起） | **VidHub 3.0.6 的整个首页都靠它**（实测拿到 `Views` 后逐库打，10 个库 = 10 次）；此前被详情路由吞掉 → 501 → 首页空白（其后接上） |
-| GET | `/api/emby/Shows/{Id}/Seasons` | 路径参数 `Id`（形如 `{域}_95350_tv`）；**`UserId` 在 query 里**（同样校验）；`Fields`/`EnableTotalRecordCount=false`（忽略） | 200 `QueryResult<BaseItemDto>`：每季 `Id={域}_{编号}_tv_s{n}`、`Type=Season`、`IndexNumber`(季号)、`SeriesId`/`SeriesName`、`ChildCount`(集数)；**特别篇（`season_number=0`）不返回**；非剧 Id → 404；UserId 不匹配 → 404；未设账号 → 401；上游失败 → **照实回失败码** | 部署者指定（**占位**：上游的 `seasons[]`，日志 emby#3 实测该端点） |
-| GET | `/api/emby/Shows/{Id}/Episodes` | 路径参数 `Id`（**剧 Id，或季 Id —— 见下条**）；**`UserId` 与 `SeasonId` 都在 query**；`EnableTotalRecordCount`/`Fields`（忽略） | 200 `QueryResult<BaseItemDto>`：每集 `Id={域}_{编号}_tv_s{n}_e{m}`、`Type=Episode`、`IndexNumber`(集号)、`ParentIndexNumber`(季号)、`SeriesId`/`SeasonId`/`SeasonName`、`Primary` 图=剧照、`RunTimeTicks`(有 runtime 才填)；**季定不下来（没带/认不出/不属于本剧）→ 200 空**；路径 Id 非剧 → 404；UserId 不匹配 → 404；未设账号 → 401；上游失败 → **照实回失败码** | 部署者指定（**占位**：上游 season 接口，日志 emby#1 实测该端点） |
-| GET | `/api/emby/Users/{UserId}/Items/Resume` | 路径参数 `UserId`；`Limit`（截断用，硬顶 100）；`MediaTypes`/`Recursive`/`Fields`/`EnableImageTypes`（忽略） | 200 `QueryResult<BaseItemDto>`：**该账号有位置、还没看完的条目**，最近看的在前（数据来自 `playback` 表，见 [ADR-0023](adr/0023-playback-progress.md)，**排除被 `HideFromResume` 隐藏的**）；取不到元数据的行**不列出**（不编）；**无 token → 401**（回的是某个账号的观看记录） | 部署者指定（先是"如实回空"，后按 0023 换成真数据） |
+| GET | `/api/emby/Shows/{Id}/Seasons` | 路径参数 `Id`（形如 `{域}_95350_tv`）；**`UserId` 在 query 里**（只当进度兜底）；`Fields`/`EnableTotalRecordCount=false`（忽略） | 200 `QueryResult<BaseItemDto>`：每季 `Id={域}_{编号}_tv_s{n}`、`Type=Season`、`IndexNumber`(季号)、`SeriesId`/`SeriesName`、`ChildCount`(集数)、`UserData`（含 `UnplayedItemCount`，本季未看集数）；**特别篇（`season_number=0`）照真机返回**；非剧 Id → 404；上游失败 → **照实回失败码**；**AccessToken 一律校验**（无 token → 401 纯文本）；**只验 token、不比对 UserId**（7-2 起对齐真机） | 部署者指定（**占位**：上游的 `seasons[]`，日志 emby#3 实测该端点；7-1/7-2/7-3 已按真机对齐，**未复测**） |
+| GET | `/api/emby/Shows/{Id}/Episodes` | 路径参数 `Id`（**剧 Id，或季 Id —— 见下条**）；**`UserId` 与 `SeasonId` 都在 query**；`EnableTotalRecordCount`/`Fields`（忽略） | 200 `QueryResult<BaseItemDto>`：每集 `Id={域}_{编号}_tv_s{n}_e{m}`、`Type=Episode`、`IndexNumber`(集号)、`ParentIndexNumber`(季号)、`SeriesId`/`SeriesName`/`SeasonId`/`SeasonName`、`Primary` 图=剧照、`RunTimeTicks`(有 runtime 才填)；**季定不下来（没带/认不出/不属于本剧）→ 200 空**；路径 Id 非剧 → 404；**AccessToken 一律校验**（无 token → 401 纯文本）；**只验 token、不比对 UserId**（8-2 起对齐真机）；上游失败 → **照实回失败码** | 部署者指定（**占位**：上游 season 接口，日志 emby#1 实测该端点；8-2 / 8-3 已按真机对齐，**未复测**） |
+| GET | `/api/emby/Users/{UserId}/Items/Resume` | 路径参数 `UserId`；`Limit`（截断用，硬顶 100）；`MediaTypes`/`Recursive`/`Fields`/`EnableImageTypes`（忽略） | 200 `QueryResult<BaseItemDto>`：**该账号有位置、还没看完的条目**，最近看的在前（数据来自 `playback` 表，见 [ADR-0023](adr/0023-playback-progress.md)，**排除被 `HideFromResume` 隐藏的**）；取不到元数据的行**不列出**（不编）；**无 token → 401**（回的是某个账号的观看记录）；**只验 token、不比对 `UserId`**（13-1 起对齐真机 —— 观看记录按 token 解出的账号取） | 部署者指定（先是"如实回空"，后按 0023 换成真数据）；**真机对照见「十」#13：只验 token、适用自动对齐例外** |
 | POST | `/api/emby/Sessions/Playing` | body JSON：`ItemId`（**本面板发出去的 Id**）、`PositionTicks`、`RunTimeTicks`（可缺）、`PlaySessionId`/`MediaSourceId`/`PlayMethod`（忽略） | **204 空体**（真机实测同为 204）；**无 token → 401**；`ItemId` 认不出（不是本面板的 Id）→ 也回 204 但**不写库**，日志写明被忽略 | 客户端上报（实测 SenPlayer 6.2.1 开始播放时发 1 次） |
 | POST | `/api/emby/Sessions/Playing/Progress` | 同上（实测**每 10 秒一次**；`RunTimeTicks` 只有部分心跳带，缺了就用库里已有的顶住） | **204 空体**；其余同上 | 客户端上报（心跳；实测被 501 拒了也照发，所以必须收下） |
 | POST | `/api/emby/Sessions/Playing/Stopped` | 同上（**空 body 也接受**，当空操作） | **204 空体**；位置 ≥ 时长 90% 判为看完（`played=1`、位置归零、进「已看」） | 客户端上报（实测停止/退出时发 1 次） |
 | POST | `/api/emby/Users/{UserId}/Items/{ItemId}/HideFromResume` | 路径参数 `ItemId`（**本面板发出去的 Id**）；query `Hide=true`（移除）/ `Hide=false`（恢复）—— **缺省当 `true`** | 200 **`UserItemDataDto`**（真机实测同此，`UserData` 一个字段都不动）；本层只翻 `playback.hidden`，**不动位置**（`Hide=false` 之后位置还在）；**重新开始播放会自动取消隐藏**；库里**没有这一行**时：隐藏 → 写一行**占位**（位置 0，记下来才不会「移除了还在」）、恢复 → 不动库；**无 token → 401** | 客户端写（实测 Rex/0.1.0 / SenPlayer/6.2.1：在「继续观看 / 接着看」那一行上做移除） |
 | POST | `/api/emby/Users/{UserId}/PlayedItems/{ItemId}` | 路径参数 `ItemId`（**本面板发出去的 Id**） | 200 **`UserItemDataDto`**（`Played:true`、位置归零，**`PlayCount` 不动** —— 真机实测同此）；**无 token → 401**；Id 认不出 → 204 且不写库 | 客户端写（实测 SenPlayer/6.2.1：标记已看） |
 | DELETE | `/api/emby/Users/{UserId}/PlayedItems/{ItemId}` | 同上 | 200 **`UserItemDataDto`**（`Played:false`、`PlayCount:0`、位置归零，真机实测同此 —— 它还会去掉 `LastPlayedDate`）—— 行**留着**（时长与季集坐标对 `NextUp` 还有用） | 客户端写（同客户端：标记未看） |
-| GET | `/api/emby/Users/{UserId}/Items/{ItemId}` | 路径参数 `ItemId`（面板发出去的条目 Id：`{域}_{编号}_{tv\|movie}[_s{n}][_e{m}]`）；`EnableImageTypes`/`Fields`（忽略） | 200 **单个 `BaseItemDto` 本体**（不包 `QueryResult`）：上游元数据 + `ProviderIds.Catpaw="<站点key>\|<vod_id>"` + `CatpawSource{Lines, Target}` + **集才有 `MediaSources`（线路=版本，`Id` = `catpaw:` + base64url(deflateRaw(JSON `{r: ref}`))，`Path` 留到 PlaybackInfo 现取）**；**聚合取数失败只降级不回失败**（元数据照常 200）；Id 认不出 → **501**（如 `Items/ResumeXyz`）；上游失败 → 照实回失败码；UserId 不匹配 → 404；未设账号 → 401 | 部署者指定（**元数据走上游 + 线路/绑定走设置里的聚合地址**） |
-| GET | `/api/emby/Studios` | 无路径参数；query `UserId`/`Limit`/`StartIndex`/`SearchTerm`/`Fields`（**全忽略**） | 200 **空** `QueryResult`：`{Items:[], TotalRecordCount:0}`（**如实**：服务端没有片库可枚举，详见「五」下面那条）；**不校验账号/UserId**（回空没有数据可保护） | 部署者指定（**回空，不是 501**） |
-| GET | `/api/emby/Shows/NextUp` | `UserId`（在 **query**）、`SeriesId`（可选 —— SenPlayer 实测会带，只问某一部剧）、`Limit`（截断用）；`MediaTypes`/`Recursive`/`Fields`/`EnableImageTypes`（忽略） | 200 `QueryResult<BaseItemDto>`：该剧最近观看的那一集**未看完就回它自己**，**看完则回下一集**（同一季内找得到才回，找不到再试下一季第 1 集；都不存在就跳过这部剧），且**跳过被隐藏的集**（客户端移除之后让位给下一集）；**无 token → 401** | 部署者指定（SenPlayer 实测在要；按 0023 从"如实回空"换成真数据） |
-| GET | `/api/emby/Items/Counts` | 全部忽略（含 `ParentId`） | 200 **`ItemCounts` 全 0**（14 个字段：`MovieCount`/`SeriesCount`/`EpisodeCount`/`GameCount`/`ArtistCount`/`ProgramCount`/`GameSystemCount`/`TrailerCount`/`SongCount`/`AlbumCount`/`MusicVideoCount`/`BoxSetCount`/`BookCount`/`ItemCount`）；**不校验账号**。**全 0 = "数不出来"，不是"库是空的"** —— 详见「五」下面那条 | 部署者指定（SenPlayer 实测在要） |
-| POST | `/api/emby/Items/{ItemId}/PlaybackInfo` | 路径参数 `ItemId`（**必须是集或电影**）；`UserId` 在 query（可缺） | 200 `{MediaSources:[…], PlaySessionId}`：每条线路一个版本，`Id` = `catpaw:` + base64url(deflateRaw(JSON `{r: ref}`))（客户端播直连时回传的 `MediaSourceId` 就是它 —— **vod 编在里面**，拉流那一格才不用回头再搜一次；**为什么必须编码**见下面「线路 + 源绑定」那条，一句话：线路名里的 `#` 会被 URL 当锚点吃掉）、**`Path` 指向本面板的 Stream 端点**（稳定坐标，不含时效 token；实测客户端**不读它**，走 `videos/{Id}/stream.{ext}`）、`RequiredHttpHeaders:{}`、**`Container`/`Size`/`RunTimeTicks`/`MediaStreams`（编码/分辨率/HDR，来自源在集名里的标注）**；Id 不是集 → 404；上游 / 聚合失败 → 照实回 | 部署者指定（客户端点播放前必来） |
-| GET | `/api/emby/Items/{ItemId}/Stream` | 两种形状：**① `Path` 用的** `/Stream/{token}[/{文件名}]`（`token` = base64url 的版本 Id，自带站点/线路/vod；末段文件名只为版本行副标题）；**② 手工调试** `?src=<版本 Id>`（`parseCatpawSourceId()` 只认当前那一种形状 —— 见下面「版本 Id 只认一种形状」）、`vod` 可缺（src 里自带就用自带的）。两种都可带 `UserId`（可选，**有就校验**） | **一律 302**（"面板代为转发"那条路已删，见下面「拉流」一节）；`src` 认不出 → 400、两个来源都没有 vod → 400；Id 非集 / 定位不到这一集 → 404；聚合或 play 失败 → 502（照搬上游码）；`push://` 之类非直连 → 501 | 部署者指定（拉流最后一格；**实测客户端走的是下一行那条**，这条留作备用/调试） |
+| POST | `/api/emby/Users/{UserId}/FavoriteItems/{ItemId}` | 路径参数 `ItemId`（**本面板发出去的 Id**，放宽到 `movie`/`show`/`season`/`episode`） | 200 **`UserItemDataDto`**（`IsFavorite:true`，真机实测同此）；**收藏时反查元数据、快照落 `favorite` 表**（见 [ADR-0058](adr/0058-favorite-items.md)）；**无 token → 401**；Id 认不出 / 反查失败 → 204 且**不写库** | 客户端写（实测 Rex/1.0.0 收藏）；**真机对照见「十」#21：四类条目均 200、写端点 200 + `UserItemDataDto`** |
+| DELETE | `/api/emby/Users/{UserId}/FavoriteItems/{ItemId}` | 同上 | 200 **`UserItemDataDto`**（`IsFavorite:false`，真机实测同此）；**取消收藏 = 删 `favorite` 行**（不反查）；**无 token → 401**；Id 认不出 → 204 且不写库 | 客户端写（同客户端：取消收藏） |
+| GET | `/api/emby/Users/{UserId}/Items/{ItemId}` | 路径参数 `ItemId`（面板发出去的条目 Id：`{域}_{编号}_{tv\|movie}[_s{n}][_e{m}]`）；`EnableImageTypes`/`Fields`（忽略） | 200 **单个 `BaseItemDto` 本体**（不包 `QueryResult`）：上游元数据 + `ProviderIds.Catpaw="<站点key>\|<vod_id>"` + `CatpawSource{Lines, Target}` + **集才有 `MediaSources`（线路=版本，`Id` = `catpaw:` + base64url(deflateRaw(JSON `{r: ref}`))，`Path` 留到 PlaybackInfo 现取）**；**聚合取数失败只降级不回失败**（元数据照常 200）；Id 认不出 → **501**（如 `Items/ResumeXyz`）；上游失败 → 照实回失败码；**AccessToken 校验**（无 token → 401 纯文本）；**只验 token、不比对 UserId**（10-1 起对齐真机 —— 真机对「不存在的 ItemId」「非 Guid 的 UserId」回 500 误码，本面板**不复刻**，照常按 Id 是否认得出给 501 / 200）；未设账号 → 401 | 部署者指定（**元数据走上游 + 线路/绑定走设置里的聚合地址**）；**真机对照见「十」#10：详情只验 token、适用自动对齐例外** |
+| GET | `/api/emby/Studios` | 无路径参数；query `UserId`/`Limit`/`StartIndex`/`SearchTerm`/`Fields`（**全忽略**） | 200 **空** `QueryResult`：`{Items:[], TotalRecordCount:0}`（**如实**：服务端没有片库可枚举，详见「五」下面那条）；**只验 token**（14-1 起对齐真机：无 token / 无效 token → **401 纯文本**；回空也照样校验） | 部署者指定（**回空，不是 501**）；**真机对照见「十」#14：回空不复刻真机全量清单、鉴权对齐「只验 token」** |
+| GET | `/api/emby/Shows/NextUp` | `UserId`（在 **query**）、`SeriesId`（可选 —— SenPlayer 实测会带，只问某一部剧）、`Limit`（截断用）；`MediaTypes`/`Recursive`/`Fields`/`EnableImageTypes`（忽略） | 200 `QueryResult<BaseItemDto>`：该剧最近观看的那一集**未看完就回它自己**，**看完则回下一集**（同一季内找得到才回，找不到再试下一季第 1 集；都不存在就跳过这部剧），且**跳过被隐藏的集**（客户端移除之后让位给下一集）；**只验 token、不比对 UserId**（15-1 起对齐真机 —— 无 token → 401 纯文本；有效 token + 错配 / 不存在的 UserId 照旧 200） | 部署者指定（SenPlayer 实测在要；按 0023 从"如实回空"换成真数据）；**真机对照见「十」#15：只验 token、适用自动对齐例外** |
+| GET | `/api/emby/Items/Counts` | 全部忽略（含 `ParentId`） | 200 **`ItemCounts` 全 0**（14 个字段：`MovieCount`/`SeriesCount`/`EpisodeCount`/`GameCount`/`ArtistCount`/`ProgramCount`/`GameSystemCount`/`TrailerCount`/`SongCount`/`AlbumCount`/`MusicVideoCount`/`BoxSetCount`/`BookCount`/`ItemCount`）；**只验 token、不比对 UserId**（16-1 起对齐真机：无 token / 无效 token → 401 纯文本；有效 token + 任意 UserId → 200）。**全 0 = "数不出来"，不是"库是空的"** —— 详见「五」下面那条 | 部署者指定（SenPlayer 实测在要）；**真机对照见「十」#16：回全 0 不复刻真机真实计数、鉴权对齐「只验 token」** |
+| POST | `/api/emby/Items/{ItemId}/PlaybackInfo` | 路径参数 `ItemId`（**必须是集或电影**）；`UserId` 在 query（可缺；**只验 token、不比对 UserId**，11-1 起对齐真机 —— 无 / 无效 token → 401 纯文本；有效 token + 错配 / 不存在 / 不带 UserId 照旧 200） | 200 `{MediaSources:[…], PlaySessionId}`：每条线路一个版本，`Id` = `catpaw:` + base64url(deflateRaw(JSON `{r: ref}`))（客户端播直连时回传的 `MediaSourceId` 就是它 —— **vod 编在里面**，拉流那一格才不用回头再搜一次；**为什么必须编码**见下面「线路 + 源绑定」那条，一句话：线路名里的 `#` 会被 URL 当锚点吃掉）、**`Path` 指向本面板的 Stream 端点**（稳定坐标，不含时效 token；实测客户端**不读它**，走 `videos/{Id}/stream.{ext}`）、`RequiredHttpHeaders:{}`、**`Container`/`Size`/`RunTimeTicks`/`MediaStreams`（编码/分辨率/HDR，来自源在集名里的标注）**；Id 不是集 → 404；上游 / 聚合失败 → 照实回 | 部署者指定（客户端点播放前必来） |
+| GET | `/api/emby/Items/{ItemId}/Stream` | 两种形状：**① `Path` 用的** `/Stream/{token}[/{文件名}]`（`token` = base64url 的版本 Id，自带站点/线路/vod；末段文件名（标准文件名）只为版本行副标题）；**② 手工调试** `?src=<版本 Id>`（`parseCatpawSourceId()` 只认当前那一种形状 —— 见下面「版本 Id 只认一种形状」）、`vod` 可缺（src 里自带就用自带的）。两种都可带 `UserId`（**只验 token、不比对 UserId**，12-1 起对齐真机 —— 无 / 无效 token → 401 纯文本；有效 token + 错配 / 不存在 / 非 Guid 的 UserId 照样出字节） | **一律 302**（"面板代为转发"那条路已删，见下面「拉流」一节）；`src` 认不出 → 400、两个来源都没有 vod → 400；Id 非集 / 定位不到这一集 → 404；聚合或 play 失败 → 502（照搬上游码）；`push://` 之类非直连 → 501 | 部署者指定（拉流最后一格；**实测客户端走的是下一行那条**，这条留作备用/调试） |
 | GET | `/api/emby/videos|Videos/{ItemId}/stream[.{扩展名}]` | 路径参数 `ItemId`（集/电影）；**`MediaSourceId=<版本 Id>`（必填，base64url 的 Id，vod 编在里面）**、`Static=true`/`PlaySessionId`/`api_key`/`X-Emby-Token`（**query 里忽略**，只在请求头里认）；面板自己发出去的 `DirectStreamUrl` / `Path` 带的是 query 的 **`api_key`**（真机也有 `AddApiKeyToDirectStreamUrl` 这个取向）—— 写成 `X-Emby-Token` 等于没带，客户端自己会带头所以看不出差别，但把 URL 交给外部播放器/投屏时就会 401；扩展名来自 `MediaSource.Container`（实测 `stream.mkv`） | 与上一行**同一条实现**（路由层共用 `serveStream`）：**一律 302**；`MediaSourceId` 认不出 → 400；`:file` 不是 `stream[.ext]` → **501**（记日志，`original.{ext}` 未见过不提前实现） | **实测要求**（日志 emby#39~#45：客户端播直连打的是**这条**，不是 `Path`）。**两种大小写都注册**：路由区分大小写，而 Emby 官方路径是**大写** `Videos` —— 实测 Lumenic/1.0.0 打的是大写（先白吃一个 501，随后才退回小写拿到 302） |
-| GET | `/api/emby/Items/{ItemId}/Download` | 路径参数 `ItemId`（集/电影）；**`MediaSourceId=<版本 Id>`（必填，base64url 的 Id，vod 编在里面）**、`DeviceId`/`PlaySessionId`（忽略）；`UserId` 可选（**有就校验**），token 三种带法都认 | **一律 302**（与拉流**同一条实现** —— 路由层共用 `serveStream`，只是日志那行写「下载」）；`MediaSourceId` 认不出 → 400；Id 非集 / 定位不到这一集 → 404；聚合或 play 失败 → 502（照搬上游码）。⚠️ 302 之后 `Content-Disposition`（文件名）/`Content-Type`/断点续传**全由源站决定**，面板改不了 —— 要「片名.S01E01.mkv」那种名字只能代为转发全量字节，与 [ADR-0006](adr/0006-redirect-for-playback.md)「面板不扛流量」冲突，故不做 | 客户端实测（SenPlayer/6.2.1 12 小时里试 8 次、每次吃 501 → 一直重试）。同族的 `Items/{ItemId}/File` 日志里**没出现过**，按"等客户端日志暴露再接线"**先不做** |
-| GET | `/api/emby/Items/{ItemId}/Images/{type}[/{index}]` | 路径参数 `ItemId`（面板发出去的条目 Id）、`type`（`Primary`/`Backdrop`/`Logo`…）、`index`（多张背景图时客户端逐张要；**忽略**）；query `tag`（**本面板签发的签名 tag —— 本侧的唯一取图凭证**）、`maxWidth`/`quality`/`ImageTypeLimit`（忽略） | **302 到原图**（面板**不再代取字节**，`Location` = tag / 索引里的图片 URL，见 [ADR-0036](adr/0036-image-endpoint-redirect.md)）；`tag` 缺失/验签不过 → **404**。**豁免 AccessToken**；tag = `cpimg.<base64url(图片URL)>.<签名>`。官方把 `Tag` 定义为**可选**（只影响缓存强弱），但直链只存在于 tag 里，故**认不出即 404**；按 `Id` 反查上游的兜底**已拆除**（见下「图片」那条） | **实测要求**（客户端点开条目后随即请求 `Images/Primary` / `Images/Backdrop`，且**不带任何凭证**；`/index` 形状随多张背景图一并加上，**待实测**） |
-| GET | `/api/emby/Items/{ItemId}/Similar` | 路径参数 `ItemId`（面板发出去的条目 Id）；`UserId` 在 query（同样校验）、`Limit`（切前 N 条）、`Fields`（忽略） | 200 `QueryResult<BaseItemDto>`：**上游的相似推荐**（`recommendations`，与详情**同一次请求**就拿到）；Id 认不出 → 404；上游失败 → 照实回失败码。**响应形状按 QueryResult 实现、待客户端实测复核**（若客户端不渲染，第一个要试的是 `RecommendationDto[]` 那种分组形状） | 部署者指定（**归 emby 层** —— 按坐标反查上游，与季/集同类；不是"有什么"，所以不走首页模块） |
+| GET | `/api/emby/Items/{ItemId}/Download` | 路径参数 `ItemId`（集/电影）；**`MediaSourceId=<版本 Id>`（必填，base64url 的 Id，vod 编在里面）**、`DeviceId`/`PlaySessionId`（忽略）；`UserId` 可选（**只验 token、不比对 UserId**，12-1 起对齐真机），token 三种带法都认 | **一律 302**（与拉流**同一条实现** —— 路由层共用 `serveStream`，只是日志那行写「下载」）；`MediaSourceId` 认不出 → 400；Id 非集 / 定位不到这一集 → 404；聚合或 play 失败 → 502（照搬上游码）。⚠️ 302 之后 `Content-Disposition`（文件名）/`Content-Type`/断点续传**全由源站决定**，面板改不了 —— 要「片名.S01E01.mkv」那种名字只能代为转发全量字节，与 [ADR-0006](adr/0006-redirect-for-playback.md)「面板不扛流量」冲突，故不做 | 客户端实测（SenPlayer/6.2.1 12 小时里试 8 次、每次吃 501 → 一直重试）。同族的 `Items/{ItemId}/File` 日志里**没出现过**，按"等客户端日志暴露再接线"**先不做** |
+| GET | `/api/emby/Items/{ItemId}/Images/{type}[/{index}]` | 路径参数 `ItemId`（面板发出去的条目 Id）、`type`（`Primary`/`Backdrop`/`Logo`…）、`index`（多张背景图时客户端逐张要；**忽略**）；query `tag`（**本面板签发的签名 tag —— 本侧的唯一取图凭证**）、`maxWidth`/`quality`/`ImageTypeLimit`（忽略） | **302 到原图**（面板**不再代取字节**，`Location` = tag / 索引里的图片 URL，见 [ADR-0036](adr/0036-image-endpoint-redirect.md)）；`tag` 缺失/验签不过 → **404**。**豁免 AccessToken**；tag = `cpimg.<base64url(图片URL)>.<签名>`。官方把 `Tag` 定义为**可选**（只影响缓存强弱），但直链只存在于 tag 里，故**认不出即 404**；按 `Id` 反查上游的兜底**已拆除**（见下「图片」那条） | **实测要求**（客户端点开条目后随即请求 `Images/Primary` / `Images/Backdrop`，且**不带任何凭证**；`/index` 形状随多张背景图一并加上）；**真机对照见「十」#18：予初Emby / nyamedia / OkEmby 的图片端点不校验 token（无 / 无效 token 照样 200 出图），itsmygo 校验 token（401 JSON）；四台都把 `tag` 当可选缓存键、都忽略 `/index`；`maxWidth`（按宽等比缩放）予初Emby / nyamedia / OkEmby 响应、itsmygo 忽略，面板亦忽略（302 原图、不代取不缩放 → **有意偏离**，见 18-7）。面板维持「豁免 AccessToken + 认签名 tag」，与客户端取图不带凭证的现实一致（见 [ADR-0036](adr/0036-image-endpoint-redirect.md)）** |
+| GET | `/api/emby/Items/{ItemId}/Similar` | 路径参数 `ItemId`（面板发出去的条目 Id）；`UserId` 在 query（**只验 token、不比对 UserId**，17-1 起对齐真机 —— 无 / 无效 token → 401 纯文本；有效 token + 错配 / 不存在 / 不带 UserId 照旧 200）、`Limit`（切前 N 条）、`Fields`（忽略） | 200 `QueryResult<BaseItemDto>`：**上游的相似推荐**（`recommendations`，与详情**同一次请求**就拿到），`{Items, TotalRecordCount}`；Id 认不出 → 404；上游失败 → 照实回失败码。**响应形状经真机实测复核、一致 ✓**（真机确为 `{Items, TotalRecordCount}`） | 部署者指定（**归 emby 层** —— 按坐标反查上游，与季/集同类；不是"有什么"，所以不走首页模块） |
 | GET | `/api/emby/Users/{UserId}/Images/{type}` | 路径参数 `UserId`、`type`（任意） | **200 `image/png`**：回品牌图标 `assets/default-avatar.png`（606×606 透明底，所有用户共用一张）；文件缺失才 404。**豁免 AccessToken**。tag = 文件内容 md5（见「十、#2」2-5） | 部署者指定（真机回用户设置的头像；面板用品牌图标统一代替，UserDto 给的 `PrimaryImageTag` 与之同源） |
 
 **实现约定**
@@ -252,6 +263,7 @@ docker logs -t media-bridge-panel              # 带时间戳
     | `CollectionType` | 行声明（`movies`/`tvshows`/`mixed`）→ 按该行 `type` 参数推 → `mixed` | 真机每个库都有；见首页插件指南的 `collectionType` |
     | `ImageTags.Primary` + `PrimaryImageAspectRatio` | 封面见下；**没有就都不给**（`ImageTags: {}`、不给 ratio） | 真机无图的库正是这个形状 |
     | `UserData` | `{PlaybackPositionTicks, IsFavorite, Played}` | 真机库条目就是这三个（比普通条目**少** `PlayCount`） |
+    | `ChildCount` | **行申报的库总数优先** → 该行被取过内容后记下的数 → 占位 `1` | 真机 12/12 都有（样本全 `1`，客户端拿它判断空库/画角标）。三级取数：① 行在 `rows` 里**申报的 `total`**（客户端还没点开库就有真数，见首页插件指南的 `rows.total`，[ADR-0051](adr/0051-home-row-declared-total.md)）→ ② 面板内存里 `peekRowTotal` 记下的插件申报总数 → ③ 都拿不到回退 `1`（不取 0：0 会被客户端当空库）。**不为此打上游** |
     | `ParentId` | **不给** | 真机 25/25 都是 `"2"`（服务器根节点），本面板没有那个节点 —— 给了就是指向不存在的东西 |
   - **库封面**：封面用的是**该行里第一个带横图（`backdrop`）的条目** —— 那是上游顺路带回来的数据，**为零个额外上游请求**。
     - 两条取值路：① 图片索引（持久，默认 90 天，重启后仍在）→ ② 该行的**内存结果缓存**（客户端逛过一次就有）。两条路都**只在本地读**；**绝不为了封面单独打上游**（代价随库数线性增长）。
@@ -260,13 +272,109 @@ docker logs -t media-bridge-panel              # 带时间戳
   - **行内容**：客户端为某个库去要条目时打 `Items?ParentId=<库Id>`（见「五」），由 `home.listByQuery` 路由到那一行。
   - 停用/启用的插件行即时生效（Views 每次现读 registry），客户端可能要**重启或清缓存**才会刷新库列表。
 - **AccessToken 校验（已实现）**：登录发的 token 落 `data/emby/emby.db` 的 `sessions` 表，之后每个受保护端点都校验它 —— **没有"宽松/严格"之分，校验就是校验**（拿不到有效 token 一律 401，与官方对 401 的定义一致：token 无效或被吊销，客户端应回登录界面）。
-  - **三种带法都认**（`service.tokenFrom`）：头 `X-Emby-Token`（官方文档写明的标准带法）、`X-Emby-Authorization` / `Authorization` 里的 `Token="…"`、query `api_key=`（官方把它归为 API Key 认证，可实测客户端把**用户 token** 也塞在这个槽里拉流）
-  - **保护范围**：`Users/{id}` / `Views` / `Items` / `Items/Latest` / `Items/{id}`（详情）/ `Shows/*/Seasons` / `Shows/*/Episodes` / `PlaybackInfo` / `Stream`×2 / `videos/*` / `Items/{id}/Download`，共 12 条。请求里带了 `UserId` 时，**该 Id 必须属于这个 token 的账号**，否则 401（避免拿 A 的 token 当 B 用）
+  - **token 就是「登录」本身**：它是登录成功后服务端签发的凭据，**指认这条凭据属于哪个账号**；后续请求的**鉴权身份以 token 为准**。请求里的 `UserId` 只是客户端按惯例带上的参数，**不是身份来源**。
+  - **三种带法都认**（`service.tokenFrom`）：头 `X-Emby-Token`（官方文档写明的标准带法）、`X-Emby-Authorization` / `Authorization` 里的 `Token=…`（**值引号可省**，真机同此，见「十、#2」）、query `api_key=`（官方把它归为 API Key 认证，可实测客户端把**用户 token** 也塞在这个槽里拉流）
+  - **保护范围**：`Users/{id}` / `Views` / `Items` / `Items/Latest` / `Items/{id}`（详情）/ `Shows/*/Seasons` / `Shows/*/Episodes` / `PlaybackInfo` / `Stream`×2 / `videos/*` / `Items/{id}/Download` / 继续观看 `Items/Resume` / 接下来看 `Shows/NextUp` / 相似推荐 `Items/{ItemId}/Similar` / 工作室 `Studios` / 条目计数 `Items/Counts` / 服务器信息 `System/Info`，共 18 条。
+  - ⚠️ **`UserId` 不参与鉴权（契约变更，见下面的变更记录）**：**读取类**端点（`Views` / `Items` / `Items/Latest` / `Shows/*/Seasons` / `Shows/*/Episodes` / 条目详情 `Users/{UserId}/Items/{ItemId}` / 播放信息 `Items/{ItemId}/PlaybackInfo` / 继续观看 `Users/{UserId}/Items/Resume` / 接下来看 `Shows/NextUp` / 相似推荐 `Items/{ItemId}/Similar` / 工作室 `Studios` / 条目计数 `Items/Counts` / 服务器信息 `System/Info` / 直连拉流 `videos/{ItemId}/{file}`、`Items/{ItemId}/Stream/{token}` / 下载 `Items/{ItemId}/Download`）**只验 token、不比对 UserId** —— 带了 `UserId` 也**不再要求它属于该 token 账号**。用户私有数据（观看进度）**一律按 token 解出的账号算**（`accountIdFor`：token 优先、`UserId` 兜底）。
   - **豁免**：握手 `System/Info/Public`、登录 `AuthenticateByName`、面板自用端点（账号管理、元数据插件测试）、以及 **501 通配**。**图片端点也必须豁免**：实测**图片请求的凭证携带并不统一** —— 同一批 8 条 `Items/{id}/Images/*` 里，5 条带 `x-emby-authorization`（Rex-Standard），**3 条什么凭证都不带**（原生 `Rex/13 CFNetwork` 客户端，头里只有 `accept`/`user-agent`）。要求 token 会让那部分客户端图全挂。（对照：**非图片请求 9/9 都带 `x-emby-token`**。）
   - **生命周期**：改密或删账号 → 该账号的所有 token 一并作废（客户端需重新登录）；`last_seen_at` 每次请求更新（60 秒节流，拉流时不会每个 Range 都写库）
   - **还没做**：官方登出端点 `POST /Sessions/Logout`（客户端"退出登录"目前打到 501 通配，token 不会被吊销）、`/Users/Public`（登录界面取用户列表）
   - **换新号/重登**：校验上线**之前**发出的 token 不在表里 → 客户端会被一路 401，**在客户端退出重登一次**即可（`sessions` 表里就有了）
-- **上游失败一律照实回失败**：**不编占位数据、不回空的假成功**。状态码 = 上游的真实原因，由 `metaBridge.httpStatusOf()` 一处决定：
+
+> ⚠️ **契约变更记录（不许默不作声）**：把 `UserId` 从"**必须属于该 token 的账号，否则 401**"改为"**读取类端点只当参数、不参与鉴权**"。
+> - **改的是什么**：鉴权身份**收敛到 token 一处**；`UserId` 不再是身份来源（真机同样如此 —— 有效 token + 合法但不存在的 UserId → 200）。
+> - **影响端点**：`Views`（#4-3）/ `Users/{UserId}/Items`（#5-2）/ `Items/Latest`（#6-2）/ `Shows/{Id}/Seasons`（#7-2）/ `Shows/{Id}/Episodes`（#8-2）/ 条目详情 `Users/{UserId}/Items/{ItemId}`（#10-1）/ 播放信息 `Items/{ItemId}/PlaybackInfo`（#11-1）/ 直连拉流 `videos/{ItemId}/{file}`（#12-1）/ 拉流 `Items/{ItemId}/Stream/{token}`（#12-1）/ 下载 `Items/{ItemId}/Download`（#12-1）/ 继续观看 `Users/{UserId}/Items/Resume`（#13-1）/ 接下来看 `Shows/NextUp`（#15-1）/ 相似推荐 `Items/{ItemId}/Similar`（#17-1）。这 13 条由「有效 token + 不匹配/不存在的 UserId → 401 / 404」变为「**→ 200 / 出字节**」。
+> - **影响方向**：**更宽容**（客户端换号 / 重登后手上带着旧 `UserId` 也能正常出数据）。**客户端无需改动** —— 它本就是照真机行为写的。
+> - **安全**：**不引入跨账号泄露** —— 内容数据（库 / 季 / 集 / 条目详情）与拉流 / 下载取的**内容字节**都与用户无关；用户私有进度按 **token 的账号**取（`accountIdFor` token 优先），传别人的 `UserId` 也只看得到自己 token 账号的进度。
+> - **尚未放宽（仍是旧口径）**：写用户数据的 `PlayedItems` / `HideFromResume` 等 —— 它们**仍比对 `UserId`**。这些**留待各自的真机对照**逐条定，不一次性全放。**未对齐期间"两条口径并存"是已知状态，不是遗漏。**
+>   - `Users/{UserId}`（#9 已对照）：真机**按路径 UserId 解析用户、与 token 无关**（不是「只验 token」），**不适用自动对齐例外**；判定**维持现状、不放开跨账号**（见 [ADR-0048](adr/0048-emby-userid-not-identity.md)）。不匹配一律 **401**（不用 404，防账号枚举）。
+>   - 条目详情 `Users/{UserId}/Items/{ItemId}`（#10-1 已对照）：真机**只验 token、不比对 UserId**（有效 token + 合法但不存在的 UserId → 200），**适用自动对齐例外、已对齐**；真机对「不存在的 ItemId」「非 Guid 的 UserId」回 500 误码（`NullReferenceException` / `Guid 解析失败`），本面板**不复刻**。逐条见「十、#10」。
+>   - 播放信息 `Items/{ItemId}/PlaybackInfo`（#11-1 已对照）：虽为 POST，但本端点只**返回版本清单**、不写用户私有数据（进度、播放位置都不在这里落库），**内容是内容数据、与用户无关**；真机**只验 token、不比对 UserId**（有效 token + 任意 UserId → 200），**适用自动对齐例外、已对齐**。逐条见「十、#11」。
+>   - 直连拉流 `videos/{ItemId}/{file}`、拉流 `Items/{ItemId}/Stream/{token}`、下载 `Items/{ItemId}/Download`（#12-1 已对照）：端点是**取内容字节**（与用户无关、不写用户私有数据）；真机**只验 token、不比对 UserId**（有效 token + 不存在 / 非 Guid 的 UserId → 照样 307 / 206 出字节），**适用自动对齐例外、已对齐** —— 路由 `authorize(req, userIdOf(query))` → `authorize(req)`，`service.resolveStream` 去掉 `assertUser(requestedId)`。逐条见「十、#12」。
+>   - 继续观看 `Users/{UserId}/Items/Resume`（#13-1 已对照）：端点是**读 token 账号的观看记录**（用户私有进度，`accountIdFor` token 优先 —— 传别人的 `UserId` 也只看到自己 token 账号的记录）；真机**只验 token、不比对 UserId**（有效 token + 全 0 guid UserId → 200，两台；第三台 nyamedia 回 500 空指针误码，属真机自身 bug、不复刻），**适用自动对齐例外、已对齐** —— `service.getResume` 的 `authorize(req, requestedId)` → `authorize(req)`。逐条见「十、#13」。
+>   - 接下来看 `Shows/NextUp`（#15-1 已对照）：端点是**按 token 账号的观看进度算下一集**（用户私有进度，`accountIdFor` token 优先 —— 传别人的 `UserId` 也只看到自己 token 账号的进度）；真机**只验 token、不比对 UserId**（有效 token + 全 0 guid / 随机 guid / 不带 UserId → 一律 200 回空，两台实测），**适用自动对齐例外、已对齐** —— `service.getNextUp` 的 `authorize(req, requestedId)` → `authorize(req)`。逐条见「十」#15。
+>   - 相似推荐 `Items/{ItemId}/Similar`（#17-1 已对照）：端点是**按条目坐标去上游反查关联内容**（内容数据、与具体用户无关；进度由 `applyUserData` 按 token 账号补）；真机**只验 token、不比对 UserId**（有效 token + 全 0 guid / 随机 guid / 不带 UserId → 均 200，予初Emby / OkEmby 实测；nyamedia 对不可解析的 UserId 回 500 空指针误码、属真机自身 bug），**适用自动对齐例外、已对齐** —— 路由 `authorize(req, userIdOf(query))` → `authorize(req)`，`service.getSimilar` 去掉 `assertUser(requestedId)`（连带去掉其第二参）。逐条见「十」#17。
+> - **同轮还有「下载能力」契约变更（一并声明，产品取向、非鉴权）**：新增 Emby **实例级「下载」开关**（`instances.json` 的 `allowDownload`，**默认开**，与 `enabled` 同类）。
+>   - **改的是什么**：`Policy.EnableContentDownloading` 由**写死 `false`**（#9 时对齐真机）改为**跟随实例开关**（默认开 → 回 `true`）；条目级 `CanDownload` 同样跟随（默认 `true`）；`Items/{ItemId}/Download` 端点**新增门禁** —— 开关关闭时回 **403 纯文本** `Downloading is disabled on this server.`（此前恒放行）。三处**同一口径**（握手/条目/端点）。
+>   - **影响端点**：`Users/AuthenticateByName` + `Users/{UserId}`（`Policy.EnableContentDownloading` 取值随开关变）/ `Users/{UserId}/Items`、`Items/Latest`、详情（条目 `CanDownload` 随开关变）/ `Items/{ItemId}/Download`（关闭时 403）。
+>   - **影响方向**：**默认行为不变**（默认开 = 一直以来的「能下载」）；只在**部署者主动关闭**后，下载能力对客户端整体消失（三处一致，客户端不再显示下载入口，且直接请求下载端点也拿到 403）。**客户端无需改动**。
+>   - **与真机的关系**：真机样本（OkEmby / nyamedia）`EnableContentDownloading` 与 `CanDownload` **同为 `false`** —— 那是**那台服务器的配置**，不是协议形状。本面板把它做成**部署者可配**、默认开（偏离真机样本，属有意产品取舍，理由见 [ADR-0049](adr/0049-emby-instance-download-switch.md)），逐条见「十、#10」的 10-3。
+> - **同轮还有「条目级分辨率」契约变更（新增字段）**：详情条目顶层**新增 `Width` / `Height`**（取所选线路视频流的分辨率，数据源是**片源插件申报的 `width`/`height`**）—— 对齐真机条目级分辨率（真机 `3840`×`2160`）。**插件没给就没有这俩字段**（不反推、不编）。对客户端是**新增字段**。逐字段见「十、#10」的 10-3。
+> - **同轮还有「库总数」契约变更（新增字段取值，一并声明）**：`Views` 里库条目的 **`ChildCount` 由"点开过才有真数、否则占位 1"改为"行可申报库总数"**。
+>   - **改的是什么**：首页插件契约新增**可选**行申报字段 `total`（口径同 `run` 的 `total` = 这个库有多大），面板的 `ChildCount` 取数变为「**行申报 `total` → `peekRowTotal` → 占位 1**」三级。插件取不到就**不申报**（回退占位 1，不编数，见 [ADR-0008](adr/0008-no-fabricated-data.md) / [ADR-0051](adr/0051-home-row-declared-total.md)）。
+>   - **影响端点**：`GET /api/emby/Users/{UserId}/Views`（库条目 `ChildCount` 取值）。
+>   - **影响方向**：对客户端是**新可见值** —— 命中行申报的库，`ChildCount` 从**占位 1** 变为**该库真实总数**；未申报 / 取不到的库仍为 1，行为不变。**客户端无需改动**（它本就按真机语义读这个字段）。
+>   - **未涉及**：`Views` 的其它字段不变；本变更**不含**服务端级 `GET /Items/Counts`。
+>   - **插件侧**：契约正文在**另一仓库** [media-bridge-plugins](https://github.com/dlushu/media-bridge-plugins) 的 `docs/emby-home-plugin.md` 与 `docs/plugin-contract.md`（本仓库不复制）。TMDB 首页插件已按此申报（抓官网 About 页全库规模）。
+> - **同轮还有「`Items/Counts` 填库总数」契约变更（一并声明）**：`GET /Items/Counts` 的 **`MovieCount` / `SeriesCount` 由恒回 0 改为"取首页插件申报的库总数"**（数据源与上一条的 `ChildCount` 同一条 `rows.total`，见 [ADR-0052](adr/0052-items-counts-library-total.md)）。此前「`Items/Counts` 恒回全 0」的取向**作废**。
+>   - **改的是什么**：电影 / 剧集两类各自取当前实例首页插件行申报的 `total`，按库类型归并 —— 同类型多行**取最大值**（每行报的都是**整个库的规模**，相加等于重复计数），`mixed` 行说不清是哪种、**不参与**。其余 12 个字段**仍回 0**（面板没有片库索引、数不出来；**0 = 数不出来，不是库空**）。
+>   - **影响端点**：仅 `GET /api/emby/Items/Counts`。参数（`ParentId` 等）仍全忽略：这个端点回的是实例级总数。
+>   - **影响方向**：对客户端是**新可见值** —— 插件申报了该类型库规模的实例，该字段由 0 变为真实总数；没申报 / 取不到的仍是 0，行为不变。**客户端无需改动**（它本就按真机语义读）。
+> - **同轮还有「`Items/Counts` 填集数」契约变更（一并声明）**：`GET /Items/Counts` 的 **`EpisodeCount` 由恒回 0 改为"取首页插件行申报的剧库集数"**（同一条 `rows` 契约新增可选字段 `episodes`，见 [ADR-0053](adr/0053-home-row-declared-episodes.md)）。
+>   - **改的是什么**：首页插件契约的 `rows` 行申报新增**可选**字段 `episodes`（「这个剧库里的剧一共多少集」的上游规模，只对 `collectionType: tvshows` 有意义）。面板从**剧库行**归并（同类型多行取最大值、`mixed` 不参与），填 `EpisodeCount`。其余字段**仍回 0**（0 = 数不出来，不是没有集）。
+>   - **影响端点**：仅 `GET /api/emby/Items/Counts`（`EpisodeCount` 取值）。参数仍全忽略。
+>   - **影响方向**：对客户端是**新可见值** —— 插件申报了剧库集数的实例，`EpisodeCount` 由 0 变为该数；没申报 / 取不到的仍是 0，行为不变。**客户端无需改动**。
+> - **同轮还有「`Items` 按类型计数探针」契约变更（一并声明）**：`GET /Users/{UserId}/Items` 在**无 `ParentId` 且 `IncludeItemTypes` 为单一 `Movie` / `Series`** 时，**`TotalRecordCount` 由恒回 0 改为"取首页插件申报的库规模"**（与 `Items/Counts` 同一条 `libraryTotals()`，见 [ADR-0052](adr/0052-items-counts-library-total.md)）；**`Items` 仍回空**（不给样本条目）。
+>   - **改的是什么**：Rex 等客户端首页**在拿库列表之前**先打两条无 `ParentId` 的 `Items?Recursive=true&IncludeItemTypes=Movie|Series&Limit=1&SortBy=SortName&SortOrder=Ascending`（除类型外参数相同），**只读 `TotalRecordCount`** 当「总统计」。此前面板落「没有可识别的查询参数 → 空」，`TotalRecordCount=0`（**客户端首页总统计恒显示 0**）。改后按类型取 `libraryTotals()` 的 `movies` / `tvshows`（真机就是回该类型库总数：itsmygo 255/189、nyamedia 714/1635）。只认**单类型** —— `Movie,Series` 这类多值不猜（无样本）。
+>   - **影响端点**：仅 `GET /api/emby/Users/{UserId}/Items`（无 `ParentId` 的类型探针）。其它分支（`SearchTerm` / `ParentId` / 推荐 / `Filters` / `AnyProviderIdEquals` / 其余）不变。
+>   - **影响方向**：对客户端是**新可见值** —— 插件申报了该类型库规模的实例，探针 `TotalRecordCount` 由 0 变为真实总数；没申报 / 取不到的仍是 0，行为不变。**客户端无需改动**（它本就按真机语义读这个字段）。
+>   - **未涉及**：探针的 `Items` 仍为空数组（真机回 `Limit=1` 那 1 条，面板**不给** —— 用户定夺）；真机响应多一个 `StartIndex` 键，面板**不加**（各分支形状一致）；`Items?Ids=…` 仍回空（本变更不含）。逐条见「十、#5」。
+> - **既定对齐口径（已定，不必逐条请示）**：真机对照里**只要看到真机不校验 `UserId` 的（读取类）端点，就直接对齐「只验 token」、不再逐条问**；只有「别的情况」（写端点 / 对齐会引入跨账号可见性 / 其它安全影响）才单独确认。
+> - **与插件契约无关**：插件契约（另仓库）讲的是**取数能力**（元数据 / 源 / 首页要产出什么，见「四」的回退原则）；鉴权是 **emby 层对客户端**的契约。两件事不交叉，本次变更不触及插件契约。
+> - **同轮还有「响应形状」契约变更（一并声明，非鉴权）**：`Shows/{Id}/Seasons` 由"**过滤掉特别篇**"改为"**照真机返回特别篇**"（#7-1）；季 `UserData` 由 **4 键**补到 **5 键**（新增 `UnplayedItemCount`，#7-3）；`Shows/{Id}/Episodes` 的分集**新增 `SeriesName`（剧名）**（#8-3，取剧名照 `progressItem` 再 `lookup` 一次、命中插件缓存）。三处均**对齐真机**，对客户端是**新增可见项 / 新增字段**（`Seasons` 会多出 `IndexNumber: 0` 的那一季；集条目多出 `SeriesName`）。**属同一轮变更，一并声明，不许默不作声。** 逐字段见「十、#7」「十、#8」。
+> - **同轮还有「`Studios` 补校验 token」契约变更（一并声明）**：`GET /Studios` 由**不校验账号**改为**只验 token**。
+>   - **改的是什么**：真机三台实测**无 token / 无效 token → 401 纯文本**（`Access token is invalid or expired.`）。本端点在路由层加 `authorize(req)`（同 `Items` 5-1 / `Items/Latest` 6-1 口径）。此前"回空没有数据可保护、故豁免校验"的取向**作废**。
+>   - **影响端点**：仅 `GET /api/emby/Studios`。有效 token 仍照常回空 `QueryResult`（不变）；**不带 / 带无效 token 由 200 空变为 401**。
+>   - **影响方向**：**更严格**（只在缺有效 token 时）；正常客户端都带 token，行为不变。**客户端无需改动**。
+>   - **未涉及**：真机回的是**全库去重工作室清单**（予初 15601 / OkEmby 8181 / nyamedia 1324 条），本面板无片库索引、仍是**如实回空**（既有决策、**不复刻**）。逐条见「十、#14」。
+>   - **同族待办**：`Items/Counts` 是否同样补校验 —— **已对照、已对齐**，见下一条。
+> - **同轮还有「`Items/Counts` 补校验 token」契约变更（一并声明）**：`GET /Items/Counts` 由**不校验账号**改为**只验 token**。
+>   - **改的是什么**：真机实测（OkEmby / nyamedia）**无 token / 无效 token → 401 纯文本**（`Access token is invalid or expired.`）。本端点在路由层加 `authorize(req)`（同 `Studios` 14-1 / `Items` 5-1 口径）。此前"回空没有数据可保护、故豁免校验"的取向**作废**。
+>   - **影响端点**：仅 `GET /api/emby/Items/Counts`。此处**只改鉴权**：有效 token 照常回 `ItemCounts`；**不带 / 带无效 token 由 200 变为 401**。（其 `MovieCount` / `SeriesCount` 的取值后由「填库总数」变更另改，见上。）
+>   - **影响方向**：**更严格**（只在缺有效 token 时）；正常客户端都带 token，行为不变。**客户端无需改动**。
+>   - **未涉及**：真机回的是**真实计数**（OkEmby 7550 部电影 / 2592 部剧 / 82747 集；nyamedia 722 / 1710 / 52806），本面板无片库索引、**不复刻**真机真实计数（电影 / 剧集两类后改为取插件申报的库总数，其余仍 0，见上）。逐条见「十、#16」。
+> - **同轮还有「版本行副标题」契约变更（一并声明，非鉴权）**：Emby 版本行的**副标题**（客户端取 `MediaSources[].Path` 解码后「最后一个 `/` 之后」的文字）由**「站点来源标签 · 集名」改为「标准文件名」（scene naming）**。
+>   - **改的是什么**：`Path` 末段由 `…/{站点标签 · 集名}` 改为 `…/{标准文件名}`（聚合层新增 `standardName`，形状 `标题.年份.季集.分辨率.来源.音频(含声道).Atmos.动态范围.视频编码.容器`，如 `蜘蛛侠：崭新之日.2026.2160p.WEB-DL.DDP5.1.Atmos.DV.H.265.mkv`）。**不再带站点前缀**（来源/线路已在标题位 `MediaSources[].Name` 显示）；`WEB-DL` 等来源由 agg 的 source 识别补出；`H.265`/`DDP5.1`/`DV` 等规格换成 scene 通行写法。agg 拿不到规格的线路退回原始文件名。
+>   - **影响端点**：`Items/{ItemId}/PlaybackInfo`（`MediaSources[].Path` 末段）与 `Items/{ItemId}/Stream`（末段文件名）。**只动副标题**：标题位 `MediaSources[].Name` / 视频流 `DisplayTitle` / `MediaStreams` 各字段**均不变**。
+>   - **影响方向**：对客户端是**可见文本变化**（版本行副标题换了写法）；**不影响播放**（客户端播放走 `/videos/{Id}/stream.{ext}`，不读这个 `Path`）。**客户端无需改动**。
+>   - **缓存口径**：agg 详情缓存的 key 版本号随之升级（`aggdetail3` → `aggdetail4`），换代后旧快照不再命中。逐条见「十、#11」。
+> - **同轮还有「appName 可来自 query `X-Emby-Client`」契约变更（一并声明，放宽）**：`POST /api/emby/Users/AuthenticateByName` 在授权头里取不到 `Client=` 时，**再回退读 query `X-Emby-Client`**。
+>   - **改的是什么**：面板此前只看授权头。抓包发现 Filmly / 网易爆米花把 appName 放在 **query**（`?X-Emby-Client=网易爆米花 Android`）、授权头里只有 `Device` / `DeviceId` / `Version`、**没有 `Client=`**，于是被误判「缺 appName」→ 400。真机对**同一形状**的请求实测（nyamedia 4.8.0.62）：头无 `Client=` + query 带 `X-Emby-Client` → **200**；头无 `Client=` + 无 query → 400。即真机取 appName 是「头 `Client=` 优先、缺了退 query」，现按真机对齐。
+>   - **影响端点**：仅 `Users/AuthenticateByName`（appName 取值；响应结构、错误文案均不变）。query 参数名比对**大小写不敏感**。
+>   - **影响方向**：**更宽容** —— 此前能登的仍能登；此前因 appName 只在 query 而被挡的客户端（Filmly / 网易爆米花）现可登录。**客户端无需改动。** 逐条见「十、#2」。
+> - **同轮还有「appName 可来自 `Authorization` 头」契约变更（一并声明，放宽）**：`POST /api/emby/Users/AuthenticateByName` 取 appName 时，`X-Emby-Authorization` 缺失则回退读 `Authorization`。
+>   - **改的是什么**：面板此前**只读** `x-emby-authorization`，客户端按官方文档把 `Client="…"` 放在 `Authorization` 里时被误判「缺 appName」→ 400。真机**两头都认**（实测 OkEmby / nyamedia / 予初Emby：只发任一 → 200；两头都缺 → 400），现按真机对齐。
+>   - **影响端点**：仅 `Users/AuthenticateByName`（读 appName 的头来源；响应结构、错误文案均不变）。
+>   - **影响方向**：**更宽容** —— 此前能登的仍能登；此前因把 appName 发在 `Authorization` 而被挡的客户端现可登录。**客户端无需改动。** 逐条见「十、#2」。
+> - **同轮还有「授权头里 `Client=` 值引号可省」契约变更（一并声明，放宽）**：`POST /api/emby/Users/AuthenticateByName` 解析 appName 时，`Client="Filmly"` 与 `Client=Filmly`（不写引号）**都认**。
+>   - **改的是什么**：面板此前正则写死 `Key="值"`、**只认带引号**的写法，客户端省掉引号就取不到 appName → 被误判 400。真机对引号**可选**（实测 nyamedia 4.8.0.62：`Emby Client="Filmly"` 与 `Emby Client=Filmly` 均 200），现按真机对齐（改为引号可选）。真机另有「值需以 `Emby `/`MediaBrowser ` 开头」的要求，面板**不校验前缀**（更宽、不收紧，避免误伤在用客户端）。
+>   - **影响端点**：`Users/AuthenticateByName`（appName 取值）+ **所有受保护端点**（`tokenFrom` 从授权头取 `Token=` 时同口径放宽）；响应结构、错误文案均不变。日志的客户端标记（`[Client/版本]`）同一口径。
+>   - **影响方向**：**更宽容** —— 此前能登的仍能登；此前因不写引号而被挡的客户端现可登录（含把 `Token=` 写进授权头的客户端）。**客户端无需改动。** 逐条见「十、#2」。
+> - **同轮还有「登录请求体字段名大小写不敏感」契约变更（一并声明，放宽）**：`POST /api/emby/Users/AuthenticateByName` 的 `Username` / `Pw`（含兼容的 `Password`）取值**不再区分大小写** —— 客户端发 `username` / `pw` 也认。
+>   - **改的是什么**：面板此前手写取值只认固定拼写（`Username` / `username`、`Pw` / `Password` / `password`），全小写的 `pw` 会取到**空密码** → 401。真机是 .NET 反序列化、字段名**大小写不敏感**（实测 OkEmby / itsmygo：同一口令发 `Pw` 与 `pw` 均 200），现按真机对齐。
+>   - **影响端点**：仅 `Users/AuthenticateByName`（请求体取值；响应结构、错误文案均不变）。
+>   - **影响方向**：**更宽容** —— 此前能登的仍能登；此前因拼写被挡的客户端（如 HamHub Android `1.0.17+29` 发 `{"username":…,"pw":…}`）现可登录。**客户端无需改动。** 逐条见「十、#2」。
+> - **同轮还有「无 `ParentId` 的裸列表查询」契约变更（一并声明）**：`GET /Users/{UserId}/Items` 在**无 `ParentId` 且不命中任何已有专属支路**（无 `Filters` / `SearchTerm` / `AnyProviderIdEquals` / `Ids`，也不是无 `ParentId` 的按类型计数探针）时，**由恒回空改为"路由到插件声明了 `feed: 'random'` 的那一行"**（与轮播推荐位共用同一 `feed` 取值，见 [ADR-0054](adr/0054-bare-items-query-uses-random-feed.md)）。
+>   - **改的是什么**：`service.feedOfQuery()` 判据由"`SortBy` 含 `IsFavoriteOrLiked` 的推荐位"**放宽到"推荐位 + 无 `ParentId` 的裸列表查询"** —— 判据是「**不指名库** + **不命中任何已有专属支路**」。此前 Filmly / 网易爆米花首页打的就是这条（只带 `ExcludeItemTypes` / `StartIndex` / `Limit` / `Fields`，无 `ParentId` / `SortBy` / `Filters`），落「其余查询 → 空」，客户端首页一片空白。**插件没声明 `feed: 'random'` → 仍回空**（不挑一行顶上）。
+>   - **影响端点**：仅 `GET /api/emby/Users/{UserId}/Items`（无 `ParentId` 的裸查询分支）。其它分支（`ParentId` / `SearchTerm` / 推荐位 / `Filters` / `AnyProviderIdEquals` / 计数探针 / `Ids` / 其余）不变。
+>   - **影响方向**：对客户端是**新可见行为** —— 命中插件声明的实例，裸查询由**回空**变为**跑 `feed: 'random'` 行**；无声明 / 取不到的仍回空，行为不变。**客户端无需改动**（它本就按真机语义读；真机此处回的是它自己的片库内容）。逐条见「十、#5」。
+>   - **未涉及**：`feed` 取值**不新增**（轮播推荐位与裸查询共用 `feed: 'random'`，插件契约不改）；`Items?Ids=…` 仍回空（本变更不含）。
+> - **同轮另有「无 `ParentId` 的裸列表查询改回库列表」契约变更（一并声明，**推翻上一条**）**：`GET /Users/{UserId}/Items` 在**无 `ParentId` 且不递归**的裸查询下，**由"路由 `feed: 'random'` 回条目"改为"回顶层库列表"**（与 `GET /Users/{UserId}/Views` 一字不差），见 [ADR-0055](adr/0055-bare-items-query-returns-views.md)（取代 [ADR-0054](adr/0054-bare-items-query-uses-random-feed.md)）。
+>   - **改的是什么**：予初Emby 4.9.5.0 实测该形状（无 `ParentId` + 不递归，只带 `ExcludeItemTypes`/`StartIndex`/`Limit`/`Fields`）真机回 **26 个 `CollectionFolder`（＝顶层库列表）**，与 `Views` 一字不差 —— 真机对「无 `ParentId` 且不递归」的 `Items` 默认回根节点的直接子级（要条目客户端须自带 `Recursive=true`）。上一条（ADR-0054）据无样本的推断把它路由到 `feed: 'random'` 回条目，与真机相反，现予推翻。落码：`service.libraryQueryOf(query)` 命中即 `return getViews()`；`feedOfQuery()` 收窄回**只认轮播推荐位**。
+>   - **影响端点**：仅 `GET /api/emby/Users/{UserId}/Items`（无 `ParentId` 的裸查询分支）。其它分支（`ParentId` / `SearchTerm` / 轮播推荐位 / `Filters` / `AnyProviderIdEquals` / 计数探针 / `Ids` / 其余）不变。
+>   - **影响方向**：对客户端是**可见行为变化** —— 该分支由回**条目**改为回**库列表**（对齐真机）。**客户端无需改动**（它本就按真机语义读这个形状）。逐条见「十、#5」。
+>   - **未涉及**：`feed: 'random'` 取值仍在、仍只服务**轮播推荐位**（`SortBy` 含 `IsFavoriteOrLiked`）；插件契约不改；`Items?Ids=…` 仍回空。
+> - **同轮另有「新增 `System/Info` 端点」契约变更（一并声明，新增可见端点）**：`GET /api/emby/System/Info` 由**落到 501 通配**改为**认领并回诚实子集**。
+>   - **改的是什么**：新增 `GET /api/emby/System/Info` 路由（此前无此路由，客户端请求落入 `ANY /api/emby/*rest` 通配 → 501）。响应为**诚实子集**：只给面板真有的 **17** 个字段，其中 `ServerName` / `Version` / `Id` / `OperatingSystem` / `LocalAddress` / `LocalAddresses`(空) / `RemoteAddresses`(空) / `CompletedInstallations`(空) 如实给值，能力位 `HasPendingRestart` / `IsShuttingDown` / `SupportsLibraryMonitor` / `CanSelfRestart` / `CanSelfUpdate` / `CanLaunchWebBrowser` / `SupportsHttps` / `HasUpdateAvailable` / `SupportsAutoRunAtStartup` **一律 `false`**（面板确无这些能力，不是"能而不用"）；面板无对应物的 `SystemUpdateLevel` / `OperatingSystemDisplayName` / `SupportsLocalPortConfiguration` / `WebSocketPortNumber` / `HttpServerPortNumber` / `HttpsPortNumber` / `HardwareAccelerationRequiresPremiere` / `WanAddress` **不回**（不编造，见 [ADR-0008](adr/0008-no-fabricated-data.md)）。鉴权**只验 token、不比对 UserId**（同类读取端点口径）。取舍见 [ADR-0057](adr/0057-emby-system-info-honest-subset.md)。
+>   - **影响端点**：新增 `GET /api/emby/System/Info`。握手 `System/Info/Public` 不变。
+>   - **影响方向**：对客户端是**新可见端点** —— 此前 501，现 200；字段集**小于真机**（真机 4.8 / 4.9 同构 25 字段），属**有意诚实子集**（面板没有的字段不编）。**客户端无需改动**（它本就该容忍字段缺失；VidHub 此前 501 也照常往下走）。逐条见「五」与「十」#20。
+>   - **未涉及**：`System/Info/Public` 字段集不变；501 通配仍保留（`System/Ext/ServerDomains` 等仍走它）。
+> - **同轮另有「收藏」契约变更（一并声明，新增可见端点 + 读侧由空转真数据）**：新增写端点 `POST|DELETE /Users/{UserId}/FavoriteItems/{ItemId}`；`Items?Filters=IsFavorite` 由「必然空」改为**读 `favorite` 表出真数据**；`UserData.IsFavorite` 由写死 `false` 改为**真值**（见 [ADR-0058](adr/0058-favorite-items.md)）。
+>   - **改的是什么**：`emby.db` 新增 `favorite` 表（`SCHEMA_VERSION` 4 → 5；`account_id, item_id, payload(JSON 快照), updated_at`，主键 `(account_id, item_id)` 覆盖写）—— 属**用户数据**、不随缓存清理。收藏动作时**反查元数据、快照落库**；读侧 `Filters=IsFavorite` 只读快照、**快照重建**（**0 上游请求**、无 1→N 扇出）。收藏对象放宽到 `movie`/`show`/`season`/`episode`（**不复用** `playableOf`）。`removeAccount` 一并清收藏。
+>   - **影响端点**：新增 `POST|DELETE /api/emby/Users/{UserId}/FavoriteItems/{ItemId}`（200 + `UserItemDataDto`；Id 认不出 / 反查失败 → 204 且**不写库**）；`GET /api/emby/Users/{UserId}/Items`（`Filters=IsFavorite` 分支）；`UserData.IsFavorite` 在**一切补 `UserData` 的端点**（列表 / 详情 / 季 / 集 / 继续观看 / 接下来看 / 相似等）上出真值。
+>   - **影响方向**：写端点由 **501 通配 → 200**；收藏列表由 **恒空 → 真数据**；`IsFavorite` 由 **恒 `false` → 真值**。**客户端无需改动**（它本就按真机语义读）。
+>   - **未涉及**：`Items/{ItemId}` 条目**详情**仍走既定 `richItemDto` 反查、与收藏快照无关；轮播推荐位（`SortBy=IsFavoriteOrLiked`）仍走 `feed: 'random'` **随机推荐**、**不按收藏过滤**。逐条见「五」与「十」#21。
+> - **上游失败一律照实回失败**：**不编占位数据、不回空的假成功**。状态码 = 上游的真实原因，由 `metaBridge.httpStatusOf()` 一处决定：
 
 | 失败原因 | 回的码 |
 |---|---|
@@ -282,13 +390,15 @@ docker logs -t media-bridge-panel              # 带时间戳
   **确定性失败（401/404）不重试**（重试没有意义），失败仍然**不写缓存**。
 - **兼容取向**：握手对外自称 `Emby Server 4.8.0.0` —— 客户端按 Emby 的版本号判断能力，这是刻意的兼容选择。
 - **条目列表（`Users/{UserId}/Items`）—— 「列表数据由首页模块决定」**（部署者指定）：
-  emby 层在这里只做**端点映射 + DTO 转换**，不再自己造列表数据。六条分支：
+  emby 层在这里只做**端点映射 + DTO 转换**，不再自己造列表数据。八条分支：
   0. **`SearchTerm=<词>` → 按名字搜**（见下面「搜索」那条）—— 排在前面因为它最具体
   1. `ParentId=<catpawhome_…>` → `home.listByQuery()` 跑对应插件行 → `HomeItem` → `BaseItemDto`；**`StartIndex`/`Limit` 原样透传给模块**（进 `ctx.startIndex`/`ctx.limit`，**emby 层不切片** —— 取哪一页是模块的决定），`SortBy`/`Recursive`/`IncludeItemTypes` 忽略；`TotalRecordCount` 用**模块给的 `total`**
-  2. **「推荐」查询**（无 `ParentId` + 无 `Filters` + `SortBy` 含 `IsFavoriteOrLiked`）→ 路由到**插件声明了 `feed: 'random'` 的那一行**（见下面「推荐查询」那条）
-  3. `Filters=IsPlayed` → **读 `playback` 表**出已看的条目（真数据，要 token）；`Filters=IsFavorite` → 空（没有收藏数据，**如实**）
+  2. **「轮播推荐位」**（无 `ParentId` + `SortBy` 含 `IsFavoriteOrLiked`）→ 路由到**插件声明了 `feed: 'random'` 的那一行**（见下面「轮播推荐位」那条）
+  2.5 **「裸列表查询」**（无 `ParentId` + 无 `SortBy` + 不递归 + 无 `Filters`/`SearchTerm`/`AnyProviderIdEquals`/`Ids`，也不是计数探针 —— 如 Filmly / 网易爆米花首页）→ **回顶层库列表**（`service.libraryQueryOf()` 命中即走 `Views` 那支，与 `Views` 一字不差，对齐真机；见下面「裸列表查询」那条 + [ADR-0055](adr/0055-bare-items-query-returns-views.md)）
+  3. `Filters=IsPlayed` → **读 `playback` 表**出已看的条目（真数据，要 token）；`Filters=IsFavorite` → **读 `favorite` 表**出收藏的条目（真数据，快照重建、**0 上游请求**，见 [ADR-0058](adr/0058-favorite-items.md)）
   3.5 `AnyProviderIdEquals={域}.{编号}`（**可逗号分隔多值**）→ **按外部 id 搜一条**（见下面那条）—— 与「搜索」同类：**检索归 emby 层**，不归首页模块
-  4. 其余查询（含认不出的 `AnyProviderIdEquals`）→ 空
+  3.6 **无 `ParentId` 的「按类型计数」探针**（`IncludeItemTypes` 归一后是**单一** `Movie` / `Series`）→ 取 `home.libraryTotals()` 的库规模回 `TotalRecordCount`，`Items` 回空 —— Rex 等客户端首页拿它读「总统计」（见下面那条 + 「十」#5）
+  4. 其余查询（含认不出的 `AnyProviderIdEquals`、`Ids=…` 按条目 id 点名取）→ 空
   - **搜索（`SearchTerm=<词>`）**：**按名字搜**，数据来自上游的 `search/tv` 与 `search/movie`。
     - **为什么要加**：SenPlayer 6.1.8 的搜索框打的就是这条 —— `Items?...&IncludeItemTypes=Movie,Series,Video,Person&Recursive=true&SearchTerm=斗破苍穹`，
       以前落到「没有可识别的查询参数 → 空」，日志里连打 4 次 `Items=0`（搜索框永远是空的）。
@@ -306,7 +416,7 @@ docker logs -t media-bridge-panel              # 带时间戳
         曾按 `popularity` 降序合并，**实测是错的**：搜「斗破苍穹」会把一个叫 `111` 的剧排到第 7 位、把真正相关的电影挤下去。
     - **`IncludeItemTypes`**：`Series`→tv、`Movie`→movie，**两个都没给 = 都搜**；`Video`/`Person` 忽略（分集搜索要按剧集层级走，人物不是本项目的条目 —— 不假搜）。
     - **失败**：全失败 → 照实回失败码；一类型失败另一类型有结果 → 回有结果的部分 + 日志写明（部分失败 ≠ 整条失败）。
-    - **鉴权**：它**真会出数据** ⇒ `itemsWillReturnData()` 里已加上它，无 token 一律 **401**（实测 `curl` 不带 token → 401）。
+    - **鉴权**：`Items` 一律校验 token ⇒ 无 token 一律 **401**（实测 `curl` 不带 token → 401）。
     - 实测（路由器）：`斗破苍穹` → **14 条**（剧 + 电影，`{域}_79481_tv` / `{域}_1206282_movie` …，均带图、可点进详情）；
       `律师` + `IncludeItemTypes=Series` + `Limit=5` → 20 条里切 5 条；不存在的词 → **0 条**；
       第 1 次 250~1300ms（看上游抖动）→ **第 2 次 111ms**（走插件那边「名字 → 搜索结果」的缓存，见「本地缓存」那条）。
@@ -328,26 +438,37 @@ docker logs -t media-bridge-panel              # 带时间戳
       于是回空、客户端拿不到 Id，链路断在这里。现在**按序逐个试、先命中先返回**；认不出的候选（前缀不是已注册域、形状不对）
       **只跳过、不作废整条查询**，并在日志里点名；候选都取不到 → 照实回失败码；一条都没认出来 → 仍回空但逐条点名。
       **不猜域**（不做 `imdb.` → `tmdb` 这类别名映射）。候选至多 8 条。
+  - **「按类型计数」探针（无 `ParentId` + 单一 `IncludeItemTypes=Movie|Series`）**：
+    Rex 等客户端首页**在拿库列表之前**先打两条 `Items?Recursive=true&IncludeItemTypes=Movie|Series&Limit=1&SortBy=SortName&SortOrder=Ascending`
+    （除类型外参数完全相同），**只读 `TotalRecordCount`** 当「总统计」（`Limit=1` 是探针痕迹，顺手要的那 1 条它不看）。
+    真机就是回该类型的**库总数**（itsmygo：Movie 255 / Series 189；nyamedia：Movie 714 / Series 1635），响应里那一条 `Items` 是本面板**不复刻**的。
+    本面板没有按类型的条目索引，取**插件申报的库规模**（`home.libraryTotals()`，与 `Items/Counts` 同一份数据）填 `TotalRecordCount`；
+    **`Items` 仍回空**（不给样本条目）。只认**单类型** —— `Movie,Series` 这类多值不猜（无样本）。见 [ADR-0052](adr/0052-items-counts-library-total.md)、「十」#5。
   - **顺带修了一处回归**：`Items/{ItemId}` 详情原本靠「复用列表实现挑那一条」拿电影/剧的元数据，列表改口径后它会 404 —— 现在改成**直接 `richItemDto()` 反查**（季/集仍复用 `getSeasons`/`getEpisodes`）。**"点进去 → 上游反查"这一环不能断**。
   - 条目 Id 由插件给出，**建议**（非强制）是 `{域}_{编号}_{tv|movie}` —— 点进去要靠这个坐标反查（见插件指南「五」）；插件给了别的 Id 也能显示，只是点进去没有资源，**emby 层不兜底**。
   - **条目给 `ImageTags`**：图片端点已实现，所以列表/详情都照给；tag 是**签名 tag**（见下面「图片」那条）。
-  - `Filters=IsFavorite` 直接回空：没有收藏数据（见「六、明确无视的请求」），空是**如实**，不是留白；
-    `Filters=IsPlayed` 读 `playback` 表出**已看条目**（见 [0023](adr/0023-playback-progress.md)），因此**要 token**。
+  - `Filters=IsFavorite` 读 `favorite` 表出**收藏的条目**（见 [ADR-0058](adr/0058-favorite-items.md)）：收藏动作时把列表元数据**快照**落库，读时**快照重建**、**0 上游请求**（不像 `IsPlayed` 的读时反查）；`Filters=IsPlayed` 读 `playback` 表出**已看条目**（见 [0023](adr/0023-playback-progress.md)），因此**要 token**。
   - 响应形状就是 Emby 的 `QueryResult<BaseItemDto>`：`{Items, TotalRecordCount}`。官方定义只有这两个字段（已核实）。
   - `Id` 由条目坐标派生：`{域}_{编号}_tv` / `{域}_{编号}_movie`（带类型是因为上游里 tv 与 movie 是两套数据）。**不含源信息** —— 客户端把它当主键缓存，掺进"哪个站点、哪次搜索"就会因为源变动而变 Id，客户端缓存的「已看」会全丢。
   - `ImageTags` / `BackdropImageTags` 的 tag 是**签名 tag**，内容就是"这张图的完整 URL"，见下面「图片」那条。
-  - `UserData` 只回空进度（`Played/PlayCount/PlaybackPositionTicks/IsFavorite`），没有任何观看记录。
-  - **「推荐」查询（无 `ParentId` + `SortBy` 含 `IsFavoriteOrLiked`）**：
-    这条 query 喂的是**客户端首页顶部的轮播图**（实测 Rex 首页**第一发**，比 `Views` 还早 42ms ——
-    它在**还不知道有哪些库**的时候就要结果，按库驱动的行不可能这么发）。
-    - **怎么认出它**（`service.feedOfQuery`，三条都不猜）：没有 `ParentId` + 没有 `Filters` + `SortBy` 里含 `IsFavoriteOrLiked`。
+  - `UserData` 由路由层 `applyUserData` 按 token 解出的账号补**真实**观看状态：进度（`Played`/`PlayCount`/`PlaybackPositionTicks`）读 `playback` 表（见 [0023](adr/0023-playback-progress.md)），`IsFavorite` 读 `favorite` 表（见 [ADR-0058](adr/0058-favorite-items.md)）；库里没有记录的条目保持空形状。
+  - **「轮播推荐位」（无 `ParentId` + `SortBy` 含 `IsFavoriteOrLiked`）**：
+    这条 query 喂的是**客户端首页顶部轮播图**（实测 Rex 首页**第一发**，比 `Views` 还早 42ms —— 它在**还不知道有哪些库**的时候就要结果，按库驱动的行不可能这么发）。
+    - **怎么认出它**（`service.feedOfQuery`）：**没有 `ParentId`**、且**不命中任何一条已有专属支路**（没有 `Filters` / `SearchTerm` / `AnyProviderIdEquals` / `Ids`，也不是裸列表查询、不是无 `ParentId` 的按类型计数探针）→ 归 `'random'`。**别抢别支**：上述每一条都是各支路的判据，本函数一律让开，让开后各自照旧处理（裸列表回库列表、探针取库规模，其余回空）。
     - **路由到哪一行**：**插件自己声明** —— 清单一行的可选字段 `feed: 'random'`（见插件指南「三」）。
       宿主 `home.rowByFeed()` 找**第一个声明了它的启用行**；**没有插件声明 → 照旧回空**。
       绝不"挑一行顶上"：挑错了等于给出与内容不符的路由，而且哪一行该接这条只有插件作者知道。
-    - **语义要说清**：这条 query 的原意是"用户**收藏或喜欢的**、随机"。本面板**没有收藏数据**，
-      所以只能按「随机推荐」理解 —— 给的是**随机热门**，**不是**用户的收藏。不要在任何地方把它当作收藏。
-    - 它接上之后**也变成受保护端点**：`itemsWillReturnData()` 对这条返回 true，无 token 会 401
-      （以前回空所以不校验）。判据仍然只收敛在 `itemsWillReturnData()` 一处，路由与 service 共用。
+    - **语义要说清**：`IsFavoriteOrLiked` 那条 query 的原意是"用户**收藏或喜欢的**、随机"。本支路**只认 `feed: 'random'`**，
+      给的是**随机热门**，**不按收藏过滤** —— 收藏列表是**另一条支路**（`Filters=IsFavorite`，读 `favorite` 表，见 [ADR-0058](adr/0058-favorite-items.md)），
+      两条判据互不相干。不要在任何地方把这条轮播 query 当作收藏。
+    - 它是**受保护端点**：`Items` 一律校验 token，无 token 会 401（此前"回空故豁免"的取向已作废）。
+  - **「裸列表查询」（无 `ParentId` + 无 `SortBy` + 不递归）**：
+    这类 query 也是**客户端首页**发的（实测 Filmly / 网易爆米花首页即是：只带 `ExcludeItemTypes`/`StartIndex`/`Limit`/`Fields`，无 `ParentId` / `SortBy` / `Filters`）。
+    - **回什么**：**回顶层库列表** —— `service.libraryQueryOf()` 命中即 `return getViews()`（复用 `Views` 那支，条目形状、`TotalRecordCount` 与 `Views` 一字不差）。
+    - **为什么是库列表**：**予初Emby 4.9.5.0 实测**该形状真机回 **26 个 `CollectionFolder`（＝顶层库列表）**，与 `GET /Users/{id}/Views` 一字不差 —— 真机对「无 `ParentId` 且不递归」的 `Items` 默认回根节点的直接子级（那些库）；要条目客户端须自带 `Recursive=true`。**曾按无样本的推断把它路由到 `feed: 'random'` 回条目（[ADR-0054](adr/0054-bare-items-query-uses-random-feed.md)），与真机相反，已推翻**，见 [ADR-0055](adr/0055-bare-items-query-returns-views.md)。
+    - **怎么认出它**（`service.libraryQueryOf`）：**没有 `ParentId`**、**没有 `SortBy`**、**非 `Recursive=true`**，且没有 `Filters` / `SearchTerm` / `AnyProviderIdEquals` / `Ids`，也不是无 `ParentId` 的按类型计数探针。判据取**最窄档**，只命中 Filmly / 网易爆米花那一族，轮播推荐位（带 `SortBy`）等各支路不受影响。
+      - **未复测项**：真机只隔离出「无 `ParentId` + 不递归」两个条件，`SortBy` 是否为必要条件未单独验证（真机不稳，未补测）；当前保留 `SortBy` 这一条以零回归。
+    - **不再与轮播推荐位共用 `feed`**：`feedOfQuery()` 已收窄回**只认轮播推荐位**；`feed: 'random'` 取值仍在、仍只服务轮播推荐位，插件契约不改。
 - **图片（`Items/{Id}/Images/{type}`）**：客户端取图时**只回传 `Id` + `tag`，不回传 URL**，所以 tag 得自己带上"图在哪"：
   - **tag = `cpimg.<base64url(图片URL)>.<签名>`**（`service.imageTag` / `parseImageTag`）。签名 = HMAC-SHA256(密钥, `Id|URL`) 取前 22 位。
   - **为什么要签名**：这个端点**必须豁免 token**（实测图片请求的凭证携带不统一，8 条里 3 条啥都不带），那它就是个"面板代为取任意 URL"的接口 —— 不签名等于把面板变成局域网 / Tailscale 上的**开放代理（SSRF）**。签名绑 `Id|URL`：tag 挪到别的条目上用不了，也造不出新 URL（实测：篡改 tag / 换条目 / 伪造 URL 全部 404）。
@@ -436,12 +557,15 @@ docker logs -t media-bridge-panel              # 带时间戳
   - **条目级**（`service.baseItem`，列表项也受益）：`Etag` `SortName` `ForcedSortName` `PartCount`
     `Chapters` `TagItems` `LockData` `LockedFields` `CanDelete` `CanDownload` `LocalTrailerCount`
     `DisplayPreferencesId` `PresentationUniqueKey` `DateCreated` `DateModified`。
-    ⚠️ 其中 `CanDownload` 是 **`true`**（条目级）：握手的 `Policy.EnableContentDownloading` 一直是 `true`，
-    而 `Items/{ItemId}/Download` 也真做了 —— 这两处必须一致，否则客户端"照 policy 去试、又按条目不提供下载入口"
-    （实测 SenPlayer 就是照前者试了 8 次）。**库条目**（`CollectionFolder`）那条仍是 `false`：
-    文件夹下不了，真机也是 false。`CanDelete` 一律 `false`（删除确实没有）。
+    ⚠️ 其中 `CanDownload` **跟随实例级「下载」开关（默认开）**，与握手 `Policy.EnableContentDownloading`、
+    `Items/{ItemId}/Download` 端点**三处同一口径** —— 否则客户端"照 policy 去试、又按条目不提供下载入口"
+    （实测 SenPlayer 就是照前者试了 8 次）。开关在产品上默认开（见 [ADR-0049](adr/0049-emby-instance-download-switch.md)），
+    关掉时三处一起拒。**库条目**（`CollectionFolder`）那条**恒为 `false`**：文件夹下不了，真机也是 false。
+    `CanDelete` 一律 `false`（删除确实没有）。
   - **条目级「线路派生」**（`getItem` 拿到线路后才补）：`Container` `Size` `Bitrate` `MediaStreams`
-    `Path` `FileName`（`FileName` 用**源给的真文件名** `target.name`，不是版本副标题）。
+    `Width` `Height` `Path` `FileName`（`FileName` 用**源给的真文件名** `target.name`，不是版本副标题）。
+    `Width`/`Height` 取自所选线路视频流的 `Width`/`Height`（数据源是**片源插件申报的 `width`/`height`**，
+    见插件契约；**插件没给就没有这俩字段** —— 面板不从集名正则反推）。
   - **MediaSource 级**：`ItemId` `Chapters` `Formats` `RequiredHttpHeaders` `IsInfiniteStream`
     `ReadAtNativeFramerate` `HasMixedProtocols` `AddApiKeyToDirectStreamUrl`
     `RequiresOpening`/`Closing`/`Looping`（原有的 `VideoType` 已删 —— 真机没有）。
@@ -463,15 +587,16 @@ docker logs -t media-bridge-panel              # 带时间戳
   - **实测**（路由器，真实数据）：字段数 **54**（真机 48 + 本项目几个额外的）；对真机**逐项不缺**。
 - **季列表（`Shows/{Id}/Seasons`）也是占位**：数据来自**同一个**上游接口（`GET /tv/{id}` 的响应里本来就有 `seasons[]`，不额外多打一次），**不加缓存，每次请求硬查**。
   - **季 Id 派生**：`{域}_{编号}_tv_s{n}`。派生与解析是一对（`metaBridge.itemId` / `metaBridge.parseItemId`），**代码里必须挨着放**，改格式时一起改 —— 否则发出去的 Id 回不来，客户端拿到 404。
-  - **特别篇（`season_number === 0`）本轮不返回**。注意上游的季 `name` 是**本地化文案**（zh-CN 下特别篇显示为「特别篇」，en-US 是 "Specials"），**判定只能看 `season_number`，绝不能匹配名字**。
-  - 实测：`number_of_seasons` **不含**特别篇（GoT 返回 s0~s8 共 9 条，字段报 8）→ 过滤后条数与 Items 里的 `ChildCount` 天然一致，不会出现「剧说 8 季、列表给 9 条」。
+  - **特别篇（`season_number === 0`）照真机返回**（见「十」#7-1）。注意上游的季 `name` 是**本地化文案**（zh-CN 下特别篇显示为「特别篇」，en-US 是 "Specials"），**判定只能看 `season_number`，绝不能匹配名字**。
+  - 实测：`number_of_seasons` **不含**特别篇（GoT 上游返回 s0~s8 共 9 条，字段报 8）→ **只有常规季（`IndexNumber > 0`）的条数**与 `seasonCount` 对账，特别篇另算，不会把特别篇当成"多出来的一季"。
   - 季的 `Genres` 回空数组：上游的 season 对象没有 genres 字段，**不套用剧的**（如实，不编）。
   - 季海报缺失时回退用剧的海报（`s.posterPath || show.posterPath`），免得客户端显示白块。
   - **上游失败 → 照实回失败码**（与 Items 同一取向，见上面的映射表）。曾试过「回 200 空列表」，改成照实回是因为空列表会把"上游挂了"伪装成"这部剧没有季"。
   - Id 不是剧（如 `{域}_550_movie`）→ **404**：说明客户端拿了错的 Id，静默回空会掩盖问题。
-  - `UserId` 在这条请求里是 **query 参数**（`&UserId=…`），不在路径里 —— 与 `Users/{UserId}/Items` 的写法不同，校验语义一致。
+  - `UserId` 在这条请求里是 **query 参数**（`&UserId=…`），不在路径里 —— 与 `Users/{UserId}/Items` 的写法不同。**只验 token、不比对 UserId**（7-2 起对齐真机）：真机在「有效 token + 合法但不存在的 UserId」下仍回 200，故把它降为**进度兜底**（`applyUserData` 按 token 解出的账号补观看进度，认不出才用 `UserId`）。
 - **分集列表（`Shows/{Id}/Episodes`）也是占位**：数据来自 **season 接口** `GET /tv/{id}/season/{n}` —— 剧接口只有 `seasons[]` **汇总**，**没有** `episodes[]`，所以这条必须单独多打一次上游。
   - **入参**：路径 `Id` = 剧 Id（`{域}_{编号}_tv`）；`UserId` 与 `SeasonId` 都在 query，其中 `SeasonId` 就是上一步 Seasons 发出去的那个季 Id（`{域}_{编号}_tv_s{n}`）；`EnableTotalRecordCount` 与一长串 `Fields` 忽略（只回手里有的）。
+  - `UserId` 在这条请求里是 **query 参数**（`&UserId=…`），不在路径里。**只验 token、不比对 UserId**（8-2 起对齐真机）：真机在「有效 token + 合法但不存在的 UserId」下仍回 200，故把它降为**进度兜底**（`applyUserData` 按 token 解出的账号补观看进度，认不出才用 `UserId`）。
   - **路径里给「季 Id」也算数**（依据是面板日志 + 真机实测）：
     官方文档写的是 `Id` = 剧，但**真机**（`emby.example.com`）实测
     `Shows/{季Id}/Episodes?SeasonId={季Id}` **回 200**（212 条，与剧 Id 那条一模一样）；
@@ -484,7 +609,7 @@ docker logs -t media-bridge-panel              # 带时间戳
   - **季定不下来就回空（200）+ 日志写明原因**：没带 `SeasonId`（且路径也没给季）、`SeasonId` 认不出、`SeasonId` 不属于这部剧 —— 都回空 `QueryResult`。与 Items 同一思路：**先把客户端的真实调用逼出来**，不为没见过的形态现编数据。
   - 路径 Id 不是剧/季（如 `{域}_550_movie`、集 Id）→ **404**（与 Seasons 一致；静默回空会掩盖问题）。
   - **分集字段**：`IndexNumber`(集号) / `ParentIndexNumber`(季号) / `SeriesId` / `SeasonId` / `SeasonName`；`IsFolder=false` —— 集不是容器，而 `baseItem()` 默认给 `true`，**必须显式改掉**；`Primary` 图用**剧照** `still_path`，因此 `PrimaryImageAspectRatio` 改成 16:9 的 `1.7777778`（海报是 0.667）；`runtime` 有值才填 `RunTimeTicks`（1 分钟 = 6×10⁸ ticks），未定档的不编时长。
-  - **不填 `SeriesName`**：那要再打一次剧接口，而客户端是在剧/季页里发的这条请求，本来就知道剧名。
+  - **填 `SeriesName`（剧名）**：真机每条集都带（见「十」#8-3）。取法是照 `progressItem` 的做法**再 `lookup` 一次**剧接口取剧名 —— 走**元数据插件自己的缓存**，实际不额外打上游；查不到只少这一个可选字段，**不影响主结构**（回退原则，见「四」）。
   - **上游失败 → 照实回失败码**（与 Items / Seasons 一致，见上面的映射表）。
   - 实测（Rex-Standard）：`Shows/{域}_95350_tv/Episodes?SeasonId={域}_95350_tv_s1` → 200、8 集，首集 `Name=试播集`、`PremiereDate=2026-08-16T00:00:00.0000000Z`。
 - **单条详情（`Users/{UserId}/Items/{ItemId}`）—— 元数据来自上游，源绑定走聚合层（本面板自己）**。客户端点进某一条（剧 / 季 / 集）时来要，返回**单个 `BaseItemDto` 本体**（不包 `QueryResult`）。
@@ -547,8 +672,8 @@ docker logs -t media-bridge-panel              # 带时间戳
     - 音频流给 `DisplayTitle`（编解码 + 声道 + Atmos，如 `EAC3 5.1 Atmos`）、`Channels`、`ChannelLayout`，并让 `DefaultAudioStreamIndex` 指向它 —— 与真实 Emby 同款式（真实 Emby 是 `English EAC3 5.1 (默认)`，**语言本项目没有，不编**）。
     - **每条线路各自定位各自那一集**（不同线路的集名/顺序可能不同），所以规格是按线路给的，不是全剧一套。
     - 解析不出来的字段**一律留空**（`Container:''`、没有 `Size`、`MediaStreams:[]`），**绝不补默认值** —— 给假的比不给更有害。
-  - **`Path` 不放源的真实地址**，而放**本面板的 Stream 端点**，形状 `/api/emby/Items/{ItemId}/Stream/{base64url(版本 Id)}/{站点来源标签 · 集名}`（见 `service.streamPath` / `buildMediaSource`）。季集号不放进去 —— Stream 路径里的 `ItemId` 解开就有。这样一个 Path **永久有效**，与源地址、时效 token 彻底解耦。
-    - **为什么用 base64url 编版本 Id、末段放「站点标签 · 集名」**：客户端版本行的**副标题就是「Path 解码后最后一个 `/` 之后」** —— 明文 `vod` 里的 `…/id/8471.html` 会把副标题变成 `8471.html`（多条一模一样）；base64url 解码后**也不含 `/`**，末段才能安心放内容。放**站点来源标签**（站点完整 `name`，如 `木偶|4K`）是因为多站之后副标题（集名）常常**逐字相同**，光看集名分不出来源；标签放最前面，长集名被客户端截断时也还看得见。
+  - **`Path` 不放源的真实地址**，而放**本面板的 Stream 端点**，形状 `/api/emby/Items/{ItemId}/Stream/{base64url(版本 Id)}/{标准文件名}`（见 `service.streamPath` / `buildMediaSource`）。季集号不放进去 —— Stream 路径里的 `ItemId` 解开就有。这样一个 Path **永久有效**，与源地址、时效 token 彻底解耦。
+    - **为什么用 base64url 编版本 Id、末段放「标准文件名」**：客户端版本行的**副标题就是「Path 解码后最后一个 `/` 之后」** —— 明文 `vod` 里的 `…/id/8471.html` 会把副标题变成 `8471.html`（多条一模一样）；base64url 解码后**也不含 `/`**，末段才能安心放内容。末段放聚合层 `standardName` 拼好的**标准文件名**（`标题.年份.季集.规格.容器`，见「播放」段的「副标题」一条），如实反映这一版本的规格。**不再带站点前缀** —— 来源已在标题位 `MediaSources[].Name` 的站点标签里，副标题留纯文件名。
     - token → 版本 Id 用 `service.decodeSourceToken()` 拆（base64url → `catpaw:…`）；认不出的 token → **400**，不猜。
     - 为什么不能直接放源地址：实测同一个 `S01E01` 两次 detail 返回的集 ID **不一样**，base64 解出来是 `{"providerId":"quark",…,"playToken":"{…stoken…}"}` —— **它自己就是时效令牌**，拼进 Path 会跟着过期。
     - **但客户端不读 `Path`**（日志实测）：它自己拼 Emby 的标准直连端点 `GET /videos/{ItemId}/stream.{Container}?Static=true&MediaSourceId=<版本 Id>`。所以 `Path` 目前只留着「给读它的客户端 / 手动调试」，真正播放靠下面这条。
@@ -641,25 +766,28 @@ docker logs -t media-bridge-panel              # 带时间戳
     而真机每条都带 `Id`，缺它会让客户端整条响应解码失败，见「四」）。`Id` 用上游的公司 id（**数字**）。
     给了 Id 就等于承诺"点公司能进列表"，而 `/Studios/{Name}/Items` 没实现（会 501）——
     但这条**只能这样**：**完整性优先**，宁可点了 501，也不能让整页打不开。
-  - **不校验账号**（既定口径）：**回空的响应没有数据可保护**，校验只会有坏处 ——
-    客户端不带 token 时会白白收到一个 401，而它本该拿到一个空列表。同口径的还有 `Items/Counts`
-    与 `Items` 里那些回空的分支（判据收敛在 `service.itemsWillReturnData()` 一处，
-    路由层与 `service.getItems` 共用，不会漂移）。
-    实测：不带 token 取 `Studios` → **200 空**（改之前是 401）。
-- **「如实回空」这一家子**：`Studios` / `Items/Counts`，以及 `Items` 里 `Filters=IsFavorite`
-  与认不出的查询。共同点：**确实没有那份数据**，所以回空（回全 0 的那种也叫回空）；
-  且**一律不校验账号**（回空没有数据可保护）。
+  - **要 token**（14-1 起对齐真机）：真机三台实测**无 token / 无效 token 一律 401 纯文本**
+    （`Access token is invalid or expired.`），故在路由层加 `authorize(req)` ——
+    与 `Items`（5-1）/ `Items/Latest`（6-1）同口径。此前"回空没有数据可保护、故豁免校验"的取向
+    **已作废**（真机不这么判；正常客户端都带 token，无人被误伤）。逐条见「十、#14」。
+- **「如实回空」这一家子**：`Studios`，以及 `Items` 里认不出的查询。共同点：**确实没有那份数据**，所以回空。
+  （`Items?Filters=IsFavorite` 已**移出这一家**：自 [ADR-0058](adr/0058-favorite-items.md) 起读 `favorite` 表出真数据，
+  详见「五」的「条目列表」那支。）
+  （`Items/Counts` 原本也在这家 —— 现已「部分出数」，见下；它自 16-1 起与 `Studios` 一样**要 token**，
+  两者都对齐了真机：真机三台实测无 token / 无效 token → 401 纯文本。）
   | 端点 | 为什么是空的 | 缺的是什么 |
   |---|---|---|
   | `Studios` | 没有片库可枚举 | 片库索引 |
-  | `Items/Counts` | 数不出来 | 片库索引 |
-  | `Items?Filters=IsFavorite` | 收藏要有写端点（没做） | 收藏功能 |
+  | `Items/Counts`（**只剩其余字段**） | 数不出来 | 片库索引 |
+  - **`Items/Counts` 已「部分出数」**：电影 / 剧集两类取**首页插件申报的库总数**（申报在 `rows` 里行的
+    `total`，见 [ADR-0052](adr/0052-items-counts-library-total.md)），**集数取剧库行申报的 `episodes`**
+    （见 [ADR-0053](adr/0053-home-row-declared-episodes.md)），其余字段**仍回 0**。
+    0 的意思是**"数不出来"**、**不是"库是空的"**（`ItemCounts` 的 14 个字段都是数字、没有"未知"这种取值）。
+    ⚠️ **别拿"这一榜的条数"当库总数**：`top_rated` 这类行 `run` 出来报的 `total`（如 `11216`）是**上游榜单
+    的总数**，不是库规模 —— 拿它当"库里有 11216 部片"就是**编数据**，比 0 更差。库规模只认 `rows` 里行
+    **专门申报的**那个 `total`。
   - **`Items/Resume` / `Shows/NextUp` 已不在这一家**：自 [0023](adr/0023-playback-progress.md) 起它们读
     `playback` 表出真数据，也**因此改成要 token**（回的是某个账号的观看记录）。
-  - ⚠️ **`Items/Counts` 的全 0 要说清**：意思是**"数不出来"**，**不是"库是空的"**。
-    `ItemCounts` 的 14 个字段都是数字、没有"未知"这种取值，所以只能填 0。
-    那为什么不去凑？唯一的数据源是各插件行返回的 `total`（如 `top_rated` 报 `11216`）——
-    那是 **上游榜单的总数，不是库里的数量**，拿它当"库里有 11216 部片"就是**编数据**，比 0 更差。
   - `Shows/NextUp` 与 `Items/Resume` 的分工（都靠观看历史，见 [0023](adr/0023-playback-progress.md)）：
     `Resume` = **有播放进度、还没看完**的条目；`NextUp` = 正在追的剧里**下一集**该看哪一集
     （最近看的那集没看完 → 回它自己；看完 → 回下一集，且必须在上游季数据里真实存在；
@@ -690,19 +818,20 @@ docker logs -t media-bridge-panel              # 带时间戳
 | `ExtendedVideoType` | `DolbyVision` | 同左（DoVi 时才给） | |
 | `DefaultAudioStreamIndex` | 有 | 有 | |
 | `VideoType` | `None` | `VideoFile` | 本项目是 http 流，不是本地文件，如实给 |
-| `Path` | 真实文件 URL（末段是文件名） | 本面板 Stream 端点，**末段也放文件名（集名）**：`/Stream/{base64url(版本 Id)}/{集名}` —— 客户端版本行的副标题就显示它 | 形状见「播放」段 |
+| `Path` | 真实文件 URL（末段是文件名） | 本面板 Stream 端点，**末段放标准文件名**：`/Stream/{base64url(版本 Id)}/{标准文件名}` —— 客户端版本行的副标题就显示它 | 形状见「播放」段 |
 | 其余流字段（`Profile` / `ColorSpace` / `BitDepth` / `ChannelLayout` / 语言 / `ExtendedVideoSubType`…） | 全套（本地库 + ffprobe 探得） | **只给源在集名里标了的** | 解析不出来就留空，不编 |
 | Episode 项自带 `MediaSources` / `MediaStreams` | 有 | 无（只在详情与 `PlaybackInfo` 给） | 真实 Emby 是本地库扫出来的；本项目是**在线聚合**，分集列表要给每集配版本就得多打上游，代价过高。**待观察**：Rex 既然在 Episodes 里明确要求 `MediaSources`，将来若发现它靠列表渲染版本，再议 |
 
 **为什么 `DisplayTitle` 必须给「站点标签 · 线路」**（而不是像真实 Emby 那样给规格串）：真实 Emby 的两个版本是**两个不同文件**（码率/体积不同、`Name` 也不同），规格串本来就能替它区分；而本项目是**同一个源条目里的多条线路、甚至多个站的同名条目** —— `VideoRange` / `Codec` / `Size` 往往完全相同，规格串会撞成一片，**只有站点标签能把它们分开**。而版本行的标题位只认流上的 `DisplayTitle`：缺了就退回 `VideoRange` 拼出的 `Dolby Vision`，`MediaSources[].Name` 填了它也不读。站点的完整 `name`（`木偶|4K`）比截短的"木偶"多带画质后缀，标题位与副标题现在用**同一个标签**。
 
-**副标题：已修**。版本行的副标题是客户端把 `Path` 解码后取「最后一个 `/` 之后」得来的：之前 `Path` 是 `…/Stream?src=…&vod=…/id/8471.html`，于是六条全显示 `8471.html`。现在改成 `/Stream/{base64url(版本 Id)}/{站点来源标签 · 集名}` —— token 用 base64url（**解码后也不含 `/`**）承载源路径，使其不出现在 URL 里，末段放**站点来源标签**（站点完整 `name`，如 `木偶|4K`）+ **该线路自己定位到的那一集的集名**（源给的原始文件名），副标题就变成：
+**副标题：已修**。版本行的副标题是客户端把 `Path` 解码后取「最后一个 `/` 之后」得来的：之前 `Path` 是 `…/Stream?src=…&vod=…/id/8471.html`，于是六条全显示 `8471.html`。现在改成 `/Stream/{base64url(版本 Id)}/{标准文件名}` —— token 用 base64url（**解码后也不含 `/`**）承载源路径，使其不出现在 URL 里，末段放聚合层拼好的**标准文件名**（scene naming，`标题.年份.季集.分辨率.来源.音频(含声道).Atmos.动态范围.视频编码.容器`），副标题就变成：
 
 ```
-木偶|4K · [1.8GB]Lanterns.2026.S01E01.2160p.MAX.WEB-DL.H.265.DV.HDR.DDP5.1.Atmos.mkv【L 绿灯军团】
+蜘蛛侠：崭新之日.2026.2160p.WEB-DL.DDP5.1.Atmos.DV.H.265.mkv
+蜘蛛侠：崭新之日.2026.1080p.WEB-DL.DDP5.1.H.264.mkv
 ```
 
-（未定位到集名的线路退回「线路名.mkv」。注意客户端**播放并不读这个 Path**，它只影响副标题与手工调试 —— 播放走 `/videos/{Id}/stream.{ext}`。）
+**不再带站点前缀**（`小雅 Alist · …` 那截去掉）：来源与线路已经在标题位 `MediaSources[].Name` 里显示，副标题只留文件名。`标题` / `年份` 取自搜索标题（`rawTitle`），规格取自 `parseEpisodeMeta`（`WEB-DL` 由 agg 的 source 识别补出；`H.265`/`DDP5.1`/`DV` 等换成 scene 通行写法）；缺哪段就跳过哪段，不编。agg 拿不到规格的线路退回「原始文件名」。（注意客户端**播放并不读这个 Path**，它只影响副标题与手工调试 —— 播放走 `/videos/{Id}/stream.{ext}`。）
 
 **流字段能提取的都提取，但"有才有、没有就空"**（既定口径：**只用 `agg/detail` 的数据，不做探测**）。分三类：
 
@@ -859,19 +988,19 @@ docker logs -t media-bridge-panel              # 带时间戳
 | 上限 200MB→50KB | 立刻淘汰到 1 条 / 2.2KB（不等下次写入） |
 
 
-## 六、明确无视的请求（不补、不报）
+## 六、界外：明确不认领的请求（不补、不报）
 
-> 这些是**明确决定不做**的请求。日志里再看到，**直接跳过**：不实现、不上报、不再询问、不进「待补端点」。
+> 判为**界外**（不属于面板的东西）的请求，日志里再看到**直接跳过**：不认领、不实现、不上报、不进「待补端点」。
+> 范围与判据见 [ADR-0056](adr/0056-emby-compat-scope.md)；界外是**整类**不认领（转码、本地库扫描、用户权限 / 家长控制等），不逐条列。
 
 | 方法 | 路径 | 识别特征 | 决定 |
 |---|---|---|---|
-| GET | `/api/emby/Users/{UserId}/Items` | query 带 `Filters=IsFavorite`（首页「收藏」） | **无视** —— 不补 |
+| （暂无） | | | |
 
-- 判定只看 query 里的 `Filters=` 值命中 `IsFavorite` 即算，其余参数（`SortBy`、`Limit`、`Fields`、`Recursive`…）怎么变都无视。
-- **`Filters=IsPlayed` 已从这张表移出**：自 [0023](adr/0023-playback-progress.md) 起它**出真数据**
-  （读 `playback` 表的已看条目），不再回空。
-- **不是整体无视 `Users/{UserId}/Items`**：`Filters=IsFavorite` 如实回空（没有收藏数据，空是如实）；`Filters=IsPlayed` 读库出真数据；`ParentId=<本面板的库Id>` 走首页模块（见「五」）；**`AnyProviderIdEquals={域}.{编号}` 归 emby 层**（按外部 id 搜一条 —— 删过、后恢复，理由见「五」）。
-- 实现后的行为：`Users/{UserId}/Items` 会正常收下这些请求，不会再落到 501 通配里。
+- **收藏（`Filters=IsFavorite`）已移出本节**：此前判「无视 —— 不补」，按 [ADR-0056](adr/0056-emby-compat-scope.md) 改判**界内**，现已**实现**（读 `favorite` 表出真数据，见 [ADR-0058](adr/0058-favorite-items.md) 与「五」）。
+- **`Filters=IsPlayed` 也不在本节**：自 [0023](adr/0023-playback-progress.md) 起它**出真数据**
+  （读 `playback` 表的已看条目），不回空。
+- **不是整体判定 `Users/{UserId}/Items`**：`Filters=IsFavorite` 读 `favorite` 表出真数据（见 [ADR-0058](adr/0058-favorite-items.md)）；`Filters=IsPlayed` 读库出真数据；`ParentId=<本面板的库Id>` 走首页模块（见「五」）；**`AnyProviderIdEquals={域}.{编号}` 归 emby 层**（按外部 id 搜一条 —— 删过、后恢复，理由见「五」）。
 
 > **字段级**的"故意不给"记在别处（不是端点级，所以不列上面的表）：详情页哪些字段不给、为什么不给 —— 见「五」的**详情页"丰富度"**那条（`OriginalLanguage` / `CriticRating` / `ScreenshotImageTags` / 合集 Boxset）。
 > 原来那份清单里还有"**演员头像**"和"**演职人员不给 `Id`**"两条，**已推翻**（缺 `Id` 会让客户端整条响应解码失败），改成了"给 Id + 头像顺带做通"，理由见同一条。
@@ -885,39 +1014,53 @@ docker logs -t media-bridge-panel              # 带时间戳
 | 方法 | 路径 | 用途 | 现状 |
 |---|---|---|---|
 | GET | `/api/emby/Users/{UserId}/Items/Resume` | ~~首页「继续观看」~~ | **已实现**（**真数据** —— 读 `playback` 表的未看完条目，见「五」与 [0023](adr/0023-playback-progress.md)） |
-| GET | `/api/emby/Studios` | ~~工作室筛选列表~~ | **已实现**（**如实回空** —— 没有片库可枚举，见「五」） |
+| GET | `/api/emby/Studios` | ~~工作室筛选列表~~ | **已实现**（**如实回空** + **只验 token** —— 回空理由是没有片库可枚举；鉴权自 14-1 起对齐真机，见「五」与「十」#14） |
 | GET | `/api/emby/Items/{Id}/Images/{type}` | ~~图片~~ | **已实现**（见「五」；tag 验签通过 **或** 命中本地图片索引都出图，否则 404；端点豁免 token） |
 | GET | `/api/emby/Users/{UserId}/Items/Latest` | ~~官方另一条「每库最新」路径（回裸数组，与 `QueryResult` 形状不同）~~ | **已实现**（见「五」；**VidHub 3.0.6 的整个首页都靠它** —— 实测拿到 `Views` 后逐库各打一次） |
 | GET | `/api/emby/Users/{UserId}/Items?SearchTerm=<词>` | ~~搜索框（`IncludeItemTypes=Movie,Series,Video,Person&Recursive=true`）~~ | **已实现**（见「五」的「搜索」那条；**SenPlayer 6.1.8 实测在用**，以前回空 → 搜索框永远空） |
 | GET | `/api/emby/Users/{UserId}/Items/{库Id}` | 客户端问「这个库是什么」（形状与 `Items/{ItemId}` 相同，现在会被 `parseItemId` 判成 501） | **未指定**（客户端尚未请求） |
-| GET | `/api/emby/System/Info` | **带 token 的完整服务器信息**（`System/Info/Public` 的加强版：编码器位置、各类路径、能否自更新/自重启等 —— 大部分是**本项目没有的能力**） | **未指定**（VidHub 3.0.6 登录后要它，现在落到 501 通配；**它容忍了**、照常往下走） |
-| GET | `/api/emby/Shows/{Id}/Seasons` | **特别篇（上游 `season_number=0`）是否返回** | **待定**（客户端可能支持显示特别篇，暂不确定；现在按"不返回"实现，见「五」） |
-| GET | `/api/emby/Shows/NextUp` | ~~SenPlayer 的「接下来看」~~ | **已实现**（**真数据** —— 按库里进度算下一集，见「五」与 [0023](adr/0023-playback-progress.md)） |
+| GET | `/api/emby/System/Info` | **带 token 的完整服务器信息**（`System/Info/Public` 的加强版：编码器位置、各类路径、能否自更新/自重启等 —— 大部分是**本项目没有的能力**） | **已实现**（**诚实子集**：认领端点，只给面板真有的 17 个字段、能力位一律 `false`，面板没有的 8 个字段不回（不编造）；鉴权**只验 token**；新客户端 **Filmly/2.12.11-439** 在要，此前落到 501 通配；见「五」与 [ADR-0057](adr/0057-emby-system-info-honest-subset.md) 及「十」#20） |
+| GET | `/api/emby/System/Ping` | **连通性探针**（登录前/后测「这台服务器活着吗」） | **已实现**（**200 纯文本 `Emby Server` + 豁免 token** —— 新客户端 **Lenna/1.0.16** 在要，见「五」与「十」#19） |
+| GET | `/api/emby/Shows/{Id}/Seasons` | **特别篇（上游 `season_number=0`）是否返回** | **已按真机改**（真机实测**返回**特别篇，面板原先过滤 → 7-1 已改为返回；见「十」#7） |
+| GET | `/api/emby/Shows/NextUp` | ~~SenPlayer 的「接下来看」~~ | **已实现**（**真数据** —— 按库里进度算下一集 + **只验 token**，见「五」与 [0023](adr/0023-playback-progress.md) 及「十」#15） |
 | POST | `/api/emby/Sessions/Playing` | ~~客户端上报「开始播放」~~ | **已实现**（落库；实测 SenPlayer 6.2.1 每次播放发 1 次） |
 | POST | `/api/emby/Sessions/Playing/Progress` | ~~播放中的心跳（实测每 10 秒一次）~~ | **已实现**（落库；被 501 拒了客户端也照发，所以必须收下） |
 | POST | `/api/emby/Sessions/Playing/Stopped` | ~~停止 / 退出上报~~ | **已实现**（落库；位置 ≥ 时长 90% 判为看完） |
 | POST | `/api/emby/Users/{UserId}/Items/{ItemId}/HideFromResume` | ~~从「继续观看」里移除 / 恢复~~ | **已实现**（只翻 `hidden`，不动位置；重播会自动取消隐藏，见 [0023](adr/0023-playback-progress.md) 的补充） |
 | POST | `/api/emby/Users/{UserId}/PlayedItems/{ItemId}` | ~~标记已看~~ | **已实现**（`played=1`、位置归零、`play_count` 加一；见 [0023](adr/0023-playback-progress.md) 的补充） |
 | DELETE | `/api/emby/Users/{UserId}/PlayedItems/{ItemId}` | ~~标记未看~~ | **已实现**（`played=0`、位置归零、`play_count` 归 0） |
-| GET | `/api/emby/Items/Counts` | ~~侧边栏每个库的条目数~~ | **已实现**（**全 0** —— 数不出来，不是库空，见「五」） |
+| POST | `/api/emby/Users/{UserId}/FavoriteItems/{ItemId}` | ~~收藏~~ | **已实现**（收藏时反查元数据、**快照落 `favorite` 表**；见「五」与 [ADR-0058](adr/0058-favorite-items.md)；**Rex/1.0.0** 实测在用，此前落到 501 通配） |
+| DELETE | `/api/emby/Users/{UserId}/FavoriteItems/{ItemId}` | ~~取消收藏~~ | **已实现**（删 `favorite` 行，不反查） |
+| GET | `/api/emby/Users/{UserId}/Items?Filters=IsFavorite` | ~~收藏列表~~ | **已实现**（**真数据** —— 读 `favorite` 表、快照重建、**0 上游请求**；**Rex/1.0.0** 实测在要，此前恒回空；见「五」与 [ADR-0058](adr/0058-favorite-items.md)） |
+| GET | `/api/emby/Items/Counts` | ~~侧边栏每个库的条目数~~ | **已实现**（**`MovieCount`/`SeriesCount` 取首页插件申报的库总数（`rows.total`）、`EpisodeCount` 取剧库行申报的集数（`rows.episodes`）**，其余字段回 0 —— 数不出来，不是库空；**只验 token**，自 16-1 对齐真机，见「五」与「十」#16） |
 | GET | `/api/emby/System/Ext/ServerDomains` | **不是 Emby 核心端点** —— 第三方插件 `uhdnow/emby_ext_domains` 提供的「服务器地址清单」（`{data:[{name,url}],ok}`，用于内网/外网/备用域名切换）。真 Emby 没装那插件也是 404 | **不实现**（不在 Emby 协议里；接了反而像冒充那个插件。客户端本就该容忍它不存在） |
+| GET | `/api/emby/Users/{UserId}/Items/{ItemId}/SpecialFeatures` | **条目的「特别收录」**（花絮 / 删减片段 / 预告等**本地附加视频**；Emby 里每条是条目文件夹旁的一个可播文件） | **不实现（[界外](adr/0056-emby-compat-scope.md)）**（背后是「条目文件夹里的本地附加文件」，与本地库扫描同类，非面板的东西；**CapyPlayer 1.1.3** 在要，此前落到 501 通配。**片源插件只有正片、查不到花絮** —— 认领了也只能回空，客户端点「花絮」永远没内容，没意义。同族的 `LocalTrailers` / `Intros` 同判） |
 
-> **这张表里"没实现"的只剩三条**：`Items/{库Id}`（库详情，客户端尚未请求）、`System/Info`（带 token 的完整版，
-> VidHub 在要）、`System/Ext/ServerDomains`（判定**不实现** —— 不是 Emby 核心端点，是第三方插件提供的，接了像冒充它）。
-> 其余各行**都已实现**（`Resume` / `Studios` / 图片 / `Items/Latest` / `NextUp` / `Items/Counts` / `Views` /
-> `Items?ParentId=` / 三条进度上报 / 三条观看状态写端点），其中 `Studios` / `Counts` 是**如实回空** —— 没有那份数据，空是如实；
-> `Resume` / `NextUp` / `Items?Filters=IsPlayed` 自 [0023](adr/0023-playback-progress.md) 起出**真数据**
-> （数据来自客户端上报的播放进度）。
+> **这张表里"没实现 / 不实现"的现为三条**：`Items/{库Id}`（库详情，**未指定** —— 客户端尚未请求）、
+> `System/Ext/ServerDomains`（判定**不实现** —— 不是 Emby 核心端点，是第三方插件提供的，接了像冒充它）、
+> `Items/{ItemId}/SpecialFeatures`（判定**不实现** —— **[界外](adr/0056-emby-compat-scope.md)**；片源插件只有正片、查不到花絮，认领了也只能回空）。
+> 其余各行**都已实现**（`Resume` / `Studios` / 图片 / `Items/Latest` / `NextUp` / `Items/Counts` / `System/Info` / `Views` /
+> `Items?ParentId=` / `System/Ping` / 三条进度上报 / 三条观看状态写端点 / **收藏写端点 + 收藏列表**），其中 `Studios` 是**如实回空** —— 没有那份数据，空是如实
+> （`Studios` 自 14-1 起**要 token**）；`Items/Counts` 自 16-1 起**也要 token**，且其 `MovieCount`/`SeriesCount`
+> 已改为取**首页插件申报的库总数**、`EpisodeCount` 取**剧库行申报的集数**（其余字段仍回 0），见「五」；
+> `Resume` / `NextUp` / `Items?Filters=IsPlayed` 自 [0023](adr/0023-playback-progress.md) 起出**真数据**，
+> `Items?Filters=IsFavorite` 自 [ADR-0058](adr/0058-favorite-items.md) 起出**真数据**（读 `favorite` 表、**0 上游请求**）。
 > **还没做的端点级缺口**（`GenreItems` 的列表端点、`Sessions/Logout`、`/Users/Public`、用户级 `Similar`）
 > 记录在 [develop.md](develop.md) 的「未实现」一节。
 
 > **几个客户端的画像**（全部来自日志）：
 >   · **Rex** —— 库内容走 `Items?ParentId=<库Id>`；另外发**无 `ParentId` 的「推荐」查询**（喂首页轮播图，见「五」）
->     与 **`AnyProviderIdEquals={域}.{编号}`**（只有上游编号 → 问本面板要 Id → 拿到就进详情）；要过 `Studios`。
->   · **VidHub 3.0.6** —— 首页**每一行**走 `Items/Latest?ParentId=<库Id>`；另外要 `System/Info`（未实现，它容忍）。
+>     与 **`AnyProviderIdEquals={域}.{编号}`**（只有上游编号 → 问本面板要 Id → 拿到就进详情）；要过 `Studios`；
+>     也收藏条目（`POST FavoriteItems` + `Items?Filters=IsFavorite`，见「五」与 [ADR-0058](adr/0058-favorite-items.md)）。
+>   · **VidHub 3.0.6** —— 首页**每一行**走 `Items/Latest?ParentId=<库Id>`；另外要 `System/Info`（它容忍过 501；现已实现，见「五」与「十」#20）。
+>   · **Filmly 2.12.11-439** —— 要过 `System/Info`（此前落到 501；现已实现为诚实子集，见「五」与「十」#20）。
+>   · **CapyPlayer 1.1.3** —— 打开条目详情后会要 **`Items/{ItemId}/SpecialFeatures`**（条目的花絮 / 特别收录）；
+>     判**界外、不实现**（片源插件只有正片、查不到花絮，认领了也只能回空，见「七」）。
 >   · **SenPlayer 6.1.8** —— 要过 `Shows/NextUp` / `Items/Counts` / `System/Ext/ServerDomains`；
 >     **搜索框走 `Items?SearchTerm=`**（实测；以前回空 → 搜索永远是空的）；
 >     另会打非 Emby 协议的 `api/danmu/{条目Id}`（弹幕插件，**501，暂不实现**）。
+>   · **Lenna 1.0.16** —— 要过 **`System/Ping`**（连通性探针；此前落到 501，现已实现，见「五」与「十」#19）。
+>     目前只见它打这一条，其余流程待后续日志补全。
 >   · **结论**：某条端点"没人要"**只对当时那批客户端成立** —— `Items/Latest` 原先就记着
 >     "实测客户端从没打过"，来了 VidHub 直接作废（Rex 走的是 `Items?ParentId=`，只盯 Rex 的日志根本看不到）。
 >     所以不要把"没人要"当永久结论，新客户端一进来就得重新看一遍。
@@ -938,7 +1081,7 @@ docker logs -t media-bridge-panel              # 带时间戳
 |---|---|
 | `server/modules/emby/routes.js` | 已实现端点（握手 / 登录 / 取用户资料 / 媒体库留白 / 条目列表占位 / 季列表占位 / 分集列表占位 / 单条详情 / PlaybackInfo / Stream）+ 面板自用端点（账号管理 `GET/POST /api/emby/accounts`、`PUT/DELETE /api/emby/accounts/{id}`）+ 通配监控路由（记录 + 501，与 `notImplemented()` 共用），**通配必须注册在最后**。stream 端点在这一层**一律 302**（service 只回 `{url, headers, parse}` 描述，地址改写也在 service 做，见 `redirectUrl()`）；路由把 `req.headers.host` 传下去当"客户端域名" |
 | `server/modules/emby/db.js` | emby 私有的本地库（**Node 内置 `node:sqlite`**，零依赖）：开库/建表/schema、`accounts` 表（用户名 + `username_lc UNIQUE` + scrypt 哈希 + 最近登录）、`sessions` 表（登录发的 AccessToken → 账号/设备/最后活跃）、`hashPassword/verifyPassword`、账号与会话的 CRUD、`publicAccount()`（**对外字段映射只此一处**，防手滑回传哈希）、`migrateLegacy()`（单账号明文 → 库，并**无条件清掉设置里的残留明文**）。文件 `data/emby/emby.db`，权限 600；**不存 `user_id` 列**（serverId 一变就全废，运行时现算） |
-| `server/modules/emby/service.js` | 端点业务逻辑：服务器 Id、登录校验（多账号 + scrypt）、**AccessToken 校验（`tokenFrom` / `authorize`，无效即 401）**、UserDto 组装、媒体库（`getViews`——**按真机字段表补齐，含封面与 `CollectionType`**）、条目列表（`getItems`）、**最新条目（`getLatest`，回裸数组，顺序由模块决定）**、季列表、分集列表、单条详情（元数据复用列表实现 + 聚合取线路/绑定 + 线路→`MediaSources`）、播放信息（复用 getItem）、拉流解析（`resolveStream`：现取 detail+play，只回描述，不碰 res）；公共函数 `assertUser()`（账号校验，各端点共用）/ `baseItem()`（条目公共字段）/ `metaFailure()`（上游失败 → 状态码 + 错误体，各端点共用）/ `catpawSourceId()` + `parseCatpawSourceId()`（`catpaw:<site>:<flag>` 的编解码）/ `streamPath()`（稳定 Path 拼接）/ `emptyUserData()` + `emptyViewUserData()`（**条目与库条目的 `UserData` 形状不同**）/ `itemsWillReturnData()`（判据只此一处）/ `feedOfQuery()`（认出客户端"只要推荐"的查询 → 路由到插件声明了 `feed` 的行）/ `imageTag()`；`X-Emby-Authorization` 解析 |
+| `server/modules/emby/service.js` | 端点业务逻辑：服务器 Id、登录校验（多账号 + scrypt）、**AccessToken 校验（`tokenFrom` / `authorize`，无效即 401）**、UserDto 组装、媒体库（`getViews`——**按真机字段表补齐，含封面与 `CollectionType`**）、条目列表（`getItems`）、**最新条目（`getLatest`，回裸数组，顺序由模块决定）**、季列表、分集列表、单条详情（元数据复用列表实现 + 聚合取线路/绑定 + 线路→`MediaSources`）、播放信息（复用 getItem）、拉流解析（`resolveStream`：现取 detail+play，只回描述，不碰 res）；公共函数 `assertUser()`（账号校验，各端点共用）/ `baseItem()`（条目公共字段）/ `metaFailure()`（上游失败 → 状态码 + 错误体，各端点共用）/ `catpawSourceId()` + `parseCatpawSourceId()`（`catpaw:<site>:<flag>` 的编解码）/ `streamPath()`（稳定 Path 拼接）/ `emptyUserData()` + `emptyViewUserData()`（**条目与库条目的 `UserData` 形状不同**）/ `feedOfQuery()`（认出客户端"只要推荐"的轮播查询 → 路由到插件声明了 `feed` 的行）/ `libraryQueryOf()`（认出"无 `ParentId` 的裸列表查询" → 回顶层库列表，与 `Views` 同款）/ `imageTag()`；`X-Emby-Authorization` 解析 |
 | `server/modules/agg/match.js` | **挑片判据（唯一一处）**：片名清洗（剥更新话术/画质/体积/年份/括号/分类后缀、去 emoji）+ 打分（名字 0.7 / 季集 0.2 / 年份 0.1，缺项不进分母）+ 两道闸门（名字硬拒 / 分数线可关）+ 按分数「取前 N」（**不去重**：同名照收，只统计）。取代了原来的「精确同名 + 上游别名回退」 |
 | `server/modules/agg/api.js` | **聚合层的进程内调用面**：`loadSites()`、`detail()`（**内部含搜索**，可用 site+vodId 走快路径）、`play()`（→ 播放地址，PlaybackInfo 会用）。路由层（`/api/agg/detail` / `/play`）与 emby 层**共用这一套**；失败统一 `{ok:false, error:{code,status,message}}` |
 | 聚合层契约（[develop.md](develop.md) 的「聚合层（agg）」一节） | `/api/agg/search`、`/api/agg/detail`、`/api/agg/play` 的入参、出参与错误码 |
@@ -950,9 +1093,9 @@ docker logs -t media-bridge-panel              # 带时间戳
 | `server/core/logbus.js` | 日志总线：`install()` 包一层 `console.log/warn/error`（**先透传 stdout，再入内存环形缓冲**）、按行拆分、单条截断 1000 字符、固定条数（默认 500，`panel.logMax` 可调）；`list()`/`clear()`/`resize()`/`stats()`。**纯内存、不落盘**（长期留档交给 docker 的 json-file）。在 `server.js` 里**加载模块之前**装（见「二」） |
 | `server/modules/panel/routes.js` + `public/modules/panel/logs.js` | 日志页的数据口与页面：`GET /api/logs?since=&limit=`（增量）、`DELETE /api/logs`（清空）；页面「面板设置 → 日志」带暂停/清空/复制/级别过滤，增量轮询 + `isConnected` 守卫（见「二」） |
 | `server/modules/emby/index.js` | 模块清单：`upstream: 'agg'`、账号空壳设置（`serverName` / `serverId` / `imageKey` **已从设置里移出** —— 它们是**实例属性**，落在 `data/emby/instances.json`，见 `instance.js` 的 `identityOf`）。**`play.filter` 已搬到聚合层**（`agg.json` 的 `lineFilter`，UI 在「聚合设置 → 聚合参数」），那份校验也跟着走了；`play.mode`（随"面板代理"一起删）、`cache.*` 与元数据的老设置键都不在这里了；这里也不再需要"放行老值"的兼容校验 —— 校验里没有那个键，盘上留着也不挡保存 |
-| `server/modules/emby/instance.js` + `listener.js` | **多实例**：`instances.json` 是唯一真源（id / name / port / enabled / homePlugin / serverId / imageKey / dbFile）；`AsyncLocalStorage` 把"当前实例"贯穿到 `service.js` 与 `db.js`（不动那几千行）。`listener.js` 给每个启用实例在**它自己的端口**上挂一个 http 服务，与面板端口同一套路径归一化，但只放行客户端协议端点（面板自用端点由 `PANEL_ONLY_RE` 挡掉）。**面板端口反过来**：`server.js` 只放行面板自用端点 + `System/Info/Public` 垫片，其余客户端协议端点一律 404（两处名单互为对称） |
+| `server/modules/emby/instance.js` + `listener.js` | **多实例**：`instances.json` 是唯一真源（id / name / port / enabled / allowDownload / homePlugin / serverId / imageKey / dbFile）；`AsyncLocalStorage` 把"当前实例"贯穿到 `service.js` 与 `db.js`（不动那几千行）。`listener.js` 给每个启用实例在**它自己的端口**上挂一个 http 服务，与面板端口同一套路径归一化，但只放行客户端协议端点（面板自用端点由 `PANEL_ONLY_RE` 挡掉）。**面板端口反过来**：`server.js` 只放行面板自用端点 + `System/Info/Public` 垫片，其余客户端协议端点一律 404（两处名单互为对称） |
 | `server/modules/panel/index.js` | 面板层设置与钩子：`logMax`（改了就 `resize`）、**`cache.*`**（面板这边那两份缓存；`onSettingsChange` 里调 `cachedb.sweepAll()` 落实新上限）。⚠️ 元数据的老设置键已不在面板层（归元数据插件） |
-| `public/modules/emby/instances.js`（「Emby → 实例」页） | 实例列表：每行是名称 / 端口徽章 / **首页插件行内下拉**（点一下就 PATCH）/ 运行状态点（端口被占时红点 + 原因）/ 连接地址（一键复制）/ 编辑 / 删除（默认实例不给删）。编辑弹窗含名称、端口、首页插件、启用；**服务器名就是这个实例的 `name`** |
+| `public/modules/emby/instances.js`（「Emby → 实例」页） | 实例列表：每行是名称 / 端口徽章 / **首页插件行内下拉**（点一下就 PATCH）/ 运行状态点（端口被占时红点 + 原因）/ 连接地址（一键复制）/ 编辑 / 删除（默认实例不给删）。编辑弹窗含名称、端口、首页插件、搜索域、**下载（允许下载，默认勾选）**、启用；**服务器名就是这个实例的 `name`** |
 | `public/modules/emby/accounts.js`（「Emby → 账号」页） | 顶部**实例选择器**，下方账号增删改只作用于所选实例（端点 `/api/emby/instances/{iid}/accounts`）；每行带上该实例的 `UserId`（`md5(serverId\|用户名)`，服务端现算），便于对着客户端日志排查 |
 | `public/modules/panel/settings.js`（「面板设置」页） | 「设置」子项：**缓存设置**（用量 + 上限 + 清空，端点 `GET\|DELETE /api/panel/cache`）/ **站点测速**（开关与间隔）；同模块另有「备份与还原」（`renderPanelBackup`）、「安全」（改面板密码，`renderPanelSecurity`）两个子项。⚠️ **元数据设置已不在这一页**（归元数据插件自己的设置页：「插件」→ 该插件 → 「设置」） |
 | `public/modules/panel/overview.js`（「面板设置 → 概览」页） | 运行环境 + 两个整机动作：**面板重启**（`POST /api/panel/restart`，受托管时写 `.restart` 让引导脚本拉起同一版本；非托管时退出前自拉起，见 [ADR-0038](adr/0038-self-relaunch-when-unmanaged.md)。容器不动）与**退出登录** |
@@ -964,328 +1107,37 @@ docker logs -t media-bridge-panel              # 带时间戳
 
 逐条对照「面板实现」与「真机返回」。每条记：**真机样本 / 面板响应 / 差异 / 结论**（一致 · 已修 · 不能模拟）。**改代码前先在此登记差异，待确认后再动**。
 
-**两台真机**（本机私有环境，**不入库**）：地址、端口、账号、口令、版本只写在**本机** `data/真机环境.md`（`data/` 已 gitignore）。本文以下只用**代号**指代：予初Emby / OkEmby。
+**四台真机**（本机私有环境，**不入库**）：地址、端口、账号、口令、版本只写在**本机** `data/真机环境.md`（`data/` 已 gitignore）。本文以下只用**代号**指代：予初Emby / OkEmby / nyamedia / itsmygo。
 
-### #1 `GET /api/emby/System/Info/Public`（握手）
+**探针约定**（#18 起）：4 台**并行**打、单请求 8s 超时、超时即跳过该台，**有一台成功就继续**（网络不稳，不再逐台串行死等）。客户端身份照 `proxypin_itsmygotv` HAR 里的 **Rex 客户端**模拟：`X-Emby-Authorization: MediaBrowser Token="…", Emby UserId="…", Client="Rex", Device="iPhone17,1", Version="1.0.0"` 并另带 `X-Emby-Token`，`User-Agent: Rex-Standard/1.0.0`。
 
-**真机样本**（两台实测字段集一致）
+itsmygo 是 **openresty + Go 的仿 Emby 服务**（响应头 `X-Itsmygo-Backend: go`），端点挂在 **`/emby` 基路径**下，条目 `Id` 是标准 Guid。予初Emby / OkEmby / nyamedia **网络时通时断**（多轮出现整台超时）；itsmygo 稳定。取不到样本的行**留待补测**、不编数据。
 
-```json
-// OkEmby    4.9.1.90
-{"LocalAddresses":[],"RemoteAddresses":[],"ServerName":"OkEmby","Version":"4.9.1.90","Id":"…"}
-// 予初Emby   4.9.5.0
-{"LocalAddresses":[],"RemoteAddresses":[],"ServerName":"予初Emby","Version":"4.9.5.0","Id":"…"}
-```
 
-**差异与处理**（方案 A：以真机样本为准）
+### 索引
 
-| 字段 | 含义 / 客户端用途 | 真机 | 面板（改前） | 处理 |
-|---|---|---|---|---|
-| `LocalAddresses` | 局域网直连地址列表 | `[]` | 无 | **补空数组** |
-| `RemoteAddresses` | 外网直连地址列表 | `[]` | 无 | **补空数组** |
-| `ServerName` | 服务器显示名 | 服务器名 | 实例名（默认「媒体桥 Emby」） | 保留（各实例可配，非差异） |
-| `Version` | 版本号，客户端做能力探测 | `4.9.x` | `4.8.0.0`（写死） | 保留（有意报 4.8 兼容；本次未改） |
-| `Id` | 服务器唯一标识（须稳定） | 32 位 hex | 16 位 hex | 保留（不透明标识，客户端只当字符串；本次未改） |
-| `LocalAddress` | 旧版单数内网地址 | 无 | `http://<Host>` | **删** |
-| `ProductName` | 产品名，确认是 Emby | 无 | `Emby Server` | **删** |
-| `OperatingSystem` | 服务器操作系统 | 无 | `darwin` | **删** |
-| `StartupWizardCompleted` | 是否完成安装向导 | 无 | `true` | **删** |
+一条端点一份，明细在 [emby-realdevice/](emby-realdevice/)（本仓库，**改哪条读哪条**，别整读）。
 
-**状态：未复测**（改动已落码，待批量复测后回填结果）。
-**结论**：已按方案 A 修改（[service.js](../server/modules/emby/service.js) 的 `publicInfo`）—— 补 `LocalAddresses` / `RemoteAddresses`（空数组），删 `LocalAddress` / `ProductName` / `OperatingSystem` / `StartupWizardCompleted`；返回字段集与真机样本一致（5 字段）。`Version` / `Id` 维持现状。
-**不能模拟**：无。
-**未决**：真机样本比原版 Emby 少了上述 4 个字段（疑似被裁剪的中转/桥），本条取舍即由此而来；若后续确认客户端依赖 `StartupWizardCompleted`，再回补并在此注明。
-
-### #2 `POST /api/emby/Users/AuthenticateByName`（登录）
-
-**真机样本**（OkEmby 4.9.1.90，200 成功体，节选关键结构）
-
-```jsonc
-{
-  "User": {
-    "Name": "…", "ServerId": "…", "Prefix": "d", "Id": "…",
-    "HasPassword": true, "HasConfiguredPassword": true,
-    "HasConfiguredEasyPassword": false, "EnableAutoLogin": false,
-    "LastLoginDate": "…", "LastActivityDate": "…",
-    "PrimaryImageTag": "…", "PrimaryImageAspectRatio": 1,
-    "DateCreated": "…",
-    "Configuration": { /* 含 SubtitleMode:"Smart"、HidePlayedInMoreLikeThis、HidePlayedInSuggestions、ResumeRewindSeconds、IntroSkipMode 等 */ },
-    "Policy": { /* 44 键：IsAdministrator:false、IsHidden:true、EnableContentDownloading:false、EnableAudioPlaybackTranscoding:false、EnableVideoPlaybackTranscoding:false、EnablePlaybackRemuxing:false … */ }
-  },
-  "SessionInfo": { /* 20 键：含 PlayState/AdditionalUsers/RemoteEndPoint/Protocol/PlayableMediaTypes/PlaylistIndex/PlaylistLength/ServerId/UserPrimaryImageTag/InternalDeviceId/SupportedCommands/SupportsRemoteControl … */ },
-  "AccessToken": "…",
-  "ServerId": "…"
-}
-```
-
-**登录失败 / 缺头**
-
-```text
-// 密码错：401，Body 为纯文本
-无效用户名或密码。请重试。
-// 缺 X-Emby-Authorization：400，Body 为纯文本
-Value cannot be null. (Parameter 'appName')
-```
-
-**差异与处理**（每字段含「含义 / 客户端用途」）
-
-顶层结构
-
-| 字段 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| `User` | 登录用户对象（UserDto），客户端缓存的"我是谁" | 有 | 有 | 一致，保留 |
-| `SessionInfo` | 本次会话对象，客户端登记自身会话/遥控能力 | 有（20 键） | 有（8 键）→ **20 键** | **已改**（补全至真机 20 键，见下 2-1；**未复测**） |
-| `AccessToken` | 后续请求的会话凭据 | 32 hex | 32 hex | 一致，保留 |
-| `ServerId` | 服务器唯一标识 | 32 hex | 16 hex | 保留（与 #1 同源，不透明标识） |
-
-`User`（UserDto）字段
-
-| 字段 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| `Prefix` | 用户名首字母，用于无头像时的占位/排序 | 有（`D`） | 缺 → **有** | **已补**（`prefixOf`，首字母大写；**未复测**） |
-| `DateCreated` | 账号创建时间，客户端"加入日期"展示 | 有 | 缺 → **有** | **已补**（取账号 `created_at`，缺省 now；**未复测**） |
-| `PrimaryImageTag` | 头像图片版本戳；**有值客户端才会去拉** `/Users/{id}/Images/Primary` | 有 | 曾补（`cpyav.<userId>`）→ 撤 → **已换品牌图标 tag 接回** | **已给**（= `assets/default-avatar.png` 内容 md5，32 位 hex；**未复测**；见下 2-5） |
-| `PrimaryImageAspectRatio` | 头像宽高比，客户端排版占位用 | 有 | 曾补（`1`）→ 撤 → **已接回** | **已给**（`1`，图标为正方形；**未复测**；见 2-5） |
-| `HasConfiguredEasyPassword` | 是否设置过"简易密码/PIN" | 无 | 有（`false`） | **已删**（真机无此键） |
-| `EnableAutoLogin` | 是否允许客户端免密自动登录 | 无 | 有（`false`） | **已删**（真机无此键） |
-
-`User.Configuration` 字段
-
-| 字段 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| `SubtitleMode` | 字幕默认模式（Smart=智能选轨） | `Smart` | `Default` → `Smart` | **已改**（对齐真机；**未复测**） |
-| `HidePlayedInMoreLikeThis` | "更多同类"里隐藏已看 | 有 | 缺 → **有** | **已补**（**未复测**） |
-| `HidePlayedInSuggestions` | "推荐"里隐藏已看 | 有 | 缺 → **有** | **已补**（**未复测**） |
-| `ResumeRewindSeconds` | 「继续播放」回退秒数 | 有 | 缺 → **有** | **已补**（`0`；**未复测**） |
-| `IntroSkipMode` | 片头跳过模式 | 有 | 缺 → **有** | **已补**（`ShowButton`；**未复测**） |
-| `SubtitleLanguagePreference` | 首选字幕语言 | 无 | 有 | **已删**（真机无） |
-| `GroupedFolders` | 文件夹分组展示开关 | 无 | 有 | **已删**（真机无） |
-| `DisplayCollectionsView` | 是否显示"合集"视图 | 无 | 有 | **已删**（真机无） |
-
-`User.Policy` 字段（账号权限，客户端据此开关按钮/提示）
-
-| 字段 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| （整组） | 共 **44 键**权限位（下载/转码/LiveTV/码率上限/内容分级等） | 44 键 | 13 键 → **44 键** | **已补**（补全至真机 44 键，见下 2-2；**未复测**） |
-| `IsAdministrator` | 是否管理员（决定能否进管理页） | `false` | `true` → `false` | **已改**（对齐真机；**未复测**） |
-| `IsHidden` | 是否在登录页隐藏该用户 | `true` | `false` → `true` | **已改**（对齐真机；**未复测**） |
-| `EnableContentDownloading` | 允许下载 | `false` | `true` → `false` | **已改**（对齐真机；**未复测**） |
-| `EnableAudioPlaybackTranscoding` | 允许音频转码 | `false` | `true` → `false` | **已改**（对齐真机；**未复测**） |
-| `EnableVideoPlaybackTranscoding` | 允许视频转码 | `false` | `true` → `false` | **已改**（对齐真机；**未复测**） |
-| `EnablePlaybackRemuxing` | 允许播放重封装（remux） | `false` | `true` → `false` | **已改**（对齐真机；**未复测**） |
-
-`SessionInfo` 字段（会话对象）
-
-| 字段 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| `PlayState` | 当前播放态（位置/是否暂停等） | 有 | 缺 → **有** | **已补**（见下 2-1；**未复测**） |
-| `AdditionalUsers` | 同会话附加用户 | 有 | 缺 → **有** | **已补**（`[]`；**未复测**） |
-| `RemoteEndPoint` | 客户端来源 IP | 有 | 缺 → **有** | **已补**（取 `X-Forwarded-For` 首段，回落 socket 地址；**未复测**） |
-| `Protocol` | 连接协议（Http/Https） | 有 | 缺 → **有** | **已补**（`HTTP/<req.httpVersion>`；**未复测**） |
-| `PlayableMediaTypes` | 本会话可播媒体类型 | 有 | 缺 → **有** | **已补**（`[]`；**未复测**） |
-| `PlaylistIndex` / `PlaylistLength` | 播放列表进度 | 有 | 缺 → **有** | **已补**（`0`/`0`；**未复测**） |
-| `ServerId` | 服务器标识（会话内冗余） | 有 | 缺 → **有** | **已补**；**未复测** |
-| `UserPrimaryImageTag` | 用户头像版本戳（会话内冗余） | 有 | 曾补（`cpyav.<userId>`）→ 撤 → **已接回** | **已给**（= 品牌图标内容 md5，与 UserDto.PrimaryImageTag 同源；**未复测**；见 2-5） |
-| `InternalDeviceId` | 内部设备记录 id | 有 | 缺 → **有** | **已补**（`md5(DeviceId)` 前 4 字节取模 1000000；**未复测**） |
-| `SupportedCommands` | 支持的遥控指令集 | 有 | 缺 → **有** | **已补**（`[]`；**未复测**） |
-| `SupportsRemoteControl` | 是否支持被遥控 | 有 | 缺 → **有** | **已补**（`false`；**未复测**） |
-| `Id` / `UserId` / `UserName` / `Client` / `DeviceName` / `DeviceId` / `ApplicationVersion` / `LastActivityDate` | 会话基础字段 | 有 | 有 | 一致，保留 |
-
-错误分支
-
-| 场景 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| 密码错 | 客户端读 Body 弹提示 | **401 纯文本** `无效用户名或密码。请重试。` | **401 JSON** → **401 纯文本** | **已改**（对齐真机文案；**未复测**） |
-| 无账号 | 面板独有（真机是配置库，无此态） | — | 401 JSON `面板还没有 Emby 账号…` | 保留（面板自用，可模拟不了） |
-| 缺 `X-Emby-Authorization` | 真机据此取 appName，缺则报错 | **400 纯文本** | 容错放行 → **400 纯文本** | **已改**（`Value cannot be null. (Parameter 'appName')`；**未复测**） |
-
-**状态：未复测**（改动已全部落码，待批量复测后回填结果）。
-**不能模拟**：无账号时的 401 JSON 属面板自造态，真机不存在此分支（不影响真实客户端）。
-**已按用户确认改（5 点，全部取推荐项）**：
-- 2-1 `SessionInfo` 补齐至真机 **20 键**（含 `PlayState`/`SupportedCommands`/`SupportsRemoteControl` 等）
-- 2-2 `Policy` 补全至真机 **44 键**，`IsAdministrator`→`false`、`IsHidden`→`true`、下载/转码/remux→`false`
-- 2-3 `Configuration` 补 4 键、删 3 键、`SubtitleMode`→`Smart`
-- 2-4 登录失败改 **401 纯文本**、缺头改 **400 纯文本**
-- 2-5 `User` 补 `Prefix`/`DateCreated`；头像相关（`PrimaryImageTag`/`PrimaryImageAspectRatio` + `Users/{UserId}/Images/{type}` 端点）走过一段弯路：曾随 1.8.3 用**按 userId 派生的纯色 PNG** 补上 → 2026-10-06 用户认为自动生成的纯色头像不要，先撤掉（整套 PNG 生成代码留 git 61b3d0d）→ 同日用户提供品牌图标，**已接回**：所有用户共用 `assets/default-avatar.png`（606×606 透明底），两个 tag 都补上（`PrimaryImageTag` = **文件内容 md5**，形状与真机 32 位 hex 一致，换文件即失效缓存），端点回 **200 `image/png`**（文件缺失才 404）。**未复测**
-
-### #3 `GET /api/emby/Users/{UserId}`（取用户资料）
-
-**真机样本**（OkEmby 4.9.1.90，200）—— 返回 **UserDto 本体**（不包一层），与登录响应里的 `User` **逐字段完全一致**：
-
-```json
-{"Name":"…","ServerId":"…","Prefix":"D","DateCreated":"2026-05-12T14:26:01.4121026Z","Id":"…","PrimaryImageTag":"…","HasPassword":true,"HasConfiguredPassword":true,"LastLoginDate":"2026-10-05T15:08:03.7814616Z","LastActivityDate":"2026-10-05T15:08:08.2634278Z","Configuration":{…15 键…},"Policy":{…44 键…},"PrimaryImageAspectRatio":1}
-```
-
-**逐字段对照**（面板 `getUser` → `buildUser`，与登录共用同一组装函数）
-
-| 字段 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| `Name` | 用户名 | 有 | 有 | 一致 |
-| `ServerId` | 服务器标识 | 有 | 有 | 一致 |
-| `Prefix` | 用户名首字母（无头像时占位/排序） | 有 | 有 | 一致（#2 已补） |
-| `DateCreated` | 账号创建时间，客户端"加入日期"展示 | 有 | 有 | 一致（#2 已补） |
-| `Id` | 用户 Id | 有 | 有 | 一致 |
-| `PrimaryImageTag` | 头像版本戳；有值客户端才去拉头像 | 有 | **有** | 已给（品牌图标内容 md5，与 `UserDto` 同源；**未复测**；见 #2 的 2-5） |
-| `HasPassword` | 是否设了密码 | 有 | 有 | 一致 |
-| `HasConfiguredPassword` | 是否配置过密码 | 有 | 有 | 一致 |
-| `LastLoginDate` | 上次登录时间 | 有 | 有 | 一致 |
-| `LastActivityDate` | 最后活动时间（真机每次请求刷新） | 有 | 有 | 一致 |
-| `Configuration` | 用户偏好（15 键） | 有 | 有 | 一致（#2 已对齐） |
-| `Policy` | 账号权限（44 键） | 有 | 有 | 一致（#2 已对齐） |
-| `PrimaryImageAspectRatio` | 头像宽高比 | 有 | **有** | 已给（`1`，图标为正方形；**未复测**；见 #2 的 2-5） |
-
-> **字段级差异**：本条与登录共用 `buildUser`，#2 对齐后字段自动一致（含 2026-10-06 接回的头像 2 键）。
-
-**错误分支**
-
-| 场景 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| 无 token / token 无效 | 客户端收到 401 即回登录页 | **401 纯文本** `Access token is invalid or expired.` | **401 纯文本**（`authorize` 已改） | **已改**（未复测） |
-| UserId 不存在 | 手动拼错 / 用户被删 | **404 纯文本** `找不到请求的用户。最近可能已从服务器中删除了。` | **404 纯文本**（`getUser` 已改） | **已改**（未复测） |
-| 账号表为空 | 面板独有（真机是配置库，不存在空态） | — | 401 JSON `{error:'面板还没有 Emby 账号'}` | 保留（面板自造态） |
-
-**不能模拟**：账号表为空时的 401 JSON（真机无此分支）。
-
-**已按用户确认改（2 点）**：
-- 3-1 **已改**：`service.authorize` 的 401 由 JSON 改为纯文本 `Access token is invalid or expired.`。`authorize` 是全部受保护端点共用的守卫，真机对任意端点都是这同一句；`routes.js` 新增 `sendResult(res, out)`（`out.text` 有则发 `text/plain`，否则发 JSON），13 处 `authorize` 拒绝发送点已全部改走它；`AuthenticateByName` 发送点也一并收敛到 `sendResult`。
-- 3-2 **已改**：`service.getUser` 的 404 由 JSON 改为纯文本 `找不到请求的用户。最近可能已从服务器中删除了。`。
-
-**遗留（本次未改，留待对到 #4+ 端点时一并处理）**：`service.assertUser`（供 Views / Items / Seasons / Episodes / PlaybackInfo / Stream / Download / Similar 等 9 处使用）的同类 404 目前**仍是 JSON** `{error:'用户不存在'}`，与真机不一致；本轮只改 `getUser` 自身这一条，避免一次牵动 9 个 service 函数。
-
-**状态：未复测**（`node --check` 通过；本地直调 `service.authorize` → `401 text`、`service.getUser('nonexistent')` → `404 text` 均符合预期；面板端到端待批量复测）。
-
-### #4 `GET /api/emby/Users/{UserId}/Views`（媒体库列表）
-
-**真机样本**（OkEmby 4.9.1.90，2026-10-06 实测，200，12 个库；予初Emby 当日不可达，补测后回填）
-
-顶层形状 `{Items: [...], TotalRecordCount: 12}` —— 与面板一致。单个库条目（全部 12 个的键并集 = **28 键**）：
-
-```jsonc
-{
-  "Name": "动画电影",                    // 库名
-  "ServerId": "…",                       // 服务器 Id
-  "Id": "4416",                          // 库 Id（真机是数字；面板是 catpawhome_…）
-  "Guid": "c825336c…",                   // 全局唯一标识
-  "Etag": "36d39bf5…",                   // 内容指纹（缓存键；真机多个库有重复值）
-  "DateCreated": "2025-11-17T14:26:10.0000000Z",  // 建库时间
-  "DateModified": "0001-01-01T00:00:00.0000000Z", // 12/12 全是零值（从未修改）
-  "CanDelete": false, "CanDownload": false,
-  "PresentationUniqueKey": "c825336c…",  // 12/12 与 Guid 相同
-  "SortName": "动画电影", "ForcedSortName": "动画电影",
-  "ExternalUrls": [], "Taglines": [], "RemoteTrailers": [], "ProviderIds": {},
-  "IsFolder": true,
-  "ParentId": "2",                       // 12/12 全是 "2"（服务器根聚合节点）
-  "Type": "CollectionFolder",
-  "UserData": { "PlaybackPositionTicks": 0, "IsFavorite": false, "Played": false },
-  "ChildCount": 1,                       // 12/12 都有（本样本全是 1）
-  "DisplayPreferencesId": "c825336c…",   // 12/12 与 Guid 相同
-  "PrimaryImageAspectRatio": 1.7777777777777777,  // 有封面才有；无封面的库没有此键
-  "CollectionType": "movies",            // movies/tvshows/playlists/boxsets
-  "ImageTags": { "Primary": "443e2f…" }, // 无封面的库是 {}（且无 PrimaryImageAspectRatio）
-  "BackdropImageTags": [],
-  "LockedFields": [],                    // 10 个库 []；「播放列表」「合集」为 ["SortName"]
-  "LockData": false
-}
-```
-
-**逐字段对照**（面板 `getViews` → `homeViewItem`）
-
-| 字段 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| 顶层 `Items`/`TotalRecordCount` | 库列表与总数 | 有 | 有 | 一致 |
-| `Name`/`ServerId`/`Type`/`IsFolder` | 库名、服务器 Id、固定 CollectionFolder | 有 | 有 | 一致 |
-| `Id` | 库标识（客户端拿它取 `Items?ParentId=`） | 数字 `"4416"` | `catpawhome_…` | 不能模拟（不透明标识，客户端只当字符串） |
-| `Guid`/`PresentationUniqueKey`/`DisplayPreferencesId` | 缓存/去重/显示偏好键，真机三者同值 | 真 GUID | 稳定派生 32hex（三者同值，对齐） | 一致（形状与关系对齐，值不同属正常） |
-| `Etag` | 库内容指纹（缓存失效依据） | 有（真机多库重复同值） | 稳定派生 | 一致（用途对齐） |
-| `DateCreated` | 建库时间 | 真实时间 | `0001-01-01…` 零值占位 | 不能模拟（无"建库"动作；非法日期会炸客户端解析，见 service 注释） |
-| `DateModified` | 修改时间 | `0001-01-01…`（12/12） | 同零值 | 一致 |
-| `CanDelete`/`CanDownload`/`ExternalUrls`/`Taglines`/`RemoteTrailers`/`ProviderIds`/`BackdropImageTags`/`LockData` | 操作权限与空集合 | 有 | 有 | 一致 |
-| `SortName`/`ForcedSortName` | 排序名 | =库名 | =库名 | 一致 |
-| `UserData` | 播放位置/收藏/已看 | `{0,false,false}` | 同 | 一致 |
-| `CollectionType` | 库类型（客户端选图标/布局） | movies/tvshows/playlists/boxsets | 行申报，缺省 `mixed` | 一致（`mixed` 是 Emby 合法值，真机只是没用到） |
-| `ImageTags`/`PrimaryImageAspectRatio` | 封面与宽高比 | 有图才给 AR，无图 `{}` | 同逻辑 | 一致 |
-| **`ParentId`** | 父节点 Id（客户端"向上导航/取父级"用） | **12/12 = `"2"`**（根聚合节点） | **不给**（面板无此节点） | **待定夺**（见下 4-1） |
-| **`ChildCount`** | 库内直接子项数（客户端判断空库/角标） | **12/12 都有（本样本=1）** | **不给** | **待定夺**（见下 4-2） |
-| `LockedFields` | 被管理员锁定的字段 | 2 个库为 `["SortName"]` | 恒 `[]` | 不能模拟（面板无锁定概念，客户端无感知） |
-
-**错误分支**
-
-| 场景 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| 无 token / token 无效 | 全局守卫，客户端回登录页 | 401 纯文本 `Access token is invalid or expired.` | 同（#3 已改） | 一致（未复测） |
-| **有效 token + 任意/不存在 UserId** | 真机**不校验 UserId**，照常出库 | **200 全量库列表** | **200**（4-3 已放宽） | **已改**（未复测） |
-| 账号表为空 | 面板独有 | — | 401 JSON | 保留（面板自造态） |
-
-**不能模拟**：`Id` 数字形状、`DateCreated` 真实时间、`LockedFields` 锁定态、真机 `Etag` 多库同值（观察记录）。
-
-**已按用户确认改（3 点）**：
-- 4-1 **已改**：补 `ParentId: "2"`（占位值 —— 面板没有那个根聚合节点，客户端顺着取父级会 501/404，但客户端基本不这么干；字段集与真机一致）。落码：[service.js](../server/modules/emby/service.js) `homeViewItem`。
-- 4-2 **已改**：补 `ChildCount` —— **真实条数优先**：用户问"元数据能查到这个数吗"，落实为**不用问上游**：该行被客户端点开过一次后，插件申报的总条数就留在面板内存里（`home.peekRowTotal`，`remember` 时连同 items 一起存），`Views` 直接读记忆；还没被点开过的行回退**占位值 1**（不取 0：0 会被客户端当空库）。
-- 4-3 **已改**：真机对 Views 不校验 UserId（有效 token + 任意 UserId → 200）。Views 路由的 `authorize(req, params.userId)` 改为 `authorize(req)`（只验 token，不比对 userId）；`getViews` 删掉 `assertUser` 调用（这条路上它本是死代码：能过 authorize 的 token 必然对应存在的账号）——「userId 不存在 → 404」「userId 与 token 用户不符 → 401」两个分支在 Views 上消失，与真机一致。
-
-**状态：未复测**（`node --check` 通过；本地直调 `getViews('nonexistent')` → 200；面板端到端待批量复测）。
-
-### #5 `GET /api/emby/Users/{UserId}/Items`（条目列表）
-
-**真机样本**（OkEmby 4.9.1.90；予初Emby 不可达：TCP/TLS 全超时 —— 本机 DNS 解到 fake-ip 走透明代理不通，绕过代理用 DoH 查得真实 IP（172.67.184.223 / 104.21.56.113，Cloudflare）直连 443 也超时，非 DNS 问题，待服务器侧/换网络确认）
-
-**错误分支**（2026-10-06 实测）
-
-| 场景 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| 无 token（**任何分支**，含 `Filters=IsFavorite`、无参、`ParentId`、`SearchTerm`） | 全局守卫，客户端回登录页 | **401 纯文本** `Access token is invalid or expired.` | **只在"会出数据"的支路 401**；空分支（`Filters=IsFavorite`、认不出的查询）**不校验**，回 200 空 | **待定夺**（见下 5-1） |
-| **有效 token + 合法但不存在的 UserId**（32 位 hex Guid） | 真机**不校验 UserId 与 token 的匹配** | **200 照常回数据**（库内容、搜索都出） | 出数据支路上 `assertUser` → **404 JSON** | **待定夺**（见下 5-2，与 #4-3 同款） |
-| 有效 token + 非法格式 UserId（如 `WRONGID`） | 真机把 UserId 当 Guid 解析 | **500 纯文本** `Unrecognized Guid format.` | 404 JSON | 不模拟（面板 UserId 是任意字符串、无 Guid 概念；若 5-2 放宽则此分支在面板上自然消失为 200，属"比真机宽松"，客户端无感知） |
-
-**成功分支**（2026-10-06 实测）
-
-| 查询形状 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |
-|---|---|---|---|---|
-| `ParentId=<库Id>`（不递归） | 客户端点进一个库 | **子文件夹层级**：回 `Type:Folder` 的子文件夹（本样本每个库下 1 个虚拟子文件夹），**无真实条目**；真实条目要递归或再下钻两层（库→子文件夹→影片文件夹→条目） | **平铺真实条目**（首页行即列表） | 保留（面板刻意平铺 —— 行就是内容本身，没有目录树可下钻；客户端实测正常消费） |
-| `ParentId=<库Id>&Recursive=true&IncludeItemTypes=Movie` | 库内全部电影 | 真实条目；**无 `Fields` 时只回 10 键列表级字段**：`Name/ServerId/Id/RunTimeTicks/IsFolder/Type/UserData/ImageTags/BackdropImageTags/MediaType`（`Overview/Genres/ProviderIds/ProductionYear` 等要 `Fields=` 显式要才给） | **一律回全量 ~25 键**（`baseItem` 恒含 `Overview/Genres/ProviderIds/ExternalUrls/…`） | 保留（超集无害：多给字段客户端不报错；面板无 `Fields` 裁剪机制，加了反而可能饿着某些客户端） |
-| 推荐查询（无 `ParentId` + `SortBy=IsFavoriteOrLiked,Random&Recursive=true`） | Rex 等客户端首页第一发"猜你喜欢" | 回 **Episode 级**条目（`Type:Episode`，带 `SeriesId/SeasonId`），`TotalRecordCount=111786` | 路由到插件声明 `feed:'random'` 的行，回行内条目（Movie/Series 级） | 保留（各为其主：真机从全库随机抽，面板由首页插件决定喂什么；客户端只消费列表形状） |
-| `Filters=IsFavorite&Recursive=true` | 收藏夹 | `Total=0` 空（该账号无收藏） | 空（无收藏数据） | 一致 |
-| `Filters=IsPlayed&Recursive=true` | 已看列表 | 真数据（`Total=20`，`Type:Series` 等） | 真数据（`playback` 表） | 一致 |
-| `SearchTerm=斗破&IncludeItemTypes=Movie,Series` | 按名字搜 | 命中 2 条真实条目（`Series 斗破苍穹`、`Movie 斗破乱世情`），**`TotalRecordCount=0`（疑似真机 bug：count 与 items 不一致）** | 命中条目，`TotalRecordCount` 与条数一致 | 一致（不回真机那个 0 —— 面板行为更正确，客户端拿 `TotalRecordCount` 做分页/计数，回 0 反而坑） |
-| `SearchTerm=x`（无命中） | 搜索无结果 | **回 12 个根库 CollectionFolder**（把无命中当无过滤根查询，疑似该中转服务的怪癖） | `Items:[]` 空 | 保留（回空是正确语义；客户端拿到 12 个库只会困惑） |
-| `AnyProviderIdEquals=imdb.tt1234567`（编造 id） | 按外部 id 定位条目 | **忽略该参数**，回 12 个根库 CollectionFolder | 认 `{域}.{编号}` → 回 1 条带面板 Id 的条目（Rex 客户端实测依赖，见「五」） | 保留（面板是功能增强：真机客户端不走这条路所以它不实现；Rex 走，断它则 Rex 详情链断） |
-
-**真机条目字段补充观察**：`Filters=IsPlayed` 与推荐查询回的条目带 `Guid`、`ParentLogoItemId`、`ParentBackdropItemId`、`SeriesPrimaryImageTag` 等（随 `Type` 与 `Fields` 浮动）；`UserData` 恒为 `{PlaybackPositionTicks, PlayCount(部分分支缺), IsFavorite, Played}` —— 面板 `emptyUserData()` 同此四键，一致。
-
-**不能模拟**：真机的目录树结构（库→子文件夹→影片文件夹）、`TotalRecordCount=111786` 量级的真实全库计数、`Guid` 字段（面板 Id 非 Guid 形状）、真机搜索结果 `TotalRecordCount=0` 那个 bug（不模拟，见上）。
-
-**已按用户确认改（2 点）**：
-- 5-1 **已改**：无 token **一律 401**（对齐真机，不再分"回空/出数据"支路）—— Items 路由的守卫从 `if (itemsWillReturnData(query)) authorize(…)` 改为无条件 `authorize(req)`（401 纯文本形状 #3 已有）。`itemsWillReturnData` 判据函数只剩 `Items/Latest` 路由在用（该端点留待后续对照）。用户附注：「收藏」后续会实现，届时本就要校验，口径不冲突。
-- 5-2 **已改**：UserId 校验放宽（与 #4-3 同一把尺子）—— Items 路由 `authorize(req, params.userId)` → `authorize(req)`（只验 token）；`getItems` 删掉 `assertUser` 并改收 `req`（`Filters=IsPlayed` 分支的账号认定从 `resolveAccountById(UserId)` 换成 `accountIdFor(req, …)`：**token 优先**、UserId 兜底，与 NextUp 同款）；`getSearchItems` 的 `assertUser` 一并删（搜索是出数据支路，路由层已验 token）。「UserId 不存在 → 404」分支在 Items 上消失，与真机一致（真机 500 `Unrecognized Guid format.` 那个分支不模拟，面板上自然成为 200）。
-
-**状态：未复测**（5-1 / 5-2 已落码：`node --check` 通过；面板端到端待批量复测）。
-
-### #6 `GET /api/emby/Users/{UserId}/Items/Latest`（最新条目）
-
-**真机样本**（OkEmby 4.9.1.90；予初Emby 仍不可达）
-
-**错误分支**（2026-10-06 实测，与 #5 完全同款）
-
-| 场景 | 真机 | 面板 | 处理 |
+| # | 端点 | 状态 | 明细 |
 |---|---|---|---|
-| 无 token（**任何形状**：带/不带 `ParentId`、无参） | **401 纯文本** `Access token is invalid or expired.` | 只在"会出数据"支路（带本面板库 `ParentId`）401；不带 `ParentId` 回 200 空 | **待定夺**（6-1，与 5-1 同款） |
-| 有效 token + 合法但不存在的 UserId | **200 照常回数据**（`ParentId=4416&Limit=1` → 1 条） | `assertUser` → 404 JSON | **待定夺**（6-2，与 5-2 同款） |
-
-**成功分支**（2026-10-06 实测）
-
-| 查询形状 | 真机 | 面板 | 处理 |
-|---|---|---|---|
-| `ParentId=<库Id>` | **裸数组**真实条目（movies 库直接给 `Movie`，tvshows 库给 `Series` —— 与 `Items` 不递归给子文件夹**不同**，Latest 不绕目录层）；无 `Fields` 时 **10 键**列表字段（同 #5：`Name/ServerId/Id/RunTimeTicks/IsFolder/Type/UserData/ImageTags/BackdropImageTags/MediaType`） | **裸数组**插件行真实条目（Movie/Series，平铺），全量 ~25 键 | 一致（字段超集保留，理由同 #5） |
-| `Limit` 缺省 | **20**（不带 ParentId 实测正好 20 条） | **20**（`LATEST_DEFAULT_LIMIT`） | 一致 |
-| `StartIndex` | 生效（`Limit=2&StartIndex=1` → 跳过 1 条、回 1 条） | 原样透传模块 | 一致 |
-| **不带 `ParentId`** | **跨库 20 条**（全局最新，11 键：条目带 `Status`/`AirDays` 等） | **空数组** | **保留**（面板无跨库索引：凑它要把每个插件行都跑一遍 = N 次上游，拿代价换答不准的答案，service.getLatest 注释已写；实测客户端 VidHub 是**逐库打**，不发无 ParentId 形状） |
-
-**不能模拟**：真机"最新"= 文件入库时间排序（面板没有片库/文件，行返回的顺序即"最新"，有意如此）；不带 `ParentId` 的跨库聚合。
-
-**已按用户确认改（2 点，均同 #5 口径）**：
-- 6-1 **已改**：Latest 守卫改无条件 `authorize(req)`（无 token 一律 401，含不带 `ParentId` 的空分支）。
-- 6-2 **已改**：UserId 放宽 —— 路由 `authorize(req, params.userId)` → `authorize(req)`；`getLatest` 删 `assertUser` 且签名收敛为只收 `query`（本端点不读用户私有数据，`applyUserData` 已自带 token 兜底）。
-- **顺带清理**：随 5-1/6-1 失去全部调用方的 `itemsWillReturnData()` 与 `searchProviderId()` 已删（死代码），相关注释同步；Studios 端点仍保持 token 豁免（它永远回空，注释已注明口径分叉）。
-
-**状态：未复测**（6-1 / 6-2 已落码：`node tools/check-syntax.js` 通过；面板端到端待批量复测）。
-
+| 1 | `GET /api/emby/System/Info/Public`（握手） | 未复测 | [#1](emby-realdevice/01-system-info-public.md) |
+| 2 | `POST /api/emby/Users/AuthenticateByName`（登录） | 未复测 | [#2](emby-realdevice/02-users-authenticatebyname.md) |
+| 3 | `GET /api/emby/Users/{UserId}`（取用户资料） | 未复测 | [#3](emby-realdevice/03-users-userid.md) |
+| 4 | `GET /api/emby/Users/{UserId}/Views`（媒体库列表） | 未复测 | [#4](emby-realdevice/04-users-userid-views.md) |
+| 5 | `GET /api/emby/Users/{UserId}/Items`（条目列表） | 面板端已验（5-4 裸列表查询已按予初Emby 实测改正为回库列表；余量真机复测待做） | [#5](emby-realdevice/05-users-userid-items.md) |
+| 6 | `GET /api/emby/Users/{UserId}/Items/Latest`（最新条目） | 未复测 | [#6](emby-realdevice/06-users-userid-items-latest.md) |
+| 7 | `GET /api/emby/Shows/{Id}/Seasons`（剧的季列表） | 已落码（未复测） | [#7](emby-realdevice/07-shows-seasons.md) |
+| 8 | `GET /api/emby/Shows/{Id}/Episodes`（剧 / 季的分集列表） | 已落码（未复测）；无开放差异 | [#8](emby-realdevice/08-shows-episodes.md) |
+| 9 | `GET /api/emby/Users/{UserId}`（取用户资料 / `UserDto` 本体） | 维持现状（未改代码） | [#9](emby-realdevice/09-users-userid-dto.md) |
+| 10 | `GET /api/emby/Users/{UserId}/Items/{ItemId}`（条目详情 / `BaseItemDto` 本体） | 已落码（未复测） | [#10](emby-realdevice/10-items-itemid-detail.md) |
+| 11 | `POST /api/emby/Items/{ItemId}/PlaybackInfo`（播放信息 / `PlaybackInfoResult`） | 已落码（未复测） | [#11](emby-realdevice/11-items-playbackinfo.md) |
+| 12 | 直连拉流（`GET /api/emby/videos/{ItemId}/{file}` · `Items/{ItemId}/Stream/{token}` · `Items/{ItemId}/Download`） | 已落码（未复测） | [#12](emby-realdevice/12-direct-stream.md) |
+| 13 | `GET /api/emby/Users/{UserId}/Items/Resume`（继续观看） | 已落码（未复测） | [#13](emby-realdevice/13-users-userid-items-resume.md) |
+| 14 | `GET /api/emby/Studios`（工作室清单） | 已落码（未复测） | [#14](emby-realdevice/14-studios.md) |
+| 15 | `GET /api/emby/Shows/NextUp`（接下来看） | 已落码（未复测） | [#15](emby-realdevice/15-shows-nextup.md) |
+| 16 | `GET /api/emby/Items/Counts`（条目计数） | 已落码（未复测） | [#16](emby-realdevice/16-items-counts.md) |
+| 17 | `GET /api/emby/Items/{ItemId}/Similar`（相似推荐） | 已落码（未复测） | [#17](emby-realdevice/17-items-similar.md) |
+| 18 | `GET /api/emby/Items/{ItemId}/Images/{type}[/{index}]`（条目图片） | 维持豁免（有意偏离 / 取 404） | [#18](emby-realdevice/18-items-images.md) |
+| 19 | `GET /api/emby/System/Ping`（连通性探针） | 已落码（未复测） | [#19](emby-realdevice/19-system-ping.md) |
+| 20 | `GET /api/emby/System/Info`（带 token 的完整服务器信息） | 已落码（未复测） | [#20](emby-realdevice/20-system-info.md) |
+| 21 | `POST\|DELETE /api/emby/Users/{UserId}/FavoriteItems/{ItemId}`（收藏 / 取消收藏）+ `Items?Filters=IsFavorite`（收藏列表） | 已落码（未复测） | [#21](emby-realdevice/21-favorite-items.md) |

@@ -281,7 +281,7 @@ function relayPlaylist(text, base, { origin, headers, path, over }) {
  * 播放器发的多半是开放式（或干脆不带 Range），单连接原样透传正好撞在限速那一档上。
  * 切块并发不是为了"多开管子刷流量"，而是为了**让每一发都变成有界 Range**。
  */
-const RELAY_DEFAULTS = { threads: 16, chunkKB: 512, timeout: 15000, retries: 2 };
+const RELAY_DEFAULTS = { threads: 16, chunkKB: 512, timeout: 15000 };
 /** 上限只防"参数填错把面板与上游打爆" */
 const RELAY_MAX_THREADS = 32;
 const RELAY_MIN_CHUNK_KB = 64;
@@ -292,6 +292,17 @@ const RELAY_PROBE_BYTES = 1024;
  *  （探测完读几百 KB 就 seek，大块全在飞浪费带宽，还拖慢首字节） */
 const RELAY_HEAD_SMALL_COUNT = 4;
 const RELAY_HEAD_SMALL_BYTES = 256 * 1024;
+/** **慢判死**：一块从发起到数据读满的硬上限（对齐 media-bridge-relay 的 `CHUNK_TIMEOUT_MS`）。
+ *  上游某块"慢但不挂"时，不再让按序吐块的那一处一直等它；到点就判这一块失败、走重试，
+ *  别把后面所有块一起拖死。头部块用更短上限，卡住就尽快换路。 */
+const RELAY_CHUNK_TIMEOUT_MS = 30000;
+const RELAY_HEAD_CHUNK_TIMEOUT_MS = 10000;
+/** **头部对冲**：前几块各发 2 路取先成功者（对齐 media-bridge-relay 的 `HEAD_HEDGE`），
+ *  治起播被一过性拒连卡死 —— 起播 TTFB 就在这几块上。 */
+const RELAY_HEAD_HEDGE = 2;
+/** 取一块的重试节奏（对齐 media-bridge-relay：3 发，间隔 200/500ms） */
+const RELAY_CHUNK_ATTEMPTS = 3;
+const RELAY_CHUNK_RETRY_DELAYS = [200, 500];
 
 /**
  * 搬运参数：**外部给的 > 面板设置 > 默认**。
@@ -319,7 +330,6 @@ function relayParams(over) {
     threads: clamp(pick(o.threads, s.threads, RELAY_DEFAULTS.threads), 1, RELAY_MAX_THREADS, RELAY_DEFAULTS.threads),
     chunkKB: clamp(pick(o.chunkKB, s.chunkKB, RELAY_DEFAULTS.chunkKB), RELAY_MIN_CHUNK_KB, RELAY_MAX_CHUNK_KB, RELAY_DEFAULTS.chunkKB),
     timeout: RELAY_DEFAULTS.timeout,
-    retries: RELAY_DEFAULTS.retries,
   };
 }
 
@@ -418,37 +428,113 @@ async function probeRange(url, headers) {
   }
 }
 
-/** 取一块有界 Range，失败**退避重试**；客户端已断开就立刻放弃 */
-async function fetchChunk(url, headers, start, end, signal, timeout, retries) {
-  let last = null;
-  for (let i = 0; i <= retries; i += 1) {
+/**
+ * 取一块有界 Range，**不再抛错**，失败一律回 `{ error, status? }`（对齐 media-bridge-relay 的结果形状，
+ * 调用方按"这一块失败"处理，而不是让一个异常掀翻整条流）。
+ * 重试口径与 media-bridge-relay 一致：3 发、间隔 200/500ms；429/5xx 值得多试一发，
+ * 其余 4xx 再确认一发就走，别对 404/403 白重试。
+ */
+async function fetchChunk(url, headers, start, end, signal, timeout, readTimeout) {
+  let last = '';
+  let status;
+  for (let attempt = 0; attempt < RELAY_CHUNK_ATTEMPTS; attempt += 1) {
+    if (attempt) await new Promise((r) => setTimeout(r, RELAY_CHUNK_RETRY_DELAYS[attempt - 1] || 500));
     if (signal.aborted) break;
-    try {
-      return await fetchOneChunk(url, headers, start, end, signal, timeout);
-    } catch (e) {
-      last = e;
-      if (signal.aborted) break;
-      if (i < retries) await new Promise((r) => setTimeout(r, 300));
-    }
+    const got = await fetchOneChunk(url, headers, start, end, signal, timeout, readTimeout);
+    if (got.buf) return got;
+    last = got.error || '取块失败';
+    status = got.status;
+    /* 429 / 5xx 值得再试；其余 4xx 再试一发确认，仍不行就如实把状态带回去 */
+    if (!/^(429|5\d\d)$/.test(String(got.status)) && attempt >= 1) return got;
   }
-  throw last || new Error('客户端已断开');
+  return { error: last || '客户端已断开', status };
 }
 
-async function fetchOneChunk(url, headers, start, end, signal, timeout) {
+/**
+ * 竞速取块：并发跑多个 `fetchChunk`，**第一个成功**的胜出（对齐 media-bridge-relay 的 `firstOk`）。
+ * 全部失败 → `null`，调用方按失败处理。
+ * ⚠️ 与 Worker 的一处差异：面板这边每发都要把块读满才 resolve，"输了的"那发掐不断，
+ *    会白拉完这一块（只用在头部小块上，256KB 级，代价可接受）。
+ */
+function firstOk(promises) {
+  return new Promise((resolve) => {
+    let done = false;
+    let failed = 0;
+    const onSettle = (r) => {
+      if (done) return;
+      if (r && r.buf) {
+        done = true;
+        resolve(r);
+        return;
+      }
+      failed += 1;
+      if (failed === promises.length) {
+        done = true;
+        resolve(null);
+      }
+    };
+    for (const one of promises) one.then(onSettle, () => onSettle(null));
+  });
+}
+
+/**
+ * 取一发有界 Range。**两级超时**（对齐 media-bridge-relay）：
+ *   · `timeout` 只管连接与响应头 —— 头一到就撤掉，不再掐这一发；
+ *   · `readTimeout` 管"数据读满" —— 慢但不挂的块到点判失败、走重试，而不是无限占着在飞窗口。
+ * 非 206（上游不理会切块范围）与空块一律判失败并**掐掉响应体**，绝不把整片读进内存。
+ */
+async function fetchOneChunk(url, headers, start, end, signal, timeout, readTimeout) {
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   signal.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(url, {
-      headers: Object.assign({}, headers, { Range: `bytes=${start}-${end}` }),
-      redirect: 'follow',
-      signal: ctrl.signal,
-    });
-    if (res.status !== 206 && res.status !== 200) throw new Error(`上游 HTTP ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (!buf.length) throw new Error('上游回空块');
-    return buf;
+    let res;
+    try {
+      res = await fetch(url, {
+        headers: Object.assign({}, headers, { Range: `bytes=${start}-${end}` }),
+        redirect: 'follow',
+        signal: ctrl.signal,
+      });
+    } finally {
+      /* 头到手就不再掐连接，接下来交给 readTimeout 判"读得完读不完" */
+      clearTimeout(timer);
+    }
+    if (res.status !== 206) {
+      /* 探针已确认上游认 Range，中途回 200 属异常：**先掐再判**，免得把整片读进来 */
+      if (res.body) {
+        try {
+          await res.body.cancel();
+        } catch {
+          /* 断不干净也不影响结果 */
+        }
+      }
+      return { error: `上游 HTTP ${res.status}`, status: res.status };
+    }
+    let readTimer = null;
+    try {
+      const buf = Buffer.from(
+        await Promise.race([
+          res.arrayBuffer(),
+          new Promise((_, reject) => {
+            readTimer = setTimeout(() => reject(new Error(`chunk timeout (${readTimeout}ms)`)), readTimeout);
+          }),
+        ]),
+      );
+      if (!buf.length) return { error: '上游回空块' };
+      return { buf };
+    } catch (e) {
+      try {
+        res.body.cancel();
+      } catch {
+        /* 无所谓 */
+      }
+      return { error: String((e && e.message) || e) };
+    } finally {
+      clearTimeout(readTimer);
+    }
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
   } finally {
     clearTimeout(timer);
     signal.removeEventListener('abort', onAbort);
@@ -462,6 +548,10 @@ async function fetchOneChunk(url, headers, start, end, signal, timeout) {
  *
  * 首块自适应：探测式请求（`bytes=0-`，或无 Range 从头全量）的前 4 块用 256KB ——
  * 播放器起播常发开放式 Range 探测，读几百 KB 就 seek；小块早吐字节，起播更快、少浪费在飞数据。
+ *
+ * 慢判死 / 头部对冲 / 重试口径**对齐 media-bridge-relay**（见各 `RELAY_*` 常量注释）：
+ * 前 4 块各发 2 路竞速取先成功者；每块有硬超时（头部 10s / 普通 30s），慢块判失败走重试，
+ * 不再让按序等它的那一步无限期挂着。
  */
 async function relayChunked(req, res, { url, headers, label, probe, p }) {
   const head = String(req.method || 'GET').toUpperCase() === 'HEAD';
@@ -509,7 +599,16 @@ async function relayChunked(req, res, { url, headers, label, probe, p }) {
       const i = launched;
       launched += 1;
       const [a, b] = bounds[i];
-      const one = fetchChunk(url, headers, a, b, ctrl.signal, p.timeout, p.retries);
+      /* 头部块：更短的读满超时 + 2 路对冲；其余块单发 */
+      const isHead = i < RELAY_HEAD_SMALL_COUNT;
+      const readTimeout = isHead ? RELAY_HEAD_CHUNK_TIMEOUT_MS : RELAY_CHUNK_TIMEOUT_MS;
+      const one = isHead
+        ? firstOk(
+            Array.from({ length: RELAY_HEAD_HEDGE }, () =>
+              fetchChunk(url, headers, a, b, ctrl.signal, p.timeout, readTimeout),
+            ),
+          )
+        : fetchChunk(url, headers, a, b, ctrl.signal, p.timeout, readTimeout);
       one.catch(() => {});
       pending.set(i, one);
     }
@@ -520,9 +619,13 @@ async function relayChunked(req, res, { url, headers, label, probe, p }) {
       for (let i = 0; i < count; i += 1) {
         const one = pending.get(i);
         pending.delete(i);
-        const buf = await one;
-        bytes += buf.length;
-        yield buf;
+        const got = await one;
+        if (!got || !got.buf) {
+          /* 重试仍失败 / 超时：如实收场。客户端已断开就别再往死连接上写。 */
+          throw new Error(`第${i + 1}块取失败：${(got && got.error) || '未知'}`);
+        }
+        bytes += got.buf.length;
+        yield got.buf;
         launch(); // 吐出去一块，才补发下一块 —— 窗口恒定
       }
     } finally {

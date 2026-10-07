@@ -378,9 +378,12 @@ module.exports = {
   - 面板侧不再有 `/api/emby/home/**` 自用端点；设置与行参数在插件自带 webui 里
     （侧栏「首页」栏下点插件名，或「插件 → 管理」页那一行的「设置」按钮）。
   - 已接客户端端点：`Views`（每个启用的行 = 一个库）/ `Items?ParentId=<库Id>` /
-    `Items/Latest?ParentId=<库Id>`（VidHub 首页依赖它）/ 库封面 / **「推荐」查询**
-    （没有 `ParentId` 的 `SortBy=IsFavoriteOrLiked,…` → 路由到**声明了 `feed` 的行**，
-    用于客户端首页轮播图）；`startIndex` / `limit` **原样透传**，面板与插件层都不切片。
+    `Items/Latest?ParentId=<库Id>`（VidHub 首页依赖它）/ 库封面 / **「轮播推荐位」查询**
+    （没有 `ParentId` 的轮播推荐位 `SortBy=IsFavoriteOrLiked,…` → 路由到
+    **声明了 `feed: 'random'` 的行**）/ **「裸列表查询」**
+    （无 `ParentId` 且不递归、只带 `ExcludeItemTypes`/`StartIndex`/`Limit`/`Fields` 的查询如 Filmly 首页 →
+    **回顶层库列表**，与 `Views` 一字不差，见 [ADR-0055](adr/0055-bare-items-query-returns-views.md)）；
+    `startIndex` / `limit` **原样透传**，面板与插件层都不切片。
   - 规范见 [emby-home-plugin.md](emby-home-plugin.md)。
 
 ## 未实现

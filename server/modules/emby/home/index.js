@@ -171,6 +171,8 @@ function enabledRows() {
   const out = [];
   for (const st of homePlugins()) {
     for (const row of rowsOf(st.id)) {
+      const declared = Number(row.total);
+      const declaredEpisodes = Number(row.episodes);
       out.push({
         pluginId: st.id,
         rowId: row.id,
@@ -178,7 +180,38 @@ function enabledRows() {
         pluginName: st.name,
         /* 行自己申报的库类型（插件已按当前参数定好）；没申报就如实当混合 */
         collectionType: row.collectionType || 'mixed',
+        /* 行申报的**库总数**（可选，与 `run` 的 `total` 同口径）：客户端还没点开这个库时
+         * 也能看到真数（`service.homeViewItem` 的 `ChildCount`）。没申报 / 拿不准就是 0 ——
+         * 调用方回退占位值，别把 0 当成"库是空的"（见那条注释）。 */
+        total: Number.isFinite(declared) && declared > 0 ? declared : 0,
+        /* 行申报的**集数规模**（可选，只对剧库有意义）：供 `Items/Counts` 的 `EpisodeCount`
+         * 用（`libraryTotals`）。没申报 / 拿不准就是 0，含义同上 —— 不编。 */
+        episodes: Number.isFinite(declaredEpisodes) && declaredEpisodes > 0 ? declaredEpisodes : 0,
       });
+    }
+  }
+  return out;
+}
+
+/**
+ * 当前实例首页插件申报的**库规模**，按库类型归并（该类没有来源就是 `null`）。
+ *
+ * 行申报的 `total` 是**整个库的规模**（与 `run` 的 `total` 同口径，见 ADR-0051），所以同类型的
+ * 多行是同一份规模的重述 —— **取最大的那个**，不相加（相加等于重复计数）。`mixed` 行说不清
+ * 是电影还是剧集，**不参与**（宁可缺，不可编）。
+ *
+ * `episodes` 同理，只从**剧库**行归并（`mixed` 行不参与）：它填 `Items/Counts` 的 `EpisodeCount`。
+ *
+ * 给 `Items/Counts` 用（见 `service.getItemCounts`）。**只读快照、不触发上游**。
+ */
+function libraryTotals() {
+  const out = { movies: null, tvshows: null, episodes: null };
+  for (const r of enabledRows()) {
+    if (r.collectionType === 'movies') {
+      if (r.total > 0) out.movies = Math.max(out.movies || 0, r.total);
+    } else if (r.collectionType === 'tvshows') {
+      if (r.total > 0) out.tvshows = Math.max(out.tvshows || 0, r.total);
+      if (r.episodes > 0) out.episodes = Math.max(out.episodes || 0, r.episodes);
     }
   }
   return out;
@@ -393,6 +426,7 @@ module.exports = {
   viewId,
   parseViewId,
   enabledRows,
+  libraryTotals,
   peekRowItems,
   peekRowTotal,
   /** 首页插件原始条目 → HomeItem（output 插件 hostCall home.run 复用同一口径，勿再造一份） */

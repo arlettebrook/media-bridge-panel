@@ -374,8 +374,10 @@ function editor(t) {
 
   /* 参数与站点分**两页签**：两类东西的用法完全不同 —— 参数是"偶尔调一次的旋钮"，
    * 站点是"上百行的一张表"。堆在一页上时，站点表总把参数挤到上面很远处、两边都得滚。
-   * 页签状态放在 S.tplTab：切开时整页重画（草稿还在模块作用域里，勾过的不会丢）。 */
-  const tab = S.tplTab === 'sites' ? 'sites' : 'params';
+   * 页签状态放在 S.tplTab：切开时整页重画（草稿还在模块作用域里，勾过的不会丢）。
+   * 默认落在「选站点」：站点是这套模板的主体（上百行的那张表），进页面先看到它；
+   * 参数是偶尔调一次的旋钮，要看再切过去。 */
+  const tab = S.tplTab === 'params' ? 'params' : 'sites';
   const paramsCard = el(
     'div',
     { class: 'card' },
@@ -436,8 +438,8 @@ function editor(t) {
 
   const tabSeg = segControl(
     [
-      ['params', '填参数'],
       ['sites', '选站点'],
+      ['params', '填参数'],
     ],
     tab,
     (v) => {

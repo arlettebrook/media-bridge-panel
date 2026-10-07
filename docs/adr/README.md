@@ -55,6 +55,17 @@
 | [0045](0045-relay-chunked-concurrent.md) | 字节中继改分块并发：把开放式 Range 换成有界 Range | 已采纳（改 0042 第 3 条约束的实现） |
 | [0046](0046-plugin-multiple-types.md) | 插件多类型：一个包一个 id，types 平级 | 已采纳（已实现；迁移见 0047） |
 | [0047](0047-data-migration-gate.md) | 数据迁移框架：版本门禁 + 冲突处置向导 + 提交点续跑 | 已采纳（已实现；交互口径 2026-10-04 修订：无冲突静默迁移、有冲突才铺向导） |
+| [0048](0048-emby-userid-not-identity.md) | Emby 端点鉴权口径：token 是身份，`UserId` 只是参数 | 已采纳（读取类只验 token；`Users/{UserId}` 保持账号校验、不放开跨账号） |
+| [0049](0049-emby-instance-download-switch.md) | Emby 实例级「下载」开关：默认开的产品能力 | 已采纳（驱动 policy / `CanDownload` / 下载端点三处同一口径；偏离真机样本属有意） |
+| [0050](0050-relay-chunk-policy-aligned-with-worker.md) | 中继取块策略对齐 media-bridge-relay：慢判死 / 头部对冲 / 重试口径 | 已采纳（细化 0045） |
+| [0051](0051-home-row-declared-total.md) | 首页插件行可申报「库总数」，喂给客户端 `Views.ChildCount` | 已采纳（「不改 `ItemCounts`」一条被 0052 取代） |
+| [0052](0052-items-counts-library-total.md) | `Items/Counts` 的 `MovieCount`/`SeriesCount` 取首页插件申报的库总数 | 已采纳（复用 0051 的同一条契约；取代 0051「不改 `ItemCounts`」） |
+| [0053](0053-home-row-declared-episodes.md) | `Items/Counts` 的 `EpisodeCount` 取首页插件行申报的「剧库集数」 | 已采纳（延伸 0052 的同一条路子） |
+| [0054](0054-bare-items-query-uses-random-feed.md) | 无 `ParentId` 的裸列表查询复用 `feed: 'random'` | 已被取代（被 [0055](0055-bare-items-query-returns-views.md) 取代） |
+| [0055](0055-bare-items-query-returns-views.md) | 无 `ParentId` 的裸 `Items` 查询回顶层库列表 | 已采纳（取代 0054） |
+| [0056](0056-emby-compat-scope.md) | Emby 兼容层的范围界定：只照官方 API 的表面 | 已采纳 |
+| [0057](0057-emby-system-info-honest-subset.md) | `System/Info` 取诚实子集：认领端点，但不编造面板没有的能力 | 已采纳 |
+| [0058](0058-favorite-items.md) | 收藏：收藏时快照元数据落库（用户数据，不随缓存清理），读列表只吃快照 | 已采纳 |
 
 ## 新增一条 ADR
 

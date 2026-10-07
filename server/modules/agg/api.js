@@ -155,10 +155,12 @@ function detailCacheKey({ name, year, season, episode, scoped, sources, cfg, par
   const pair = (x) => `${(x && x.source) || ''}/${(x && x.key) || ''}`;
   const dim = (v) => (v === undefined || v === null || v === '' ? '' : String(v));
   return [
-    /* ⚠️ `aggdetail` 后面那个 `2` 是**产出口径的版本号**：线路过滤从"客户端各自滤"改成了"聚合层产出时就滤"
-     *（ADR-0043），同一份 key 下的旧快照是按旧口径算的（`lines` 是全量）—— 不换 key 就会一直
-     * 命中旧快照，看起来像"改完没生效"。以后只要"这份结果的内容口径"变了，这里就 +1。 */
-    'aggdetail2',
+    /* ⚠️ `aggdetail` 后面那个 `4` 是**产出口径的版本号**：线路过滤从"客户端各自滤"改成了"聚合层产出时就滤"
+     *（ADR-0043）→ 2；多了每个播放项的 `standardName`（emby 取它当版本行副标题）→ 3；
+     * `standardName` 的规格 token 换成 scene 写法（`H.265`/`DDP5.1`/`DV`）→ 4。
+     * 同一份 key 下的旧快照是按旧口径算的 —— 不换 key 就会一直命中旧快照，看起来像"改完没生效"。
+     * 以后只要"这份结果的内容口径"变了，这里就 +1。 */
+    'aggdetail4',
     String(name || ''),
     String(year || ''),
     dim(season),

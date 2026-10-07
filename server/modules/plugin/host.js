@@ -309,7 +309,9 @@ function stateOf(type, id) {
     actions: (st && st.actions) || [],
     uptimeMs: st && st.startedAt && st.status === 'running' ? Date.now() - st.startedAt : 0,
     lastError: (st && st.lastError) || '',
-    inflight: st ? st.inflight.size : 0,
+    /* broken 状态（readManifest 失败那种）只挂了部分字段，可能没有 inflight：
+     * 一个坏插件不该让 host.states() 整个崩掉（隔离的意义）。 */
+    inflight: st && st.inflight ? st.inflight.size : 0,
   };
 }
 

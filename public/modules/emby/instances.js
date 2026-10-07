@@ -263,6 +263,9 @@ function openEditor(inst) {
     sel.append(o);
   }
   const picker = metaDomainPicker(inst);
+  /* 下载开关：默认开（字段缺席 = 开）。关掉后握手 policy、条目 `CanDownload` 与下载端点一起拒绝 */
+  const dl = el('input', { type: 'checkbox' });
+  dl.checked = isNew ? true : inst.allowDownload !== false;
   const tip = el('div', { class: 'note' });
 
   modal({
@@ -272,6 +275,7 @@ function openEditor(inst) {
       el('div', { class: 'field' }, el('label', { text: '端口' }), port),
       el('div', { class: 'field' }, el('label', { text: '首页' }), sel),
       el('div', { class: 'field' }, el('label', { text: '搜索域' }), picker.row),
+      el('div', { class: 'field' }, el('label', { text: '下载' }), el('label', { class: 'chk', title: '允许客户端下载条目；关闭后握手与下载端点一起拒绝' }, dl, '允许下载')),
       tip,
     ],
     actions: [
@@ -283,6 +287,7 @@ function openEditor(inst) {
           const body = {
             name: name.value.trim(),
             homePlugin: sel.value,
+            allowDownload: dl.checked,
           };
           /* 搜索域：有可选项时才写（一个域都没装时保持"缺席=全部"）；全不勾 = `[]`（一个都不搜） */
           if (picker.hasItems) body.metaDomains = picker.checked();

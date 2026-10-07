@@ -3,7 +3,11 @@
  * Emby 层的本地库（Node 内置 `node:sqlite`，零依赖）
  *
  * 放「客户端登录账号」这类**模块私有的持久数据**：
- *   accounts —— 用户名 + scrypt 密码哈希 + 最近登录；密码**不再明文**存设置文件里。
+ *   accounts —— 用户名 + scrypt 密码哈希 + 最近登录；密码**不再明文**存设置文件里；
+ *   sessions —— 登录发出去的 AccessToken；
+ *   playback —— 播放进度（客户端上报的观看状态）；
+ *   favorite —— 收藏（收藏时快照的列表元数据，见 ADR-0058）。
+ * 这几张表都是**用户数据**（不是缓存）—— 不随缓存清理、随整份数据卷备份。
  *
  * 为什么不放进 settings：settings 是「配置」（有 defaults/validate/fields 与通用读写端点），
  * 而账号是用户数据（要增删改、要哈希、以后还会挂进度与收藏）—— 两件事混在一起会互相拖累。
@@ -18,7 +22,7 @@ const crypto = require('crypto');
 
 const instance = require('./instance');
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 /* scrypt 参数：N=16384 单次约几十毫秒，登录是低频动作，够用。
  * maxmem 必须显式给（默认 32MiB），否则调大 N 会直接抛 memory limit exceeded。 */
@@ -90,6 +94,22 @@ function open() {
       PRIMARY KEY (account_id, item_id)
     );
     CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, updated_at DESC);
+    /* 收藏 —— 客户端 POST /Users/{UserId}/FavoriteItems/{ItemId} 时**快照**的列表元数据。
+     *
+     * 与 playback 的关键不同：进度是**高频心跳**（每 10 秒一条，读侧只好反查上游补齐标题），
+     * 收藏是**低频显式动作**（点一次收藏就一次），所以在这里把列表要用的元数据**写时快照**下来，
+     * 读侧（Filters=IsFavorite）直接查库 + 纯 CPU 重建 DTO，**0 上游请求**。见 ADR-0058。
+     *
+     * 一行 = 「一个账号 + 一条条目」的收藏，**覆盖写**；payload 是 JSON（列表字段，非 rich）。
+     * 关联键同 playback 用 account_id（不是 user_id）。 */
+    CREATE TABLE IF NOT EXISTS favorite (
+      account_id INTEGER NOT NULL,
+      item_id    TEXT    NOT NULL,
+      payload    TEXT    NOT NULL,   -- 收藏时的列表元数据快照（JSON）
+      updated_at TEXT    NOT NULL,
+      PRIMARY KEY (account_id, item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_favorite_recent ON favorite(account_id, updated_at DESC);
   `);
 
   /* 3 → 4：`playback` 加 `hidden`（客户端 `POST …/HideFromResume`）。
@@ -250,8 +270,9 @@ function updateAccount(id, patch) {
 
 function removeAccount(id) {
   removeSessionsOfAccount(id);
-  /* 进度按账号存（`account_id`）—— 账号没了，那些行就成了没人认领的数据，一起删掉 */
+  /* 进度与收藏都按账号存（`account_id`）—— 账号没了，那些行就成了没人认领的数据，一起删掉 */
   removePlaybackOfAccount(id);
+  removeFavoritesOfAccount(id);
   return ensure().prepare('DELETE FROM accounts WHERE id = ?').run(Number(id)).changes > 0;
 }
 
@@ -414,6 +435,20 @@ function listPlayed(accountId, limit = 50) {
 }
 
 /**
+ * 某一季里**已看完**的集数（季条目的 `UserData.UnplayedItemCount` 用：总集数 − 这个数 = 未看集数）。
+ *
+ * 进度按集记账，但每行的列里带着 `series_id` / `season`（`upsertPlayback` 写入），
+ * 所以按「剧 + 季」聚合即可，不必反解析每条 Id。只算 `played = 1`：真机那个数数的是
+ * "从没播完过的集"，看了没看完仍算未看。
+ */
+function countPlayedInSeason(accountId, seriesId, season) {
+  if (!accountId || !seriesId || !Number.isFinite(season)) return 0;
+  return ensure()
+    .prepare('SELECT COUNT(*) AS n FROM playback WHERE account_id = ? AND series_id = ? AND season = ? AND played = 1')
+    .get(Number(accountId), String(seriesId), Number(season)).n;
+}
+
+/**
  * 每部剧**最近**看的那一条（`Shows/NextUp` 用）：同 `series_id` 只留最新一条，按时间倒序。
  *
  * **排除被隐藏的行**：一是隐藏的占位行（位置 0、没看过）不该成为"最近观看"；
@@ -435,6 +470,44 @@ function listRecentBySeries(accountId) {
 
 function removePlaybackOfAccount(accountId) {
   return ensure().prepare('DELETE FROM playback WHERE account_id = ?').run(Number(accountId)).changes;
+}
+
+/* ------------------------------------------------------------------ 收藏 */
+
+/** 读一条收藏（返回整行；`payload` 是 JSON 字符串，解由调用方负责） */
+function getFavorite(accountId, itemId) {
+  if (!accountId || !itemId) return null;
+  return ensure().prepare('SELECT * FROM favorite WHERE account_id = ? AND item_id = ?').get(Number(accountId), String(itemId)) || null;
+}
+
+/** 覆盖写一条收藏（快照由调用方算好序列化成 JSON） */
+function upsertFavorite(accountId, itemId, payload) {
+  ensure()
+    .prepare(
+      `INSERT INTO favorite (account_id, item_id, payload, updated_at)
+       VALUES (?,?,?,?)
+       ON CONFLICT(account_id, item_id) DO UPDATE SET
+         payload    = excluded.payload,
+         updated_at = excluded.updated_at`
+    )
+    .run(Number(accountId), String(itemId), String(payload), new Date().toISOString());
+  return getFavorite(accountId, itemId);
+}
+
+/** 取消收藏；返回是否删掉了行（0 行 = 本来就没收藏） */
+function removeFavorite(accountId, itemId) {
+  return ensure().prepare('DELETE FROM favorite WHERE account_id = ? AND item_id = ?').run(Number(accountId), String(itemId)).changes > 0;
+}
+
+/** 收藏列表（最近收藏的在前） */
+function listFavorites(accountId, limit = 50) {
+  return ensure()
+    .prepare('SELECT * FROM favorite WHERE account_id = ? ORDER BY updated_at DESC LIMIT ?')
+    .all(Number(accountId), Math.max(1, Number(limit) || 50));
+}
+
+function removeFavoritesOfAccount(accountId) {
+  return ensure().prepare('DELETE FROM favorite WHERE account_id = ?').run(Number(accountId)).changes;
 }
 
 /**
@@ -474,9 +547,15 @@ module.exports = {
   countSessions,
   getPlayback,
   upsertPlayback,
+  countPlayedInSeason,
   setHidden,
   listResume,
   listPlayed,
   listRecentBySeries,
   removePlaybackOfAccount,
+  getFavorite,
+  upsertFavorite,
+  removeFavorite,
+  listFavorites,
+  removeFavoritesOfAccount,
 };

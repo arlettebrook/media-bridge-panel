@@ -4,6 +4,8 @@
  *
  * 已实现：
  *   GET  /api/emby/System/Info/Public        握手：客户端据此确认这是 Emby 服务器
+ *   GET  /api/emby/System/Info               完整服务器信息（**诚实子集**：只回面板真有的字段，见「十」#20）
+ *   GET  /api/emby/System/Ping               连通性探针：回常量 `Emby Server`（**免鉴权**，见「十」#19）
  *   POST /api/emby/Users/AuthenticateByName  登录：校验面板账号（见「Emby → 账号管理」）
  *   GET  /api/emby/Users/{UserId}            取用户资料
  *   GET  /api/emby/Users/{UserId}/Views      媒体库列表（每个启用的首页插件行 = 一个库；不再是留白）
@@ -55,7 +57,7 @@
  * 查看：面板「面板设置 → 日志」（内存最近 N 条）+ `docker logs`（长期，自带轮转）。
  *
  * **AccessToken 校验**：除下面这些豁免项外，所有端点都先过 `service.authorize()`
- *   （豁免：握手 / 登录 / 面板自用端点 / 501 通配 / **图片端点**：条目图片 `Items/{Id}/Images/{type}`
+ *   （豁免：握手（`System/Info/Public` + `System/Ping`）/ 登录 / 面板自用端点 / 501 通配 / **图片端点**：条目图片 `Items/{Id}/Images/{type}`
  *   与用户头像 `Users/{UserId}/Images/{type}` —— 实测 8 条图片请求里 5 条带 `x-emby-authorization`、
  *   3 条**什么凭证都不带**（原生 Rex 客户端），要求 token 会让那部分客户端图全挂；
  *   而非图片请求 9/9 都带 `x-emby-token`）。
@@ -184,6 +186,40 @@ module.exports = function routes(r) {
     return sendJson(res, 200, info);
   });
 
+  /**
+   * GET /System/Info —— 带 token 的完整服务器信息（客户端登录后向它确认"这台服务器有哪些能力"）。
+   *
+   * **诚实子集**：字段只给面板真有的 —— 面板不是 Emby 服务端，本地库扫描 / 转码 / 自更新 /
+   * 自重启等能力一概没有，对应能力位如实 `false`、面板没有对应物的字段（端口 / 唤醒地址等）不回。
+   * 取舍与字段清单见 docs/emby-realdevice/20-system-info.md 与 [ADR-0057](docs/adr/0057-emby-system-info-honest-subset.md)。
+   *
+   * **AccessToken 一律校验、但不比对 `UserId`**（与 `Studios`(14-1) / `Items/Counts`(16-1) 同口径：
+   * 无 / 无效 token → 401 纯文本；这是服务器级信息、与具体用户无关）。
+   */
+  r.add('GET', '/api/emby/System/Info', (req, res) => {
+    const denied = service.authorize(req);
+    if (denied) {
+      log.logResult(req, '服务器信息 System/Info', denied);
+      return sendResult(res, denied);
+    }
+    const info = service.systemInfo(req);
+    log.logResult(req, '服务器信息 System/Info', { status: 200, log: `ServerName=${info.ServerName} Version=${info.Version}` });
+    return sendJson(res, 200, info);
+  });
+
+  /**
+   * GET /System/Ping —— 连通性探针（客户端在登录前/后拿它测"这台服务器活着吗"）。
+   *
+   * 真机实测（见 docs/emby-compat.md「十」#19）：予初Emby / OkEmby / nyamedia 回 **200 纯文本
+   * `Emby Server`** 且**免鉴权**（无 / 无效 token 照样 200）；itsmygo 要 token（无 / 无效 → 401 JSON）。
+   * 三台主流一致、且这是握手类探针（要求 token 会直接让探针失败），故**豁免 AccessToken**、
+   * 照真机原样回常量 `Emby Server`（content-type 取真 Emby 的 `text/plain`；itsmygo 的 401 登记不复刻）。
+   */
+  r.add('GET', '/api/emby/System/Ping', (req, res) => {
+    log.logResult(req, '握手 System/Ping', { status: 200, log: 'Emby Server' });
+    return sendBuffer(res, 200, Buffer.from('Emby Server', 'utf8'), 'text/plain; charset=utf-8');
+  });
+
   r.add('POST', '/api/emby/Users/AuthenticateByName', async (req, res) => {
     const body = await readBody(req);
     const out = service.authenticate(req, body);
@@ -246,13 +282,20 @@ module.exports = function routes(r) {
    *
    * **如实回空**。理由见 `service.getStudios`：不是没做，
    * 是**没有片库可枚举** —— 硬凑只会得到一个随榜单波动的假清单，比空更糟。
+   * （真机回的是**全库去重清单**：予初Emby 15601 / OkEmby 8181 / nyamedia 1324 条，
+   * 且 `Limit` / `SearchTerm` 生效 —— 本面板无片库索引，**不复刻**，见「十、#14」。）
    *
-   * **不校验 token / UserId**：**回空的响应没有数据可保护**，
-   * 校验只会有坏处 —— 客户端不带 token 时白吃一个 401，而它本该拿到一个空列表。
-   * （`Items` / `Items/Latest` 自 5-1/6-1 起已改为一律校验，本条仍保持豁免。）
+   * **AccessToken 一律校验**（14-1 对齐真机：真机无 token / 无效 token 一律 **401 纯文本**
+   * `Access token is invalid or expired.`）。与 `Items`（5-1）/ `Items/Latest`（6-1）同口径 ——
+   * 回空也照样校验：正常客户端都带 token，无人被误伤；此前"回空没有数据可保护"故豁免的取向已作废。
    */
   r.add('GET', '/api/emby/Studios', (req, res, { query }) => {
     const q = log.queryBrief(query);
+    const denied = service.authorize(req);
+    if (denied) {
+      log.logResult(req, '工作室 Studios', denied, q);
+      return sendResult(res, denied);
+    }
     const out = service.getStudios();
     log.logResult(req, '工作室 Studios', out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
@@ -266,6 +309,10 @@ module.exports = function routes(r) {
    *
    * 无路由冲突：这里**没有**裸的 `Shows/:showId` 那条路由（只有 `Shows/:showId/Seasons|Episodes`），
    * 所以 `NextUp` 不会被当成 showId 吞掉；`SeriesId` 是 query 参数，与路由形状无关。
+   *
+   * **AccessToken 一律校验、但不比对 `UserId`**（15-1 起对齐真机：无 token → 401 纯文本
+   * `Access token is invalid or expired.`；有效 token + 错配 / 不存在的 UserId 照旧 200 ——
+   * 与 `Items/Resume` 同口径，见 `service.getNextUp`）。
    */
   r.add('GET', '/api/emby/Shows/NextUp', async (req, res, { query }) => {
     const q = log.queryBrief(query);
@@ -277,16 +324,26 @@ module.exports = function routes(r) {
   /**
    * GET /Items/Counts —— 全库各类条目数量（SenPlayer 实测在请求该端点）
    *
-   * **回全 0**＝"数不出来"，不是"库是空的"（理由见 `service.getItemCounts` —— 没有片库索引，
-   * 而唯一能凑的数据源是插件行的 `total`，那是上游榜单总数，不是本面板的库，拿它当数就是编数据）。
+   * **`MovieCount` / `SeriesCount` 取自首页插件申报的库总数、`EpisodeCount` 取自剧库行申报的集数**，
+   * 其余 11 个字段回 0＝"数不出来"
+   * （口径见 `service.getItemCounts` —— 面板没有片库索引，只有插件申报的库规模可用；拿"上游榜单
+   * 总数"当库规模才是编数据，那是两回事）。
    *
    * 无路由冲突：条目详情那条是 `Users/:userId/Items/:itemId`，**没有**裸的 `Items/:itemId`，
    * 所以 `Counts` 不会被当条目 Id 吞掉（⚠️ 但 `Users/:userId/Items/Resume` 曾被这种
    * 同形状路由吞掉 —— 以后若新增 `Items/{Id}` 之类，需把这条挪到前面）。
-   * **不校验账号**：回空没有数据可保护。
+   * **AccessToken 一律校验、但不比对 `UserId`**（16-1 起对齐真机：真机无 token / 无效 token
+   * 一律 **401 纯文本** `Access token is invalid or expired.`；有效 token + 错配 / 不存在的
+   * UserId 照旧 200）。与 `Studios`（14-1）同口径 —— 回空也照样校验；此前"回空没有数据可保护"
+   * 故豁免的取向已作废。计数是内容数据、与用户无关。
    */
   r.add('GET', '/api/emby/Items/Counts', (req, res, { query }) => {
     const q = log.queryBrief(query);
+    const denied = service.authorize(req);
+    if (denied) {
+      log.logResult(req, '条目计数 Items/Counts', denied, q);
+      return sendResult(res, denied);
+    }
     const out = service.getItemCounts();
     log.logResult(req, '条目计数 Items/Counts', out, q);
     return sendJson(res, out.status, out.body);
@@ -336,17 +393,17 @@ module.exports = function routes(r) {
     return sendJson(res, out.status, out.body);
   });
 
-  /* 季列表：只认剧的 Id（{域}_{编号}_tv）；UserId 在 query 里，走同一套账号校验 */
+  /* 季列表：只认剧的 Id（{域}_{编号}_tv）；UserId 在 query 里，只当进度兜底（真机不校验它，见指南「十」#7-2） */
   r.add('GET', '/api/emby/Shows/:showId/Seasons', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, userIdOf(query));
+    const denied = service.authorize(req);
     if (denied) {
       log.logResult(req, `季列表 Shows/${params.showId}/Seasons`, denied, q);
       return sendResult(res, denied);
     }
 
-    const out = await service.getSeasons(params.showId, userIdOf(query));
+    const out = await service.getSeasons(params.showId);
     service.applyUserData(out, userIdOf(query), req);
     log.logResult(req, `季列表 Shows/${params.showId}/Seasons`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
@@ -355,14 +412,16 @@ module.exports = function routes(r) {
   /* 分集列表：只认剧的 Id + SeasonId（{域}_{编号}_tv_s{n}），其余回空 */
   r.add('GET', '/api/emby/Shows/:showId/Episodes', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
-    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, userIdOf(query));
+    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401。
+     * **只验 token、不比对 UserId**（8-2 起对齐真机）：真机在「有效 token + 不存在/不匹配的 UserId」
+     * 下仍回 200，故 `UserId` 降为**进度兜底**（`applyUserData` 按 token 解出的账号补进度，认不出才用它）。 */
+    const denied = service.authorize(req);
     if (denied) {
       log.logResult(req, `分集列表 Shows/${params.showId}/Episodes`, denied, q);
       return sendResult(res, denied);
     }
 
-    const out = await service.getEpisodes(params.showId, userIdOf(query), seasonIdOf(query));
+    const out = await service.getEpisodes(params.showId, seasonIdOf(query));
     service.applyUserData(out, userIdOf(query), req);
     log.logResult(req, `分集列表 Shows/${params.showId}/Episodes`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
@@ -371,8 +430,10 @@ module.exports = function routes(r) {
   /* 单条详情：只认本面板发出去的条目 Id（前缀归元数据域）；认不出的（如 Items/Resume）走 501 */
   r.add('GET', '/api/emby/Users/:userId/Items/:itemId', async (req, res, { params, query, pathname }) => {
     const q = log.queryBrief(query);
-    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, params.userId);
+    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401。
+     * **只验 token、不比对 UserId**（10-1 起对齐真机）：真机在「有效 token + 不存在/不匹配的 UserId」
+     * 下仍回 200，故 `UserId` 只当参数（进度由 `applyUserData` 按 token 解出的账号补）。 */
+    const denied = service.authorize(req);
     if (denied) {
       log.logResult(req, `条目详情 Users/…/Items/${params.itemId}`, denied, q);
       return sendResult(res, denied);
@@ -383,7 +444,7 @@ module.exports = function routes(r) {
     /* `host` 传进去是为了让 `MediaSources[].Path` / 条目级 `Path` 是**绝对 URL**
      * （真机的 Path 也从来不是相对路径）。用请求自己的 Host —— 那正是客户端能连到的地址。
      * `proto` 一起给：反代后面 Host 里没协议，漏了就一律拼成 `http://`（见 protoOf）。 */
-    const out = await service.getItem(params.itemId, params.userId, req.headers.host || '', protoOf(req));
+    const out = await service.getItem(params.itemId, req.headers.host || '', protoOf(req));
     service.applyUserData(out, params.userId, req);
     log.logResult(req, `条目详情 Users/…/Items/${params.itemId}`, out, q + (out.body && out.body.CatpawSource ? " 源=" + out.body.CatpawSource.Site : ""));
     return sendJson(res, out.status, out.body);
@@ -392,14 +453,16 @@ module.exports = function routes(r) {
   /* 播放信息：客户端点播放前必来，返回版本清单（Path 指向下面的 Stream 端点，不带时效地址） */
   r.add('POST', '/api/emby/Items/:itemId/PlaybackInfo', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
-    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, userIdOf(query));
+    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401。
+     * **只验 token、不比对 UserId**（11-1 起对齐真机）：虽为 POST，但本端点只**返回版本清单**、
+     * 不写用户私有数据；真机在「有效 token + 不存在/不匹配的 UserId」下仍回 200，故 `UserId` 只当参数。 */
+    const denied = service.authorize(req);
     if (denied) {
       log.logResult(req, `播放信息 Items/${params.itemId}/PlaybackInfo`, denied, q);
       return sendResult(res, denied);
     }
 
-    const out = await service.getPlaybackInfo(params.itemId, userIdOf(query), req.headers.host || '', service.tokenFrom(req).token, protoOf(req));
+    const out = await service.getPlaybackInfo(params.itemId, req.headers.host || '', service.tokenFrom(req).token, protoOf(req));
     log.logResult(req, `播放信息 Items/${params.itemId}/PlaybackInfo`, out, q + " " + log.countOf(out, "MediaSources"));
     return sendJson(res, out.status, out.body);
   });
@@ -410,9 +473,11 @@ module.exports = function routes(r) {
    * 客户端会把 Path 解码后取「最后一个 `/` 之后」当副标题，所以那里放集名，而不是源路径里的 `8471.html`。
    * 注册两条（带文件名 / 不带）共用同一处理。
    */
-  const streamByPath = async (req, res, { params, query }) => {
-    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, userIdOf(query));
+  const streamByPath = async (req, res, { params }) => {
+    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401。
+     * **只验 token、不比对 UserId**（#12-1 起对齐真机）：真机在「有效 token + 不匹配 / 不存在 / 非 Guid
+     * 的 UserId」下照样出字节，故 query 里的 `UserId` 只当参数。 */
+    const denied = service.authorize(req);
     if (denied) {
       log.logResult(req, `拉流 Items/${params.itemId}/Stream`, denied);
       return sendResult(res, denied);
@@ -425,7 +490,7 @@ module.exports = function routes(r) {
         error: '路径里的 token 认不出（应是 base64url 的、以 catpaw: 开头的版本 Id）',
       });
     }
-    const out = await service.resolveStream(params.itemId, src, userIdOf(query), req);
+    const out = await service.resolveStream(params.itemId, src, req);
     return serveStream(req, res, out, `Items/${params.itemId}/Stream`);
   };
   r.add('GET', '/api/emby/Items/:itemId/Stream/:token', streamByPath);
@@ -433,14 +498,14 @@ module.exports = function routes(r) {
 
   /* 渠道 ①'：老的 `?src=&vod=` 形状 —— 不再写进 `Path`，留着手工调试（文档里那条实测走的就是它）。 */
   r.add('GET', '/api/emby/Items/:itemId/Stream', async (req, res, { params, query }) => {
-    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, userIdOf(query));
+    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401。**只验 token、不比对 UserId**（#12-1） */
+    const denied = service.authorize(req);
     if (denied) {
       log.logResult(req, `拉流 Items/${params.itemId}/Stream`, denied);
       return sendResult(res, denied);
     }
 
-    const out = await service.resolveStream(params.itemId, query.get('src'), userIdOf(query), req);
+    const out = await service.resolveStream(params.itemId, query.get('src'), req);
     return serveStream(req, res, out, `Items/${params.itemId}/Stream`);
   });
 
@@ -455,8 +520,8 @@ module.exports = function routes(r) {
    * 没在任何日志里出现过，仍按「未实现」记日志 + 501，不提前猜。
    */
   const serveDirectVideo = async (req, res, { params, query, pathname }) => {
-    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, userIdOf(query));
+    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401。**只验 token、不比对 UserId**（#12-1） */
+    const denied = service.authorize(req);
     if (denied) {
       log.logResult(req, `拉流 videos/${params.itemId}/${params.file}`, denied);
       return sendResult(res, denied);
@@ -467,7 +532,6 @@ module.exports = function routes(r) {
     const out = await service.resolveStream(
       params.itemId,
       query.get('MediaSourceId'),
-      userIdOf(query),
       req // 由本跳的 Host 推 clientHost / origin：本地实例回的是回环地址，插件拿它拼成客户端够得着的
     );
     return serveStream(req, res, out, `videos/${params.itemId}/${params.file}`);
@@ -510,34 +574,46 @@ module.exports = function routes(r) {
    *
    * 同族的 `Items/{ItemId}/File`（也是下载）**先不做**：客户端日志里从没出现过，
    * 按"等客户端日志暴露再接线"的老规矩办 —— 出现了再加一条同样的路由即可。
+   * （真机实测**两台都支持**这条、有效 token 回 206 字节，见 emby-compat「十、#12」的 12-3 ——
+   * 登记为**已知未实现**，仍不提前接线。）
    */
   r.add('GET', '/api/emby/Items/:itemId/Download', async (req, res, { params, query }) => {
-    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
-    const denied = service.authorize(req, userIdOf(query));
+    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401。**只验 token、不比对 UserId**（#12-1） */
+    const denied = service.authorize(req);
     if (denied) {
       log.logResult(req, `下载 Items/${params.itemId}/Download`, denied);
       return sendResult(res, denied);
+    }
+    /* 实例级「下载」开关（默认开）：关掉时拒绝下载（403），与 policy `EnableContentDownloading`、
+     * 条目 `CanDownload` 同一口径 —— 握手说"不能下"、端点也真的不给下。 */
+    if (!service.allowDownload()) {
+      const off = { status: 403, text: 'Downloading is disabled on this server.', log: '下载开关已关闭' };
+      log.logResult(req, `下载 Items/${params.itemId}/Download`, off);
+      return sendResult(res, off);
     }
 
     const out = await service.resolveStream(
       params.itemId,
       query.get('MediaSourceId'),
-      userIdOf(query),
       req // 由本跳的 Host 推 clientHost / origin：本地实例回的是回环地址，插件拿它拼成客户端够得着的
     );
     return serveStream(req, res, out, `Items/${params.itemId}/Download`, '下载');
   });
 
   /* 相似推荐：按条目的坐标反查上游（与季/集同类，归 emby 层，不走首页模块） */
+  /**
+   * `GET /Items/{ItemId}/Similar` —— **只验 token、不比对 `UserId`**（17-1 起对齐真机，见「五」与「十」#17）。
+   * 真机实测：无 / 无效 token → 401 纯文本；有效 token + 错配 / 不存在 / 不带 `UserId` → 仍 200（取的是上游推荐，属内容数据）。
+   */
   r.add('GET', '/api/emby/Items/:itemId/Similar', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
-    const denied = service.authorize(req, userIdOf(query));
+    const denied = service.authorize(req);
     if (denied) {
       log.logResult(req, `相似推荐 Items/${params.itemId}/Similar`, denied, q);
       return sendResult(res, denied);
     }
 
-    const out = await service.getSimilar(params.itemId, userIdOf(query), query.get('Limit'));
+    const out = await service.getSimilar(params.itemId, query.get('Limit'));
     service.applyUserData(out, userIdOf(query), req);
     log.logResult(req, `相似推荐 Items/${params.itemId}/Similar`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
@@ -638,12 +714,10 @@ module.exports = function routes(r) {
   };
 
   /** 面板对外的主机名：从请求的 Host 头取、去掉端口 —— 拼"连接地址"给用户复制用。
-   * 写死 127.0.0.1 对用户没用：客户端多半在另一台机器上（面板跑在容器里更是如此）。 */
+   * 写死 127.0.0.1 对用户没用：客户端多半在另一台机器上（面板跑在容器里更是如此）。
+   * 实现收在 `service.hostOf`（`System/Info` 的 `LocalAddress` 用同一份）。 */
   function reqHost(req) {
-    const h = String((req.headers && req.headers.host) || '').trim();
-    if (!h) return '127.0.0.1';
-    if (h.startsWith('[')) return h.slice(0, h.indexOf(']') + 1); // IPv6 字面量
-    return h.split(':')[0];
+    return service.hostOf(req);
   }
 
   /* ---------------- 面板自用：Emby 实例（多实例） ----------------
@@ -875,12 +949,13 @@ module.exports = function routes(r) {
   playbackReport('progress', 'Playing/Progress');
   playbackReport('stop', 'Playing/Stopped');
 
-  /* ---------------- 观看状态的**写**端点（客户端改「继续观看」「已看」） ----------------
-   * 三条都是实测在打的：
+  /* ---------------- 观看状态的**写**端点（客户端改「继续观看」「已看」「收藏」） ----------------
+   * 四条都是实测在打的：
    *   · `POST Users/{UserId}/Items/{ItemId}/HideFromResume?Hide=true|false` —— Rex/0.1.0，「从继续观看里移除」；
    *   · `POST Users/{UserId}/PlayedItems/{ItemId}` —— SenPlayer/6.2.1，「标记已看」；
-   *   · `DELETE Users/{UserId}/PlayedItems/{ItemId}` —— 同上，「标记未看」。
-   * 一律**校验 token**（动的是某个账号的观看记录，见 ADR-0009），回 **200 + 该条目的 `UserData`**；
+   *   · `DELETE Users/{UserId}/PlayedItems/{ItemId}` —— 同上，「标记未看」；
+   *   · `POST|DELETE Users/{UserId}/FavoriteItems/{ItemId}` —— Rex/1.0.0，「收藏 / 取消收藏」。
+   * 一律**校验 token**（动的是某个账号的观看/收藏记录，见 ADR-0009），回 **200 + 该条目的 `UserData`**；
    * Id 认不出 → **204 且不写库**（与三条上报同口径 —— 客户端只是想让状态变一下，回错会弹错误框）。
    * ⚠️ 必须注册在下面的通配之前，否则又是 501。
    */
@@ -900,6 +975,16 @@ module.exports = function routes(r) {
   };
   r.add('POST', '/api/emby/Users/:userId/PlayedItems/:itemId', playedItems(true));
   r.add('DELETE', '/api/emby/Users/:userId/PlayedItems/:itemId', playedItems(false));
+
+  /* 收藏 / 取消收藏：同一个处理器，只差 `favorite`（真机是 POST = 收藏、DELETE = 取消）。
+   * `service.setFavorite` 是 async（收藏要按坐标反查元数据做快照），这里必须 await。 */
+  const favoriteItems = (favorite) => async (req, res, { params, query }) => {
+    const out = await service.setFavorite(req, params.userId, params.itemId, favorite);
+    log.logResult(req, `${favorite ? '收藏' : '取消收藏'} Users/…/FavoriteItems/${params.itemId}`, out, log.queryBrief(query));
+    return sendOut(res, out);
+  };
+  r.add('POST', '/api/emby/Users/:userId/FavoriteItems/:itemId', favoriteItems(true));
+  r.add('DELETE', '/api/emby/Users/:userId/FavoriteItems/:itemId', favoriteItems(false));
 
   /* ---------------- 通配：其余一切 /api/emby/** ---------------- */
 

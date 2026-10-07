@@ -3,11 +3,196 @@
 本文件记录值得用户注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+
+- **Emby 收藏功能**（契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)）：新增写端点
+  `POST|DELETE /api/emby/Users/{UserId}/FavoriteItems/{ItemId}`，并让读取类端点出**真收藏数据**。
+  - **改的是什么**：面板新增收藏存储 —— `favorite` 表（一行 = 账号 + 条目 + 收藏时的列表元数据**快照**，
+    随 `emby.db` 持久化，属**用户数据**、不随缓存清理，`SCHEMA_VERSION` 4→5）。**收藏动作时快照、读侧 0 上游请求**。
+  - **影响哪些端点**：`POST|DELETE …/FavoriteItems/{ItemId}`（此前落 501 通配 → 现 **200 + `UserItemDataDto`**，
+    `IsFavorite` 真值；无 token → 401，Id 认不出 / 反查失败 → **204 不写库**）；
+    `GET …/Items?Filters=IsFavorite`（此前**恒空** → 现**读 `favorite` 表**、快照重建出真实条目）；
+    `UserData.IsFavorite` **全链路**（列表 / 详情 / 季集）由恒 `false` → 按收藏库查出的**真值**。
+  - **对客户端的影响**：客户端**无需改动**。收藏 / 取消收藏由「未实现」转为可用，首页「收藏」入口由空列表转为真实集合；
+    可收藏条目类型对齐真机（电影 / 剧 / 季 / 集全认）。
+  - 决策见 [ADR-0058](docs/adr/0058-favorite-items.md)；真机逐条见
+    [docs/emby-realdevice/21-favorite-items.md](docs/emby-realdevice/21-favorite-items.md)（**未复测**，待端到端复核）。
+
+### 修复
+
+- **Emby 登录不认小写 `pw`（HamHub Android 登不上）**：`POST /api/emby/Users/AuthenticateByName` 的
+  请求体取值此前只认固定拼写（`Username`/`username`、`Pw`/`Password`/`password`），客户端发全小写
+  `{"username":…,"pw":…}` 时密码被读成空串 → 401 `无效用户名或密码。请重试。`。真机（.NET 反序列化）
+  字段名大小写不敏感 —— 实测 OkEmby / itsmygo 发 `Pw` 与 `pw` 均登录成功。现对齐真机：`Username` / `Pw`
+  （含兼容 `Password`）**不再区分大小写**。响应结构与错误文案不变，**客户端无需改动**。
+  （契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)；真机逐条见
+  [docs/emby-realdevice/02-users-authenticatebyname.md](docs/emby-realdevice/02-users-authenticatebyname.md)）
+
+- **Emby 登录不认 `Authorization` 头里的 appName**：`POST /api/emby/Users/AuthenticateByName`
+  取 appName 时此前**只读** `X-Emby-Authorization`，客户端按官方文档把 `Client="…"` 放在 `Authorization` 里时
+  被误判「缺 appName」→ 400 `Value cannot be null. (Parameter 'appName')`。真机两头都认 —— 实测
+  OkEmby / nyamedia / 予初Emby：只发任一头 → 200 登录成功，两头都缺 → 400 登不上。现对齐真机：
+  `X-Emby-Authorization` 缺失时回退读 `Authorization`。响应结构与错误文案不变，**客户端无需改动**。
+  日志里的客户端标记（`[Client/版本]`）同步改为两个头都看（此前只认前者，缺了就退到 UA）。
+
+- **Emby 登录不认授权头里不写引号的 `Client=`（部分客户端登不上）**：`POST /api/emby/Users/AuthenticateByName`
+  解析 appName 时此前正则写死 `Key="值"`、只认带引号的写法，客户端发 `Emby Client=SomeApp, …`（省引号）
+  就取不到 appName → 400。真机对引号**可选** —— 实测 nyamedia 4.8.0.62：`Emby Client="Filmly"` 与
+  `Emby Client=Filmly` 均 200 登录成功。现对齐真机：`Client=` / `Device=` / `DeviceId=` / `Version=` 的
+  值**引号可省**（日志的客户端标记同一口径；从授权头取 `Token=` 的路径一并放宽）。响应结构与错误文案不变，**客户端无需改动**。
+  （契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)；真机逐条见
+  [docs/emby-realdevice/02-users-authenticatebyname.md](docs/emby-realdevice/02-users-authenticatebyname.md)）
+
+- **Emby 登录不认 query 里的 appName（Filmly / 网易爆米花登不上）**：`POST /api/emby/Users/AuthenticateByName`
+  取 appName 时此前**只看授权头**。抓包发现 Filmly 把客户端名放在 query（`?X-Emby-Client=网易爆米花 Android`），
+  授权头里只有 `Device` / `DeviceId` / `Version`、**没有 `Client=`**，于是被误判「缺 appName」→ 400
+  `Value cannot be null. (Parameter 'appName')`。真机对同一形状的请求实测（nyamedia 4.8.0.62）：头无 `Client=`
+  + query 带 `X-Emby-Client` → **200** 登录成功；头无 `Client=` + 无 query → 400。现对齐真机：头里取不到 `Client=`
+  时**回退读 query `X-Emby-Client`**（参数名大小写不敏感）。响应结构与错误文案不变，**客户端无需改动**。
+  （契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)；真机逐条见
+  [docs/emby-realdevice/02-users-authenticatebyname.md](docs/emby-realdevice/02-users-authenticatebyname.md)）
+
+- **Filmly / 网易爆米花首页空白（`Items` 裸列表查询）**：客户端登录后打的
+  `GET /api/emby/Users/{UserId}/Items` 不带 `ParentId`、也不带 `SortBy`/`Filters`/`SearchTerm`，
+  只带 `ExcludeItemTypes`/`StartIndex`/`Limit`/`Fields` 这类通用参数 —— 此前落「其余查询 → 空」，
+  于是首页一片空白（`Items: []`、`TotalRecordCount: 0`）。**真机对照（予初Emby 4.9.5.0）**：这类查询
+  真机回的是**顶层库列表**（26 个 `CollectionFolder`，与 `GET /Users/{id}/Views` 一字不差）——
+  真机对「无 `ParentId` 且不递归」的 `Items` 默认回根节点的直接子级（要条目客户端须自带 `Recursive=true`）。
+  现对齐真机：**无 `ParentId` 的裸列表查询改为回顶层库列表**（复用 `Views` 那支，条目形状、`TotalRecordCount`
+  与 `Views` 一致）；轮播推荐位（`SortBy=IsFavoriteOrLiked,…`）仍路由到 `feed: 'random'` 行，不受影响。
+  **不新增插件契约字段**，插件无需改动；**客户端无需改动**（决策见
+  [ADR-0055](docs/adr/0055-bare-items-query-returns-views.md)，取代
+  [ADR-0054](docs/adr/0054-bare-items-query-uses-random-feed.md)；契约变更记录见
+  [docs/emby-compat.md](docs/emby-compat.md)；真机逐条见
+  [docs/emby-realdevice/05-users-userid-items.md](docs/emby-realdevice/05-users-userid-items.md)）
+
+- **Emby 端点带 `?api_key=` 但无 `X-Emby-Authorization` 头时 500**：取 token 时按名字读头，
+  头缺失会拿到 `undefined`，`undefined.match(...)` 把**整个请求**打成 500
+  （`{"error":"Cannot read properties of undefined (reading 'match')"}`）—— 只带 `api_key`、
+  不带授权头的客户端（实测就踩这条）在 `Views` / `Items` 等取 token 的端点上全中。现将取不到的
+  头如实当「没有」，端点正常回数据或 401，不再 500。
+
+- **「装一个插件」卡的上传包选择框没有字段框样式**：那个文件选择框此前只给里面的原生按钮写了样式，
+  外圈既没有底色也没有描边、高度还比同行的输入框矮一截 —— 摆在卡片上像一颗孤零零的按钮。
+  现按统一的字段框补齐（底色 / 描边 / 圆角 / 34px 高度，窄屏随其它输入框一起长到 40px），
+  聚焦有描边与光晕，里面那颗按钮收进框内不再顶边。
+
+- **开机那一轮站点测速启动过早，撞上源还没起来**：面板启动后排的那一轮固定「2 分钟后」开跑，
+  而插件报的 ready 只是「入口加载完」，它托管的源实例（下包 / 起进程 / 绑端口）在其后**串行**启动 ——
+  源还在 `starting` 时站点清单里缺这些实例的站点，好站被记成失败，还会被后续几轮按
+  「上次失败就跳过」漏掉。现改为**到点先看源起没起**：还在起就每 30s 再看一眼，最多等到开机后
+  10 分钟；等满了照跑（如实测、如实记，不再等）。判据只看源实例状态，不影响手动点的那一轮。
+  （实现见 [server/modules/agg/site-test.js](server/modules/agg/site-test.js)）
+
+### 变更
+
+- **Emby 补一条端点 `GET /api/emby/System/Ping`（连通性探针）**（真机实测见
+  [docs/emby-compat.md](docs/emby-compat.md)）：新客户端 **Lenna/1.0.16** 登录时会先打它探「服务器活着吗」，
+  此前落到 501；现照真机回 **200 `text/plain`**、正文常量 `Emby Server`，并**豁免 token**
+  （真机 OkEmby / nyamedia 免鉴权、itsmygo 要 token —— 对齐多数）。**客户端无需改动。**
+
+- **Emby 补一条端点 `GET /api/emby/System/Info`（完整服务器信息，取诚实子集）**：新客户端
+  **Filmly/2.12.11-439** 登录后打它取服务器信息，此前落到 501 通配；现认领该端点、回 **200 JSON**。
+  响应只给面板真有的 **17** 个字段 —— `ServerName` / `Version` / `Id` / `OperatingSystem` / `LocalAddress` /
+  `LocalAddresses`(空) / `RemoteAddresses`(空) / `CompletedInstallations`(空) 如实给值，能力位
+  `HasPendingRestart` / `IsShuttingDown` / `SupportsLibraryMonitor` / `CanSelfRestart` / `CanSelfUpdate` /
+  `CanLaunchWebBrowser` / `SupportsHttps` / `HasUpdateAvailable` / `SupportsAutoRunAtStartup` **一律 `false`**；
+  面板无对应物的 8 个字段（`SystemUpdateLevel` / `WebSocketPortNumber` / `HttpsPortNumber` / `WanAddress` 等）**不回**
+  —— **不编造面板没有的能力与数值**。鉴权**只验 token**（同类读取端点口径）。字段集**小于真机**
+  （真机 4.8 / 4.9 同构 25 字段），属**有意诚实子集**，客户端本就该容忍字段缺失，**无需改动**。
+  （决策见 [ADR-0057](docs/adr/0057-emby-system-info-honest-subset.md)；契约变更记录见
+  [docs/emby-compat.md](docs/emby-compat.md)；真机逐条见
+  [docs/emby-realdevice/20-system-info.md](docs/emby-realdevice/20-system-info.md)）
+
+- **模板页两个页签调换**：进页面默认落在「选站点」（原来是「填参数」），页签顺序一并调过来 ——
+  选站点在前、填参数在后。站点是这套模板的主体（上百行的那张表），进页面先看到它；
+  参数是偶尔调一次的旋钮，要看再切过去。本次会话内点过的另一档仍会记住，刷新页面才回到默认。
+
+- **中继取块策略优化（客户端无感）**：面板 `proxy` 线路的字节中继在排序并发取块的基础上，新增
+  三项按 [media-bridge-relay](https://github.com/dlushu/media-bridge-relay) Worker 对齐的策略 ——
+  **慢判死**（连接/响应头 15s + 读满一块 10s〔头部块〕/ 30s〔普通块〕，超时即判该块失败并走重试，
+  不再拖死整条有序流）、**头部对冲**（前 4 块各发 2 路取先成功者，直接压 TTFB）、
+  **重试口径**（每块 3 发、间隔 200/500ms，仅对 `429`/`5xx` 多试，其余 `4xx` 再确认一发即走）。
+  对外契约与 `playVia` 落法不变，客户端无需改动。设计取舍见
+  [docs/adr/0050](docs/adr/0050-relay-chunk-policy-aligned-with-worker.md)。
+
+- **Emby 协议契约变更：读取类端点不再用 `UserId` 鉴权**（真机实测不校验；契约变更记录见
+  [docs/emby-compat.md](docs/emby-compat.md)）：`Views` / `Users/{UserId}/Items` / `Items/Latest` /
+  `Shows/{Id}/Seasons` / `Shows/{Id}/Episodes` / 条目详情 `Users/{UserId}/Items/{ItemId}` /
+  播放信息 `Items/{ItemId}/PlaybackInfo` / 直连拉流 `videos/{ItemId}/{file}` 与 `Items/{ItemId}/Stream/{token}` /
+  下载 `Items/{ItemId}/Download` / 继续观看 `Users/{UserId}/Items/Resume` / 接下来看 `Shows/NextUp` /
+  相似推荐 `Items/{ItemId}/Similar` 十三条端点由
+  「`UserId` 必须属于该 token 账号，否则 401」改为「**只验 token、不比对 `UserId`**」—— 有效 token +
+  不匹配 / 不存在的 `UserId` 现在一律回 **200**（拉流 / 下载则**照常出字节**）。鉴权身份收敛到 token 一处；
+  用户私有进度仍按 token 的账号取，
+  **不引入跨账号泄露**（`PlaybackInfo` 虽为 POST，但只返回版本清单、不写用户私有数据；拉流 / 下载取的是内容字节，
+  均与用户无关，故按读取类处理）。
+  其余端点（`Users/{UserId}`、写端点的 `PlayedItems` / `HideFromResume` 等）暂维持旧口径，
+  留待各自真机对照。**客户端无需改动。**
+- **Emby 协议契约变更：`Studios` 收紧为「只验 token」**（真机实测要求；契约变更记录见
+  [docs/emby-compat.md](docs/emby-compat.md)）：`GET /api/emby/Studios` 由**完全豁免 token** 改为
+  **无 token / 无效 token 一律 401 纯文本** `Access token is invalid or expired.`（与 `Items` / `Items/Latest`
+  同口径）。响应仍是**如实回空** `{"Items":[],"TotalRecordCount":0}`（面板没有片库可枚举，不复刻真机的全量清单）。
+  正常客户端都带 token，**客户端无需改动**。
+- **Emby 协议契约变更：`Items/Counts` 收紧为「只验 token」**（真机实测要求；契约变更记录见
+  [docs/emby-compat.md](docs/emby-compat.md)）：`GET /api/emby/Items/Counts` 由**完全不校验账号**（连 token 都不看）
+  改为**无 token / 无效 token 一律 401 纯文本** `Access token is invalid or expired.`（与 `Items` / `Studios` 同口径），
+  有效 token + 任意 `UserId` 照旧 **200**（不比对 UserId）。响应**填 `MovieCount` / `SeriesCount` / `EpisodeCount`**
+  （前两者取首页插件申报的库总数、后者取剧库行申报的集数，见下一条），其余 11 类仍为 0（面板没有片库索引，不复刻真机的全类别计数）。
+  正常客户端都带 token，**客户端无需改动**。
+- **`Shows/{Id}/Seasons` / `Shows/{Id}/Episodes` 按真机对齐**（响应形状变更）：
+  - **`Seasons` 返回特别篇**：不再过滤 `IndexNumber: 0` 的那一季（真机会返回）。
+  - **季 `UserData` 补 `UnplayedItemCount`**：由 4 键补到真机的 5 键（本季未看集数）。
+  - **`Episodes` 集条目补 `SeriesName`（剧名）**：真机每条集都带；取剧名照 `progressItem` 的做法再 `lookup`
+    一次，命中元数据插件缓存、**不额外打上游**；查不到只少这一个可选字段，不影响分集照常返回。
+- **Emby 实例新增「下载」开关（默认开）**：实例编辑弹窗可开关客户端下载能力，开关驱动
+  **同一口径的三处** —— 握手 `Policy.EnableContentDownloading`、条目 `CanDownload`、
+  `Items/{ItemId}/Download` 端点（关闭时回 **403 纯文本**）。默认开 = 行为与以往一致；关闭后
+  客户端不再显示下载入口、直接请求下载端点也被拒。
+- **条目详情补条目级 `Width` / `Height`（视频分辨率）**：数据来自**片源插件申报的 `width`/`height`**
+  （该契约早已存在，见插件仓库 `media-bridge-plugins/docs/plugin-contract.md`）。**插件没给就没有这俩字段**
+  （面板不从集名反推）。对齐真机条目级分辨率。
+
+- **媒体库角标 / 条目计数显示真实库总数（首页插件新增可选申报 `total`）**（契约变更记录见
+  [docs/emby-compat.md](docs/emby-compat.md)，设计取舍见 [docs/adr/0051](docs/adr/0051-home-row-declared-total.md) /
+  [docs/adr/0052](docs/adr/0052-items-counts-library-total.md)）：
+  - **`Views` 库条目 `ChildCount`**：首页插件的行申报（`rows`）新增**可选**字段 `total` —— 申报这个库
+    **总共有多少条**（口径同 `run` 的 `total`）。面板据此三级取数：**行申报 `total` → 插件点开过一次后
+    记下的数 → 占位 `1`**。客户端**还没点开库**就能看到真数（此前未点开的库一律显示占位 1）。插件
+    **取不到就不申报**（回退占位 1，不编数）。
+  - **`Items/Counts` 的 `MovieCount` / `SeriesCount` / `EpisodeCount`**：前两者取**同一份**「首页插件申报的库总数」
+    （按库类型归并，**同类型多行取最大值**、`mixed` 行不参与），`EpisodeCount` 取**剧库行申报的集数**
+    （`episodes`，只对 `tvshows` 行有意义），其余 11 个字段仍回 0。此前这三个字段恒回 0
+    （设计取舍见 [docs/adr/0053](docs/adr/0053-home-row-declared-episodes.md)）。
+  - 契约正文在插件仓库 `media-bridge-plugins/docs/emby-home-plugin.md`。**TMDB 首页插件**已按此申报：
+    抓官网 About 页的全库规模，按库类型映射（`movies` → 电影数、`tvshows` → 剧集数、`mixed` → 两者之和），
+    并解析同页的 `TV Episodes` 作为剧库集数（`episodes`），带缓存、不阻塞面板的行轮询。**客户端无需改动。**
+
+- **Emby `Items` 补「按类型计数」分支（客户端首页总统计不再显示 0）**（真机对照见
+  [docs/emby-realdevice/05-users-userid-items.md](docs/emby-realdevice/05-users-userid-items.md)，
+  契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)）：Rex 等客户端首页**在拿库列表之前**
+  先打两条无 `ParentId` 的 `Items?Recursive=true&IncludeItemTypes=Movie|Series&Limit=1&SortBy=SortName&SortOrder=Ascending`
+  （除类型外参数相同），**只读 `TotalRecordCount`** 当「总统计」；此前落到兜底、回 0（首页总统计恒显示 0）。
+  现按类型取**首页插件申报的库规模**（`home.libraryTotals()`，与 `Items/Counts` 同一份数据，见
+  [docs/adr/0052](docs/adr/0052-items-counts-library-total.md)）填 `TotalRecordCount`；**`Items` 仍回空**
+  （不给样本条目）。只认**单类型**，`Movie,Series` 这类多值仍回空（无样本可循）。**客户端无需改动。**
+
+- **Emby 版本行副标题改为「标准文件名」**（契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)）：
+  客户端版本行的**副标题**（取 `MediaSources[].Path` 解码后「最后一个 `/` 之后」的文字）此前是
+  「站点来源标签 · 集名」（如 `小雅 Alist · 4K · <原始文件名>`），现改为聚合层拼好的**标准文件名**
+  （scene naming，`标题.年份.季集.分辨率.来源.音频(含声道).Atmos.动态范围.视频编码.容器`），例如
+  `蜘蛛侠：崭新之日.2026.2160p.WEB-DL.DDP5.1.Atmos.DV.H.265.mkv`。**不再带站点前缀**
+  （来源 / 线路已在标题位 `MediaSources[].Name` 显示）；`WEB-DL` 等来源由聚合层识别补出，
+  `H.265` / `DDP5.1` / `DV` 等规格用圈内通行写法。**只动副标题** —— 标题位、`MediaStreams`
+  各字段、播放路径（走 `/videos/{Id}/stream.{ext}`，不读这个 `Path`）均不变，**客户端无需改动**。
+
 ## [1.8.4] - 2026-10-06
 
 ### 变更
 
-- **Emby 客户端协议继续按真机对齐**（逐条对照与取样见 [docs/emby-compat.md](docs/emby-compat.md) 的「十、真机对照记录」）：
+- **Emby 客户端协议继续按真机对齐**（逐条对照与取样见 [docs/emby-realdevice/](docs/emby-realdevice/)）：
   - **`Users/{UserId}` 不再核对 UserId 与 token 是否同一人**：实测真机不校验，只要有有效 token，
     UserId 换成任意合法值照样回数据。`Views` 也同步放宽（`authorize(req)` 不再比对 userId）。
   - **`Items` / `Items/Latest` 收紧守卫**：无 token 一律 **401**（原来部分空查询分支会「照常回空」）；
@@ -31,7 +216,7 @@
 
 ### 变更
 
-- **登录与握手响应按真机样本对齐**（逐条对照见 [docs/emby-compat.md](docs/emby-compat.md) 的「十、真机对照记录」）：
+- **登录与握手响应按真机样本对齐**（逐条对照见 [docs/emby-realdevice/](docs/emby-realdevice/)）：
   - `System/Info/Public` 只回真机那 5 个字段：补 `LocalAddresses` / `RemoteAddresses`（空数组），
     删 `LocalAddress` / `ProductName` / `OperatingSystem` / `StartupWizardCompleted`。
   - `User`（UserDto）补 `Prefix` / `DateCreated` / `PrimaryImageTag` / `PrimaryImageAspectRatio`，

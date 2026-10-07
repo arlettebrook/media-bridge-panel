@@ -38,16 +38,27 @@ let seq = 0;
 
 /**
  * 「这条请求是谁发的」—— 取值优先 `x-emby-authorization` 的 `Client=`（那才是 Emby 客户端的自称），
- * 退而用 `user-agent`（**图片请求常常什么凭证都不带**，只有 UA 可认）。
+ * 该头缺失时回退 `authorization`（真机两个头都认，客户端按官方文档也可能发在后一个），
+ * 都没有再退而用 `user-agent`（**图片请求常常什么凭证都不带**，只有 UA 可认）。
+ *
+ * `Key=值` 的取法与 `service.js` 的 `parseClientHeader` 一致：**引号可选**（真机两种写法都认，
+ * 也免得日志把不带引号的客户端名退成 UA、看不出是谁发的）。
  */
 function clientTag(req) {
   const h = (req && req.headers) || {};
-  const auth = String(h['x-emby-authorization'] || '');
-  const client = (auth.match(/Client="([^"]*)"/i) || [])[1] || '';
-  const version = (auth.match(/Version="([^"]*)"/i) || [])[1] || '';
+  const auth = String(h['x-emby-authorization'] || h['authorization'] || '');
+  const client = pickHeaderValue(auth, 'Client');
+  const version = pickHeaderValue(auth, 'Version');
   if (client) return ` [${client}${version ? '/' + version : ''}]`;
   const ua = String(h['user-agent'] || '').trim();
   return ` [${ua ? ua.slice(0, 32) : '无标识'}]`;
+}
+
+/** 取授权头里某个 `Key=值`：**引号可选**，与 `service.js` 的 `parseClientHeader` 同一口径。 */
+function pickHeaderValue(text, key) {
+  const m = String(text || '').match(new RegExp(key + '\\s*=\\s*(?:"([^"]*)"|([^",]*))', 'i'));
+  if (!m) return '';
+  return (m[1] !== undefined ? m[1] : m[2]).trim();
 }
 
 /**

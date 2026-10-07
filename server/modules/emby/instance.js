@@ -137,6 +137,8 @@ function migrate() {
     name: String(old.serverName || '').trim() || BRAND.embyServerName,
     port: oldPort > 0 ? oldPort : PORT_START,
     enabled: true,
+    /* 下载开关：默认开（老装法沿用「能下载」，客户端行为不变） */
+    allowDownload: true,
     homePlugin: firstHome,
     serverId: String(old.serverId || '').trim(),
     imageKey: String(old.imageKey || '').trim(),
@@ -197,6 +199,8 @@ function publicInstance(x) {
     name: x.name,
     port: x.port,
     enabled: !!x.enabled,
+    /* 下载开关：字段缺席 = 开（老实例升级后保持「能下载」） */
+    allowDownload: x.allowDownload === undefined ? true : !!x.allowDownload,
     homePlugin: x.homePlugin || '',
     /* 搜索通过的域：回副本不回引用；**null = 全部**（字段缺席，老实例与未限定时的口径） */
     metaDomains: Array.isArray(x.metaDomains) ? x.metaDomains.slice() : null,
@@ -317,6 +321,8 @@ async function add(o = {}) {
     name: normName(o.name) || `Emby ${id}`,
     port,
     enabled: o.enabled === undefined ? true : !!o.enabled,
+    /* 下载开关：默认开（缺席按开） */
+    allowDownload: o.allowDownload === undefined ? true : !!o.allowDownload,
     homePlugin: normName(o.homePlugin),
     serverId: crypto.randomBytes(8).toString('hex'),
     imageKey: crypto.randomBytes(32).toString('hex'),
@@ -341,6 +347,7 @@ function patch(iid, o = {}) {
   if (o.name !== undefined) inst.name = normName(o.name);
   if (o.port !== undefined) inst.port = Number(o.port);
   if (o.enabled !== undefined) inst.enabled = !!o.enabled;
+  if (o.allowDownload !== undefined) inst.allowDownload = !!o.allowDownload;
   if (o.homePlugin !== undefined) inst.homePlugin = normName(o.homePlugin);
   if (o.metaDomains !== undefined) inst.metaDomains = normDomains(o.metaDomains);
   save();

@@ -15,7 +15,11 @@ emby.log.bak
 # 本地计划与设计文档（只在本机保留，不进版本库）
 .trae/
 
-# 运行时数据：源 bundle、缓存 db、以及可能含网盘 cookie/token 的源 profile
+# AI 编码代理的协作约定（只在本机保留，不进版本库）
+AGENTS.md
+
+# 运行时数据：源 bundle、缓存 db、可能含网盘 cookie/token 的源 profile，
+# 以及本机私有的真机测试环境（地址 / 账号 / 口令，见 data/真机环境.md）
 data/
 
 # 容器与部署：不属于项目源码，只在本机保留

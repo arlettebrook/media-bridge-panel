@@ -86,10 +86,18 @@ function itemId(domain, type, entryId, season, episode) {
  * 只额外把 `prefix` 翻成 `domain`（聚合层按它解析"该用哪套模板"）。
  *
  * 认不出来 / 前缀没有对应的插件 / 条目编号为空或含非法字符 / 电影带季号 / 有集号却没有季号 → null。
+ *
+ * 另外回一个 `shape` —— id 的**形状**（`movie` / `show` / `season` / `episode`），认不出回 `null`。
+ * 「哪种 id 归哪一支」的判定只此一处：详情 / 季 / 集的调用方一律照 `shape` 分派，
+ * 不各自去拼 `type` / `season` / `episode` 重新推一遍（见 docs/emby-semantics.md「三、收敛纪律」）。
+ * `shape` 是派生的，`parseItemId` 与 `itemId` 仍然互逆。
  */
 function parseItemId(id) {
   const p = providers.parseItemId(id);
-  return p ? { type: p.type, entryId: p.entryId, season: p.season, episode: p.episode, domain: p.prefix } : null;
+  if (!p) return null;
+  /* 形状由上游解析结果派生：电影不带季号、集号必有季号，所以四种之外不会有别的组合。 */
+  const shape = p.season === null ? (p.type === 'movie' ? 'movie' : 'show') : p.episode === null ? 'season' : 'episode';
+  return { type: p.type, entryId: p.entryId, season: p.season, episode: p.episode, domain: p.prefix, shape };
 }
 
 /* ---------------------------------------------------------------- 图片 */
