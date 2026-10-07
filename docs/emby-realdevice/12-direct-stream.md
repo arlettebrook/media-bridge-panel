@@ -36,7 +36,8 @@
 - 12-2 **状态码 → 不复刻真机形态**：真机本地文件回 **206/200**、远端 http 源回 **307**；面板统一 **302**（`client` 档交给源站）/ 200（`proxy` 档中继）—— 属拉流设计（面板不扛流量，[ADR-0006](../adr/0006-redirect-for-playback.md)），**判定不复刻**。断点续传：真机本地文件自带 `Accept-Ranges: bytes`；面板 `client` 档交给源站、`proxy` 档由中继层处理。
 - 12-3 **`Items/{ItemId}/File` → 不实现（登记为已知未实现）**：真机两台都支持（有效 token 回 **206** 字节），面板**未注册**（落到 501 通配）。按既有取舍「等客户端日志暴露再接线」**先不做**（客户端日志里从没出现过这条），与 `Items/{ItemId}/Download` 同族；出现即照 Download 加一条同样的路由。**已知未实现，非遗漏。**
 - 12-4 **`Items/{ItemId}/Stream/{token}` 是面板特有形状**：真机对这条（`/Items/{id}/Stream/{msId}`）回 **404**；面板把它写进 `MediaSource.Path` 当拉流渠道 ①。属**有意设计**（[ADR-0006](../adr/0006-redirect-for-playback.md)），**不改**。
+- 12-5 **拉流鉴权补认 query `X-Emby-Token`（已落码，未复测）**：客户端抓包（HamHub Android/1.0.0）显示，它在探测 / 拉流时把 token 放进 **query `X-Emby-Token=`**（不带头 `X-Emby-Token`），此前本层只从请求头取 token ⇒ 判成「没带 token」回 **401**，客户端随后改用面板发出去的 `DirectStreamUrl`（query `api_key`）才成功。现 `service.tokenFrom()` 在 query 兜底里**并列认 `api_key` / `X-Emby-Token`**（`URLSearchParams` 键区分大小写，客户端发的正是大写那种）。真机对「query 带 token」的接受度待补测。
 
 **不能模拟**：真机 `Accept-Ranges` / `Content-Range` / `Content-Length` 这些字节级事实来自实际文件（本地）或源站（远端）；面板两档（`client` 交给源站 / `proxy` 中继）都不在 emby 层自己生成。
 
-**状态：12-1 已落码（未复测）；12-2 判定不复刻；12-3 登记为已知未实现；12-4 判定不改。** 样本为**电影**；剧 / 集样本待补测。
+**状态：12-1 已落码（未复测）；12-2 判定不复刻；12-3 登记为已知未实现；12-4 判定不改；12-5 已落码（未复测）。** 样本为**电影**；剧 / 集样本待补测。

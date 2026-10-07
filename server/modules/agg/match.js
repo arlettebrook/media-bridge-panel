@@ -23,6 +23,12 @@
  *   番号对不上、或只有一侧抽得出 → 照旧走相似度那条路，**不加任何惩罚**：
  *   所以无番号的中文片名（斗破苍穹那类）一分不动，也不存在「认错番号误杀」的路径。
  *
+ * ## 片源认证：候选行带 `vod_exact === true`
+ *   插件可以自行认准「这条就是目标作品」并在候选上打标（契约在插件仓库 docs/plugin-contract.md）。
+ *   面板见到就打满分 1、**不判名字**（`scoreItem` 最前短路）。这是插件的**声明性标注**，
+ *   判据实现仍在面板，与「打分与过滤留在面板」不冲突（见 docs/adr/0059-*.md）。
+ *   认证项仍照常受分数线与 `maxItems` 约束 —— 只因分数为 1，会排在最前、优先被接续补打。
+ *
  * ## 两道闸门（顺序很重要）
  *   ① **名字硬拒**（`nameScore` 的 reject）：清洗后**没有公共主干**、或相似度 < 0.5 → 直接出局。
  *      这是拦「斗破苍穹4：逃亡」「斗破苍穹之少年归来」那种"看着像、不是同一部"的真闸门。
@@ -30,7 +36,8 @@
  * ⚠️ 分数只有 0~1，**列表里谁排前面**看分数；"进不进版本列表"看①+②。
  *
  * ## 拿不到的东西（别在这里指望）
- * 源 `/search` 的条目**只有** `vod_id / vod_name / vod_pic / vod_remarks` —— **没有类型、没有年份**。
+ * 源 `/search` 的条目**只有** `vod_id / vod_name / vod_pic / vod_remarks`（外加可选的 `vod_exact` 认证标）
+ * —— **没有类型、没有年份**。
  * 所以"电影/剧"这种**类型硬拒在搜索阶段做不了**（协议里连 `/detail` 都没类型字段）；
  * 年份只能从**标题里的四位数字**猜（`[2025]`、`(2026)`、`斗破苍穹2018`），猜不到就当没有这项信号。
  */
@@ -367,6 +374,11 @@ function normWant(want) {
  * 面板上要显示它（可解释性是这套算法的前提，别把理由丢掉）。
  */
 function scoreItem(want, item) {
+  // 片源认证：插件在候选上打了 `vod_exact === true`，表示它已自行认准「这条就是目标作品」。
+  // 直接记满分、不再判名字（理由与边界见 docs/adr/0059-*.md）。其余流转一律不变。
+  if (item && item.vod_exact === true) {
+    return { score: 1, rejected: false, reason: '片源认证（插件认准，直接采信）', parts: {}, signals: null };
+  }
   const sig = extractSignals(item && item.vod_name, item && item.vod_remarks);
   const name = nameScore(want && want.name, item && item.vod_name);
   if (name.reject) {

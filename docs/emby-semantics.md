@@ -32,7 +32,7 @@
 | 版本清单 | `POST /Items/{ItemId}/PlaybackInfo`，或带 `Fields=MediaSources` 的条目查询 | 1 → 聚合搜索定位片源（逐条目；多线路再逐线路） | 本地文件索引一次返回全部版本 | **保留**。对齐即放大，须先确认 |
 | 取字节 | `GET /videos|Videos/{ItemId}/stream[.ext]`、`Items/{ItemId}/Stream[/{token}]`、`Items/{ItemId}/Download` | 1 → 聚合 + `play`，可能再定位一次 | 直接给文件字节 | **保留**。且面板不扛流量、一律 302（[ADR-0006](adr/0006-redirect-for-playback.md)） |
 | 继续观看补元数据 | `GET /Users/{UserId}/Items/Resume` | 1 → N 次元数据 lookup（每条进度一行） | 本地索引 | **保留**。不为此改行为 |
-| 接下来看补元数据 | `GET /Shows/NextUp` | 1 → 逐集 `episodeExists()` | 本地索引 | **保留** |
+| 接下来看补元数据 | `GET /Shows/NextUp` | 0（端点在，但**恒回空**，不再逐集 `episodeExists()`） | 本地索引 | **已消解**。按 [ADR-0060](adr/0060-nextup-hidden.md) 端点保留、对外恒空，算「该看哪一集」的实现留着但暂不调用 |
 | 库封面 | `GET /Users/{UserId}/Views` | 0（只读本地缓存与图片索引） | 本地 | **已消解**。绝不为了封面单独打上游（详见 [emby-compat.md](emby-compat.md)「库封面」） |
 
 > 取源族（⑤）整支都是扇出敏感：真机与服务端的差别不在协议形状，而在**数据从哪来** ——

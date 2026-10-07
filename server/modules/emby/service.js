@@ -373,10 +373,11 @@ function systemInfo(req) {
 }
 
 /**
- * 从请求里取客户端带来的 AccessToken —— Emby 客户端三种带法都认：
+ * 从请求里取客户端带来的 AccessToken —— Emby 客户端几种带法都认：
  *   ① 头 `X-Emby-Token`（绝大多数请求）
  *   ② 头 `X-Emby-Authorization` 里的 `Token="…"`（部分客户端把 token 塞进那串）
  *   ③ query `api_key=`（实测客户端拉直连流时是这个）
+ *   ④ query `X-Emby-Token=`（部分客户端探测 / 拉流时把同一个 token 也塞进 query，**大小写照发**）
  */
 function tokenFrom(req) {
   const h = (req && req.headers) || {};
@@ -388,9 +389,14 @@ function tokenFrom(req) {
     const v = pickHeaderValue(h[name], 'Token');
     if (v) return { token: v, from: name };
   }
+  /* query 带法：`api_key` 是官方名，`X-Emby-Token` 是客户端把 token **照着头名**塞进 query 的写法。
+   * ⚠️ `URLSearchParams` 的键**区分大小写**，客户端发的正是 `X-Emby-Token`（不能只查小写）。 */
   try {
-    const q = new URL(String((req && req.url) || ''), 'http://local').searchParams.get('api_key');
-    if (q) return { token: String(q).trim(), from: 'api_key' };
+    const sp = new URL(String((req && req.url) || ''), 'http://local').searchParams;
+    for (const name of ['api_key', 'X-Emby-Token', 'x-emby-token']) {
+      const q = sp.get(name);
+      if (q) return { token: String(q).trim(), from: name };
+    }
   } catch {
     /* url 解析不了就当没带 */
   }
@@ -1575,68 +1581,34 @@ function withParentId(query, parentId) {
 /**
  * GET /Shows/NextUp —— 「接下来看」
  *
- * 与 `Items/Resume` 同一族（都要观看历史），差别是它按**剧**回答：
- *   · 该剧最近看的那一集**没看完** → 回它自己（接着看）；
- *   · 已经看完 → 回**下一集**：同一季内找得到就回；找不到再试下一季第 1 集。
+ * **端点保留、对外恒空**（ADR-0060）：本函数不再算「该看哪一集」，一律回
+ * `200 {Items:[], TotalRecordCount:0}`，只为**藏掉**客户端首页那一行「接下来看」——
+ * 它与「继续观看」（`Items/Resume`）在常规顺序观看下指向同一集，两行重复。
  *
- * 「下一集」一律要**在上游的季数据里真实存在**才回 —— 不存在就跳过这部剧，不编（ADR-0008）。
+ * 保留端点（而非删路由）是为了：老客户端（SenPlayer / CapyPlayer 会主动请求这条）不因
+ * 404 报错；且**没有开关**（不引入配置项），需要恢复时直接改这里。
  *
- * 参数：`SeriesId` 可选（SenPlayer 实测会带，只问某一部剧）、`UserId` 在 query；
- * `MediaTypes` / `Recursive` / `Fields` 忽略，`Limit` 只用来截断条数。
- * **只验 token**（15-1 起对齐真机：有效 token + 错配 / 不存在的 `UserId` 也回 200，
- * 不 401；与 `Items/Resume` 同口径）。观看记录仍按 token 解出的账号取（`accountIdFor`
- * 以 token session 为准），**不引入跨账号可见性**。
+ * 「不删除」的取值口径：下面的 `nextEpisodeItem` / `episodeExists` / `firstEpisodeItem`
+ * 实现**原样留着**（暂不调用），恢复时把本函数的空返回换回原逻辑即可。
+ *
+ * 鉴权口径不变：无 token → 401 纯文本 `Access token is invalid or expired.`；
+ * 有效 token + 错配 / 不存在的 `UserId` 也回 200（见 ADR-0048）。
  */
 async function getNextUp(requestedId, req, query) {
   const denied = authorize(req);
   if (denied) return denied;
-  if (!accountIdFor(req, requestedId)) {
-    return { status: 200, body: { Items: [], TotalRecordCount: 0 }, log: '账号认不出 → 空' };
-  }
-  const accountId = accountIdFor(req, requestedId);
-  const wantSeries = String((query && typeof query.get === 'function' ? query.get('SeriesId') : '') || '').trim();
-  const limit = limitOf(query, 20);
-  let rows = db.listRecentBySeries(accountId);
-  if (wantSeries) rows = rows.filter((r) => r.series_id === wantSeries);
-
-  const items = [];
-  let skipped = 0;
-  for (const r of rows) {
-    if (items.length >= limit) break;
-    const it = await nextEpisodeItem(r, accountId);
-    if (it) items.push(it);
-    else skipped += 1;
-  }
-
-  /* 客户端拿 `SeriesId` 来问"这部剧从哪看"，而库里**一点它的进度都没有**时（新剧，
-   * 或进度被清过）：回**第一集**、位置 0。
-   *
-   * 不回的话客户端拿到空列表就停在这儿 —— CapyPlayer 进剧页只发这一条，空了就铺不出
-   * 播放目标，后面既不问季集也不问播放信息（电影没有这一环，所以同一个客户端里电影照常能播）。
-   * 只有"这部剧一条进度都没有"才补：全看完的剧本就该没有下一集，不能拿第一集顶上。 */
-  let fromStart = false;
-  if (wantSeries && !rows.length && items.length < limit) {
-    const first = await firstEpisodeItem(wantSeries, accountId);
-    if (first) {
-      items.push(first);
-      fromStart = true;
-    }
-  }
   return {
     status: 200,
-    body: { Items: items, TotalRecordCount: items.length },
-    log:
-      `接下来看：库里 ${rows.length} 部在追 → 列出 ${items.length} 条` +
-      (wantSeries ? `（只问 ${wantSeries}）` : '') +
-      (fromStart ? '（库里没有这部剧的进度 → 从第一集开始）' : '') +
-      (skipped ? `（${skipped} 部算不出下一集，未列出）` : '') +
-      briefIds(items),
+    body: { Items: [], TotalRecordCount: 0 },
+    log: '接下来看：按 ADR-0060 不外发 → 空',
   };
 }
 
 /**
- * 一部剧的"接下来看"：按 `getNextUp` 的口径算出该看哪一集，再交给 `progressItem` 组装
+ * 一部剧的"接下来看"：算出该看哪一集，再交给 `progressItem` 组装
  * （这样带出来的是**那一集自己**的位置与已看状态，而不是"最近那条"的）。
+ *
+ * **当前未被调用**（`getNextUp` 按 ADR-0060 恒回空）；实现原样保留，供恢复用。
  */
 async function nextEpisodeItem(row, accountId) {
   const p = metaBridge.parseItemId(row.item_id);
@@ -1681,7 +1653,10 @@ async function nextEpisodeItem(row, accountId) {
   );
 }
 
-/** 上游的季数据里有没有这一集（`NextUp` 只回真实存在的下一集） */
+/**
+ * 上游的季数据里有没有这一集（「接下来看」只回真实存在的下一集）。
+ * **当前未被调用**（ADR-0060）；实现原样保留，供恢复用。
+ */
 async function episodeExists(domain, entryId, season, episode) {
   const look = await metaBridge.lookupSeason({ entryId, season, domain });
   if (!look.ok) return false;
@@ -1694,6 +1669,8 @@ async function episodeExists(domain, entryId, season, episode) {
  * 季号、集号都取最小的那一个，且要**上游真实存在** —— 季按升序找，第一季里没有集
  * 就试下一季，全都没有就回 null，不编（ADR-0008）。特别篇（S0）不参与，与 `getSeasons` 同口径。
  * 组装仍走 `progressItem`：没看过的一集位置 0、未看，客户端点它就是从头发起。
+ *
+ * **当前未被调用**（ADR-0060）；实现原样保留，供恢复用。
  */
 async function firstEpisodeItem(seriesId, accountId) {
   const p = metaBridge.parseItemId(seriesId);
@@ -2657,7 +2634,7 @@ async function getSimilar(itemId, limit) {
  * 聚合只做补充：连不上 / 没配 → 元数据照常返回（日志写明原因），详情页不至于打不开。
  * 粒度说明：站源只有「剧」级条目（`vod_id` 是剧），**集的定位要等聚合层给 detail 契约**。
  */
-async function getItem(itemId, host = '', proto = 'http') {
+async function getItem(itemId) {
   const p = metaBridge.parseItemId(itemId);
   if (!p) return { status: 404, body: { error: '没有这个条目' }, log: `Id 认不出 → 404：${itemId}` };
 
@@ -2766,11 +2743,9 @@ async function getItem(itemId, host = '', proto = 'http') {
   const lfStat = ((d.stats || {}).lineFilter) || null;
   const bindings = [];
   const siteDigest = [];
-  /* 命中涉及**多个源**时，版本行标题要带上源名 —— 不同源可能有同名站点（都叫"木偶"），
-   * 只带站点标签就分不清了。只命中一个源时保持原样（标题不变长）。 */
-  const multiSource = new Set(entries.map((e) => e.source)).size > 1;
-  /* 线路 = 版本：**每个站的线路都列出来**（多站之后线路名会重复，标题位要带站点才分得清，见
-   * `buildMediaSource`）。**只有「集」与「电影」可播** —— 剧/季是容器，给了会让客户端以为能播。 */
+  /* 线路 = 版本：**每个站的线路都列出来**。版本行标题位（含"多源时前置源名""同片别名""电影多版本
+   * 短标签"）已由**聚合层拼好**写在各目标的 `versionLabel` 上（见 `buildMediaSource` / ADR-0063），
+   * 本层不再自己拼。**只有「集」与「电影」可播** —— 剧/季是容器，给了会让客户端以为能播。 */
   const sources = [];
   let firstFileName = ''; // 第一条版本**定位到的那个文件**的名字（条目级 `FileName` 用，见下）
   let totalLines = 0; // 到手的线路总数 —— **已过线路过滤**（过滤前多少条看 `lfStat.before`）
@@ -2778,7 +2753,6 @@ async function getItem(itemId, host = '', proto = 'http') {
   let noRef = 0; // 插件没给 `ref` 的播放项数（正常不会发生：没它这一项点了必然播不了）
   for (const entry of entries) {
     const siteKey = entry.key;
-    const siteLabel = (multiSource && entry.sourceName ? `${entry.sourceName} ` : '') + (entry.name || siteKey);
     /* 一个站可能收下**多条条目**：代表（`entry.detail`）+ 同片别名变体（`entry.variants[]`，
      * 见 agg 的 `pickByName`）—— 每条条目各自展开自己的线路。老响应没有 `variants`，
      * 这里就是单条，行为与从前完全一样。 */
@@ -2827,9 +2801,7 @@ async function getItem(itemId, host = '', proto = 'http') {
           noTarget += 1;
           continue;
         }
-        /* 电影多版本：同一条线路下的各项要生成**互不相同**的短标签（规格优先，重了补项序号） */
-        const itemLabels = movie ? itemLabelsOf(targets) : [];
-        targets.forEach((t, i) => {
+        targets.forEach((t) => {
           /* 播放项必须带 `ref` —— 播放时面板把它原样交回插件换地址，没有它这一项点了必然播不了，
            * 所以**不进版本列表**（与上面"没有可播目标的线路不进版本列表"同一口径：宁可少给）。
            * 正常情况下插件每项都会给 ref，走到这里说明插件没照契约做，如实数出来记进诊断。 */
@@ -2843,14 +2815,9 @@ async function getItem(itemId, host = '', proto = 'http') {
           sources.push(
             buildMediaSource({
               itemId,
-              host,
-              proto,
-              siteLabel,
               line,
               runtimeTicks: found.RunTimeTicks,
-              variantLabel: item.label || '',
               item: t,
-              itemLabel: itemLabels[i] || '',
             })
           );
         });
@@ -3052,7 +3019,7 @@ function aspectRatioOf(w, h) {
  * MediaSource 级补了 `ItemId`/`Chapters`/`Formats`/`RequiredHttpHeaders`/`SupportsProbing`/
  * `IsInfiniteStream`/`ReadAtNativeFramerate`/`HasMixedProtocols`/`AddApiKeyToDirectStreamUrl`/
  * `Requires*`，流级补了上面 `STREAM_BASE` 那一批 + `AspectRatio`/`VideoRange`/色彩三元组。
- * `host` 给了就把 `Path` 写成**绝对 URL**（真机的 Path 也不是相对路径）。
+ * `Path` 给**相对路径**（`/Items/…`，见 `streamPath`）—— 客户端把它拼在自己的 base 之后（base 含 `/emby`）。
  *
  * 规格全部来自源在集名里的标注（`line.target.*`）：**有才给、缺就空着** —— 给假的比不给更坑。
  */
@@ -3060,64 +3027,24 @@ function aspectRatioOf(w, h) {
  * **直连播放地址**（`MediaSources[].DirectStreamUrl`）—— 真机**只在 PlaybackInfo 里给**，详情里没有
  * （拿真机同一集 `S05E211` 逐字段对过：详情 27 个字段、PlaybackInfo 28 个，差的就是它）。
  *
- * 形状照真机：`…/videos/{id}/stream?MediaSourceId=…&api_key=…&Static=true`。两点刻意：
- *   · 给**绝对** URL —— 本面板发出去的 `Path` 就是绝对的，绝对地址在任何解析规则（按 base 拼还是按 host 拼）下都不会错；
+ * 形状照真机：`/videos/{id}/stream?MediaSourceId=…&api_key=…&Static=true`。两点刻意：
+ *   · 给**相对路径**（`/videos/...`，与真机一致）—— 客户端把这里给的地址**当相对路径直接拼在
+ *     自己的 base 之后**（base 已含 `/emby`，见 server.js 注释）：给绝对 URL 会被再拼一次成
+ *     双重地址（`…/emby` + `http://…/api/emby/…`）→ 404。相对路径去掉 `/api/emby` 与 `/emby`
+ *     前缀后，base 是 `/emby` 还是 `/api/emby` 都能命中（`/emby/videos/…` / `/api/emby/videos/…`
+ *     → normalize → `/api/emby/videos/…`）。
  *   · 带上**客户端自己的 token** —— 本层的流端点要校验 AccessToken，不带就是 401（那比不给更糟）。
  *     ⚠️ 用 query 里的 `api_key`，**不能写 `X-Emby-Token`**：后者本层只认请求头，
  *     写进 query 等于没带（拿这个 URL 直接去播就是 401 —— 客户端自己会带头所以看不出来，
  *     但把 URL 交给外部播放器/投屏时就会踩到）。`api_key` 这个 query 形式真机也认。
- *
- * ⚠️ 真机 PlaybackInfo 里它还是**相对路径**（`/videos/...`），这里给绝对的 —— 同理：只多不少、不会解析错。
  */
-function directStreamUrl({ itemId, host, proto = 'http', token, src, container }) {
-  if (!host) return '';
+function directStreamUrl({ itemId, token, src, container }) {
   const file = `stream${container ? '.' + container : ''}`;
   return (
-    `${proto}://${host}/api/emby/videos/${encodeURIComponent(itemId)}/${file}` +
+    `/videos/${encodeURIComponent(itemId)}/${file}` +
     `?MediaSourceId=${encodeURIComponent(src)}&Static=true` +
     (token ? `&api_key=${encodeURIComponent(token)}` : '')
   );
-}
-
-/**
- * 体积前缀：播放项带体积（agg 从集名 `[..GB/MB]` 解析，或插件直接给 `sizeBytes`）时，
- * 标题最前面挂十进制大小（与播放器副标题同一口径，GB = 10⁹）：`[8.0G]` / `[943M]`；
- * 没有体积返回空串（不标，不编）。
- * ≥1GB 保留一位小数，<1GB 取整 MB。
- */
-function sizeTag(t) {
-  const n = Number(t && t.sizeBytes) || 0;
-  if (!n) return '';
-  if (n >= 10 ** 9) return `[${(n / 10 ** 9).toFixed(1)}G]`;
-  return `[${Math.round(n / 10 ** 6)}M]`;
-}
-
-/**
- * 电影多版本短标签用的**清晰度**部分。体积已统一放标题前缀（`sizeTag`），这里不再重复。
- * 读不出清晰度返回空（调用方退回「第 N 项」，不编）。例：`1080p`。
- */
-function itemSpecLabel(t) {
-  if (t.width && t.height) return t.height >= 2000 ? '4K' : `${t.height}p`;
-  return '';
-}
-
-/**
- * 一条线路下**全部播放项**的短标签（电影专用）：清晰度互不相同就直接用清晰度；
- * 有重复（同一部片的两个压制版本体积+清晰度一样）或读不出时，补 `· 第 N 项` 保证**互不相同** ——
- * 标题撞名的后果是客户端里几条版本长得一模一样（同片变体已经踩过一次）。
- * ⚠️ 去重判据仍是「体积 + 清晰度」：体积显示在前缀，但同清晰度、不同体积的两个版本
- *    靠前缀区分，不该再补「第 N 项」。
- */
-function itemLabelsOf(items) {
-  const specs = items.map((t) => itemSpecLabel(t));
-  const keys = items.map((t, i) => `${Number(t.sizeBytes) || 0}|${specs[i]}`);
-  const seen = new Set();
-  const dup = new Set();
-  for (const k of keys) {
-    if (seen.has(k)) dup.add(k);
-    seen.add(k);
-  }
-  return keys.map((k, i) => (dup.has(k) ? `${specs[i] || '播放项'} · 第 ${i + 1} 项` : specs[i]));
 }
 
 /**
@@ -3148,29 +3075,25 @@ function ensureUniqueSourceNames(msList) {
   }
 }
 
-function buildMediaSource({ itemId, siteLabel, line, runtimeTicks, variantLabel = '', host = '', proto = 'http', headers = {}, item, itemLabel = '' }) {
+function buildMediaSource({ itemId, line, runtimeTicks, headers = {}, item }) {
   /* 这个版本要播的那一项：电影 = 该线路下的某个播放项；剧集 = **定位到的这一集**。
    * 两者都带集名里源标的规格（容器/分辨率/编码/体积），也带**插件给它编的 `ref`**。 */
   const t = item || line.target || {};
   /* `line.playVia` 由源插件申报、聚合层原样透传（契约第五节）；编进版本 Id 供起播判档用 */
   const src = catpawSourceId(t.ref, line.playVia);
-  /* 站点标签用**完整 `name`**（`木偶|4K`）—— 带着 `|4K` 这类画质后缀，比截短的"木偶"信息更全；
-   * 标题位与副标题（Path 末段）用**同一个标签**，两行格式统一。
-   * 同片别名（`（臻彩）`/`（4K 偷跑）`）**必须**进标题位：同一部片的两个条目常常线路名完全一样
-   * （`虎斑|4K · 夸克原画` × 2），不加后缀又变成"分不清哪条是哪条"（同类问题已出现过）。
-   * 电影多版本（`itemLabel`）同理：同一条线路下挂着 4 个压制版本时，不加规格就是 4 行一模一样。 */
-  /* 体积前缀挂最前面（`[1G]` / `[743M]`）；这项没体积信息就不带，其余标题结构不变 */
-  const sizePrefix = sizeTag(t);
-  const title = `${sizePrefix ? `${sizePrefix} ` : ''}${siteLabel} · ${line.flag}${variantLabel ? ` · ${variantLabel}` : ''}${itemLabel ? ` · ${itemLabel}` : ''}`;
+  /* 版本标题位（`[体积] 站点标签 · 线路flag [· 变体标注] [· 项标注]`）由**聚合层拼好**，
+   * 写在这项的 `versionLabel` 上（`agg/service.js` 的 `fillVersionLabels`）—— 规则只实现一次，
+   * emby 层与出口插件（FW/Rex）读的是同一个字段（见 ADR-0063）。
+   * 本层**不再自己拼**、也不留旧的拼接兜底：能进版本列表的目标都过了聚合层那一趟，字段必然有值。 */
+  const title = t.versionLabel || '';
   /* Path 末段 = 版本行的**副标题**（客户端取「解码后最后一个 `/` 之后」，见 streamPath）。
    * 优先用 agg 拼好的 `standardName`（`标题.年份.季集.规格.容器`），没有就退到原始文件名。 */
   const fileName = t.standardName || t.name || `${line.flag}.mkv`;
   const rel = streamPath(itemId, src, fileName);
-  const abs = host ? `${proto}://${host}${rel}` : rel;
   const ms = {
     Id: src,
     Name: title,
-    Path: abs,
+    Path: rel,
     Protocol: 'Http',
     Type: 'Default',
     IsRemote: true,
@@ -3348,7 +3271,10 @@ function inflateText(s) {
 /**
  * 流端点的 Path：**只拼稳定坐标，不带任何时效 token**。
  *
- *   /api/emby/Items/{ItemId}/Stream/{token}/{文件名}
+ *   /Items/{ItemId}/Stream/{token}/{文件名}
+ *
+ * 给**相对路径**（不带 `/api/emby` 前缀，也不带主机）—— 客户端把它当相对路径拼在自己的 base 之后
+ * （base 已含 `/emby`），去掉前缀后 base 是 `/emby` 还是 `/api/emby` 都能命中（同 `directStreamUrl`）。
  *
  *   - `{token}` = base64url(版本 Id)（**整条 Id 原样编进来**：Id 自身已是 `catpaw:` + base64url，
  *     这里再编一层只为让路径段不含 `/`；两层都解得出，token 长一点无所谓）
@@ -3366,7 +3292,7 @@ function inflateText(s) {
 function streamPath(itemId, src, fileName) {
   const token = Buffer.from(String(src), 'utf8').toString('base64url');
   const name = String(fileName || '').trim() || 'video.mkv';
-  return `/api/emby/Items/${encodeURIComponent(itemId)}/Stream/${token}/${encodeURIComponent(name)}`;
+  return `/Items/${encodeURIComponent(itemId)}/Stream/${token}/${encodeURIComponent(name)}`;
 }
 
 /** 拆 Path 段里的 token（base64url → 版本 Id）—— 认不出回空串，上层据此报 400 */
@@ -3422,13 +3348,13 @@ function locatorLabel(type, p) {
   return `（非可播类型：${type}）`;
 }
 
-async function getPlaybackInfo(itemId, host = '', token = '', proto = 'http') {
+async function getPlaybackInfo(itemId, token = '') {
   const p = metaBridge.parseItemId(itemId);
   if (!isPlayableId(p)) {
     return { status: 404, body: { error: '只有「集」和「电影」有播放信息' }, log: `Id 不是集/电影 → 404：${itemId}` };
   }
 
-  const item = await getItem(itemId, host, proto);
+  const item = await getItem(itemId);
   if (item.status !== 200) return item;
 
   const sources = (item.body.MediaSources || []).map((m) =>
@@ -3436,7 +3362,7 @@ async function getPlaybackInfo(itemId, host = '', token = '', proto = 'http') {
       /* RequiredHttpHeaders 留空：源要求的请求头由**本层**在 Stream 端点里带上，客户端只管拉 */
       RequiredHttpHeaders: {},
       /* 直连播放地址：**只在这里给**（真机详情里没有它 —— 见 `directStreamUrl` 的注释） */
-      DirectStreamUrl: directStreamUrl({ itemId, host, proto, token, src: m.Id, container: m.Container }),
+      DirectStreamUrl: directStreamUrl({ itemId, token, src: m.Id, container: m.Container }),
     })
   );
   return {
@@ -3633,8 +3559,6 @@ function baseItem(f) {
     MediaType: 'Video',
     IsFolder: true,
     ProductionYear: Number(f.year) || 0,
-    PremiereDate: f.premiereDate || '',
-    Overview: f.overview || '',
     CommunityRating: Number(f.communityRating) || 0,
     ProviderIds: f.providerIds || {},
     UserData: emptyUserData(),
@@ -3655,6 +3579,13 @@ function baseItem(f) {
     MediaStreams: [],
   };
   if (f.parentId) item.ParentId = f.parentId;
+  /* `PremiereDate` 是 **DateTime** 字段：拿不到就**不给这个键**（口径同函数末尾的 `DateCreated`）。
+   * ⚠️ **绝不能写空串**：Dart/Flutter 客户端会对它做 `DateTime.parse(value)`，`parse('')`
+   * 直接抛 `FormatException`，**整条响应解码失败**（实测就是本层被客户端报这个错的根因）。
+   * 真机同场景**根本不含这个键**（Fields 门控之外，拿不到就省略），不是给空串 —— 对齐之。
+   * `Overview` 同理：拿不到就不给，避免客户端把空串当有效简介展示。 */
+  if (f.premiereDate) item.PremiereDate = f.premiereDate;
+  if (f.overview) item.Overview = f.overview;
   /* ---- 真机 Emby 每个条目都带的「结构性字段」（按真机响应逐项补齐）----
    * 起因：SenPlayer 拿到那套薄字段就判定条目不可用（有线路也打不开），换真机形状立刻正常。
    * 所以**这些不是可有可无的装饰**。

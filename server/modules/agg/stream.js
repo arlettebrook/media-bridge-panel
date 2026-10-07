@@ -525,7 +525,9 @@ async function fetchOneChunk(url, headers, start, end, signal, timeout, readTime
       return { buf };
     } catch (e) {
       try {
-        res.body.cancel();
+        /* 必须 await：取消一个已被 reader 占住的流回的是**被拒的 Promise**（非同步抛错），
+         * 不 await 就会漏成"未处理的 Promise 拒绝"（readTimeout 先到、arrayBuffer 还占着锁时就是这种）。 */
+        await res.body.cancel();
       } catch {
         /* 无所谓 */
       }

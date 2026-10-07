@@ -739,6 +739,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
     /* 产出前滤掉规则不匹配的线路（快路径与正常路径**都要做**，见 `applyLineFilter`） */
     if (lf.raw) applyLineFilter(out, lf);
     fillStandardNames(out, opts.name, opts.year, season, episode);
+    fillVersionLabels(out, pick, byId);
     out.elapsedMs = Date.now() - t0;
     return out;
   }
@@ -1024,6 +1025,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
   out.stats.usable = usableItems;
 
   fillStandardNames(out, opts.name, opts.year, season, episode);
+  fillVersionLabels(out, pick, byId);
   out.elapsedMs = Date.now() - t0;
   return out;
 }
@@ -1049,6 +1051,77 @@ function fillStandardNames(out, name, year, season, episode) {
      * 有的还是原始文件名」（实测：`三体 S01E10` 代表条目 0 线路、10 条变体在扛，副标题全没拼上）。 */
     fillDetail(site.detail);
     for (const v of site.variants || []) fillDetail(v.detail);
+  }
+}
+
+/** 版本行**标题位**的体积前缀：播放项带体积时挂十进制大小（GB = 10⁹）：`[8.0G]` / `[943M]`；
+ * 没有体积返回空串（不标，不编）。≥1GB 保留一位小数，<1GB 取整 MB。 */
+function sizeTag(t) {
+  const n = Number(t && t.sizeBytes) || 0;
+  if (!n) return '';
+  if (n >= 10 ** 9) return `[${(n / 10 ** 9).toFixed(1)}G]`;
+  return `[${Math.round(n / 10 ** 6)}M]`;
+}
+
+/** 电影多版本标题位用的**清晰度**短标签（体积已统一放前缀，这里不重复）。读不出返回空。例：`1080p`。 */
+function itemSpecLabel(t) {
+  if (t.width && t.height) return t.height >= 2000 ? '4K' : `${t.height}p`;
+  return '';
+}
+
+/** 一条线路下**全部播放项**的短标签（电影专用）：清晰度互不相同就直接用清晰度；有重复（同一部片的
+ * 两个压制版本体积+清晰度一样）或读不出时补 `· 第 N 项`，保证**互不相同**（同片变体踩过"标题撞名"）。
+ * ⚠️ 去重判据仍是「体积 + 清晰度」：体积显示在前缀，同清晰度、不同体积的两个版本靠前缀区分。 */
+function itemLabelsOf(items) {
+  const specs = items.map((t) => itemSpecLabel(t));
+  const keys = items.map((t, i) => `${Number(t.sizeBytes) || 0}|${specs[i]}`);
+  const seen = new Set();
+  const dup = new Set();
+  for (const k of keys) {
+    if (seen.has(k)) dup.add(k);
+    seen.add(k);
+  }
+  return keys.map((k, i) => (dup.has(k) ? `${specs[i] || '播放项'} · 第 ${i + 1} 项` : specs[i]));
+}
+
+/**
+ * 给每个**可播目标**拼版本行标题位：`[体积] 站点标签 · 线路flag [· 变体标注] [· 项标注]`，
+ * 消费方（emby 层、出口插件 FW/Rex）拿 `x.versionLabel` 直接当版本显示名 —— 规则只实现一次
+ *（见 ADR-0063；与 ADR-0043「线路过滤在聚合层产出时滤」同一模式）。
+ *
+ * - 站点标签：命中**多个源**时前置源名（不同源可能有同名站点）；只命中一个源时保持原样（标题不变长）。
+ * - 变体标注 = 同片别名（`（臻彩）`）；项标注 = 电影同一线路下多个压制版本的短标签（见 `itemLabelsOf`）。
+ * - `pick` 决定"什么算可播目标"，与 emby 层一致：电影（`items`）每条线路的 `items[]` 各一个；
+ *   剧集（缺省）每条线路的 `target`（定位到的这一集）。取不到的线路不写（emby 层也不列它）。
+ *
+ * 顺手把详情站条目的 `sourceName` 补齐（原先只有搜索条目带）—— 拼站点标签要用它，
+ * 消费方读 `sites[].sourceName` 也才有值。
+ */
+function fillVersionLabels(out, pick, byId) {
+  const sites = out.sites || [];
+  for (const s of sites) {
+    if (s && s.sourceName === undefined) s.sourceName = ((byId && byId.get(s.source)) || {}).name || '';
+  }
+  const multiSource = new Set(sites.filter((s) => s && s.detail).map((s) => s.source)).size > 1;
+  const movie = pick === 'items';
+  const labelDetail = (site, label, detail) => {
+    const siteLabel = (multiSource && site.sourceName ? `${site.sourceName} ` : '') + (site.name || site.key || '');
+    for (const line of (detail && detail.lines) || []) {
+      const targets = movie ? line.items || [] : line.target ? [line.target] : [];
+      if (!targets.length) continue;
+      const itemLabels = movie ? itemLabelsOf(targets) : [];
+      targets.forEach((t, i) => {
+        const sizePrefix = sizeTag(t);
+        t.versionLabel =
+          `${sizePrefix ? `${sizePrefix} ` : ''}${siteLabel} · ${line.flag}` +
+          `${label ? ` · ${label}` : ''}${itemLabels[i] ? ` · ${itemLabels[i]}` : ''}`;
+      });
+    }
+  };
+  for (const site of sites) {
+    /* 代表条目与同片别名变体各有一份 detail（与 `fillStandardNames` 同一口径）。 */
+    if (site.detail) labelDetail(site, '', site.detail);
+    for (const v of site.variants || []) if (v.detail) labelDetail(site, v.label || '', v.detail);
   }
 }
 

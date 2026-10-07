@@ -1,8 +1,13 @@
 # 播放进度上报（`POST /Sessions/Playing*`）实现方案
 
 > 状态：**已实施**（决策落在 [ADR-0023](adr/0023-playback-progress.md)；本文保留为设计过程与真机实测记录）。
-> 与方案的两处偏差：① 元数据**读时按坐标反查上游**（走元数据插件自己的缓存），**不写快照**（§5.2 选 B 而非 A）；
+> 与方案的三处偏差：① 元数据**读时按坐标反查上游**（走元数据插件自己的缓存），**不写快照**（§5.2 选 B 而非 A）；
 > ② `PlayCount` 按"看完才 +1"（真机是"开始播放就 +1"，差异记在 ADR-0023 的「后果」）。
+> ③ 此后 [`Shows/NextUp`](adr/0060-nextup-hidden.md) 改为**端点保留、对外恒空**（[ADR-0060](adr/0060-nextup-hidden.md) 取代了
+> ADR-0023 的 NextUp 那一格）；本文中把 NextUp 当"读侧真数据端点"的段落均以此为历史记录，不再代表现状。
+> ④ 此后又认领了 Emby **旧版播放上报族** `POST|DELETE /Users/{UserId}/PlayingItems/{ItemId}[/Progress]`
+> （HamHub Android 实测走这一族、此前全落 501），映射到同一 `recordPlayback()`；两族的落库口径一致，
+> 差异（`ItemId` 在**路径**、参数在 **query**、**无 body**、**不带 `RunTimeTicks`**）见 §12。
 > 实测依据：面板容器留档日志 `2026-09-22T16:52:35 ~ 17:01:31Z`（96 行，`docker logs media-bridge-panel`）。
 > 实施时按 `CONTRIBUTING.md` 的规矩补一条 **ADR-0023**（新数据结构 + 新失败语义），并把三条端点登记进
 > `docs/emby-compat.md`「五、已实现端点」表、把缺口从 `docs/develop.md` 的「未实现」节里划掉。
@@ -336,3 +341,28 @@ API 没有"设置播放次数"的端点，补不回去。
 
 探测后 `Items/Resume` 与 `Filters=IsPlayed` **与基线完全一致**。唯一可见改动：清理用的
 `DELETE PlayedItems` 把该条目的 `PlayCount` 从 2 清成 0（那是它自己维护的计数，不由进度上报决定）。
+
+## 12. 旧版播放上报族（`Users/{UserId}/PlayingItems/*`）
+
+Emby 早期 API 里进度上报走的是**另一族**路径，与本方案（新版族 `Sessions/Playing*`）语义相同、形状不同。
+**HamHub Android/1.0.0** 实测走的就是这一族（此前全落 501 通配 → 进度一条没落），故一并认领。
+
+| 方法 | 路径 | 语义 | 对应新版族 |
+|---|---|---|---|
+| POST | `/api/emby/Users/{UserId}/PlayingItems/{ItemId}` | 开始播放 | `Sessions/Playing` |
+| POST | `/api/emby/Users/{UserId}/PlayingItems/{ItemId}/Progress` | 心跳 | `Sessions/Playing/Progress` |
+| DELETE | `/api/emby/Users/{UserId}/PlayingItems/{ItemId}` | 结束 / 停止 | `Sessions/Playing/Stopped` |
+
+与新版族的**关键差异**（这三条是本族独有的形状）：
+
+- `ItemId` 在**路径**（不是 body 的 `ItemId`）；
+- 参数在 **query**（`?PositionTicks=…`），**没有 JSON body**；
+- **不带 `RunTimeTicks`** ⇒ 面板拿不到时长。`recordPlayback()` 对缺失时长的处理是"照实记「时长未知」"，
+  于是**"看完"可能判不出**（只能按位置记，靠 `position_ticks` 反映"看到哪"）。
+  这是本族相对新版族的**已知限制**，不是实现缺陷。
+
+实现：`routes.js` 里把 path / query 拼成 `recordPlayback()` 认的形状（`ItemId` / `PositionTicks` / `RunTimeTicks`），
+落库口径、鉴权（`authorize`）、响应（**204 空体**）与新版族三条**完全一致**；三条都注册在 501 通配之前。
+
+真机对照登记见 [docs/emby-realdevice/22-users-userid-playingitems.md](emby-realdevice/22-users-userid-playingitems.md)（**未复测**）。
+

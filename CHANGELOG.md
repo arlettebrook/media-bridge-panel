@@ -5,6 +5,49 @@
 
 ## [未发布]
 
+### 变更
+
+- **Emby 版本行标题位改由聚合层供给**（契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)）：
+  版本行的**标题位**（`MediaSources[].Name` 与视频流 `DisplayTitle`）不再由 emby 层自己拼，
+  改为直接读聚合层写好的 `versionLabel`，出口插件（FW/Rex）读同一个字段 —— 规则只实现一次。
+  - **改的是什么**：标题位**格式不变**（仍是 `[体积] 站点标签 · 线路flag [· 变体标注] [· 项标注]`），
+    拼装从 emby 层下沉到聚合层；emby 层不留旧拼装兜底。聚合层同步给详情站条目补上 `sourceName`。
+  - **影响哪些端点**：`POST /api/emby/Items/{ItemId}/PlaybackInfo`、
+    `GET /api/emby/Users/{UserId}/Items/{ItemId}`（详情）的 `MediaSources`。
+  - **对客户端的影响**：**多源命中时标题多出源名前缀**（形如 `源名 站点标签 · 线路`）——
+    此前聚合层详情站条目不带 `sourceName`，这条「多源前置源名」**实际从未生效**；现生效，属新可见文本。
+    单源场景标题不变。客户端无需改动（只当显示名读）。agg 详情缓存 key 版本号随之升级
+    （`aggdetail4` → `aggdetail5`）。
+  - 决策见 [ADR-0063](docs/adr/0063-version-label-at-aggregate-output.md)（与
+    [ADR-0043](docs/adr/0043-line-filter-at-aggregate-output.md) 同一模式）。
+
+- **Emby「接下来看」端点改为对外恒空**（契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)）：
+  `GET /api/emby/Shows/NextUp` **保留端点、不删路由、不加开关**，但响应恒为
+  `200 {Items:[], TotalRecordCount:0}`。
+  - **改的是什么**：客户端首页的「继续观看」（`Items/Resume`）与「接下来看」（`Shows/NextUp`）
+    在常规顺序观看下常指向同一集、两行重复；现让 `Shows/NextUp` 不再出数据，藏掉那一行。
+    算「该看哪一集」的实现**留着但暂不调用**（恢复时改回即可）。鉴权口径不变（无 token → 401）。
+  - **影响哪些端点**：仅 `GET /api/emby/Shows/NextUp`（含带 `SeriesId` 的请求）。
+    `Items/Resume`、`Items?Filters=IsPlayed` 等**不受影响**。
+  - **对客户端的影响**：只认 `Shows/NextUp` 渲染「接下来看」那一行的客户端将不再显示该行；
+    「继续观看」仍由 `Resume` 提供。**客户端无需改动**（它本就该容忍空列表）。
+  - 决策见 [ADR-0060](docs/adr/0060-nextup-hidden.md)（取代 [ADR-0023](docs/adr/0023-playback-progress.md) 的
+    `Shows/NextUp` 那一格）。
+
+- **Emby 播放地址由绝对 URL 改为相对路径**（AfuseKt 起播 404）
+  （契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)）：
+  - **改的是什么**：`DirectStreamUrl`（`PlaybackInfo`）与 `MediaSources[].Path`（详情 / `PlaybackInfo`）
+    此前给**绝对 URL**（`{proto}://{host}/api/emby/…`），现改为**相对路径**
+    （`/videos/…?…&Static=true`、`/Items/…`），对齐真机形态。连带去掉
+    `getItem` / `getPlaybackInfo` / `buildMediaSource` 的 `host` / `proto` 参数与 `protoOf` 工具函数。
+  - **影响哪些端点**：`POST /api/emby/Items/{ItemId}/PlaybackInfo`、
+    `GET /api/emby/Users/{UserId}/Items/{ItemId}`（详情）。
+  - **对客户端的影响**：**AfuseKt/3.2.0 起播恢复**。此前它把面板给的绝对地址**当相对路径**再拼在
+    自己的 base（已含 `/emby`）之后，得到双重拼接的畸形地址 → 实例端口 404；改为相对后两种 base
+    都能命中。走官方协议的客户端无需改动。
+  - 决策见 [ADR-0062](docs/adr/0062-relative-playback-urls.md)；真机逐条见
+    [docs/emby-realdevice/11-items-playbackinfo.md](docs/emby-realdevice/11-items-playbackinfo.md)（**未复测**）。
+
 ### 新增
 
 - **Emby 收藏功能**（契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)）：新增写端点
@@ -20,7 +63,43 @@
   - 决策见 [ADR-0058](docs/adr/0058-favorite-items.md)；真机逐条见
     [docs/emby-realdevice/21-favorite-items.md](docs/emby-realdevice/21-favorite-items.md)（**未复测**，待端到端复核）。
 
+- **片源认证：插件认准的候选，面板直接采信**：聚合层新增一条**候选行级**的认证标 ——
+  片源插件在 `search` 返回的候选上写 `vod_exact: true`，表示「这一条已认准、就是目标作品」，
+  面板见到就把它的分数**直接记 1、不再判名字**（其余流转一律不变：仍受分数线与条数上限约束，
+  只因分最高排在最前、优先取详情）。这解决**番号片**的老问题：番号查询的名字相似度会被
+  三四十字的长标题稀释、导致正确候选被名字闸门拒掉；而番号站自己按番号精确过滤过，
+  「这条对不对」它比面板更清楚。**契约在插件仓库**
+  [media-bridge-plugins](https://github.com/dlushu/media-bridge-plugins)（`docs/plugin-contract.md` 第五节），
+  本仓库只是消费方。**missav 片源**先行适配（番号精确过滤后的候选带 `vod_exact`）。
+  决策见 [ADR-0059](docs/adr/0059-source-certified-candidate.md)。
+
+- **Emby 认领旧版播放上报族 `Users/{UserId}/PlayingItems/*`（HamHub Android 进度一条未落）**
+  （契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)）：面板此前只实现新版族
+  `POST /api/emby/Sessions/Playing[/Progress|/Stopped]`；抓包发现 **HamHub Android/1.0.0** 走的是
+  Emby **旧版族** `POST|DELETE /api/emby/Users/{UserId}/PlayingItems/{ItemId}[/Progress]`
+  （`ItemId` 在**路径**、参数在 **query**、**无 JSON body**），此前全落 501 通配 → 播放进度一条没记、
+  `Resume` / `IsPlayed` 拿不到真数据。现认领这一族的 **3 条**（开始 / 心跳 / 结束），
+  把 path / query 拼成现有 `recordPlayback` 认的形状，**落库口径与新版族完全一致**（含 204 空体）。
+  - **影响哪些端点**：新增 `POST …/PlayingItems/{ItemId}`、`POST …/PlayingItems/{ItemId}/Progress`、
+    `DELETE …/PlayingItems/{ItemId}`（此前落 501 通配）。
+  - **对客户端的影响**：走旧版族的客户端进度由「一条不记」转为正常入库，**无需改动**。
+  - **已知限制**：旧版族**不带 `RunTimeTicks`** ⇒ 面板拿不到时长，只能按位置记、「看完」可能判不出。
+  - 真机逐条见 [docs/emby-realdevice/22-users-userid-playingitems.md](docs/emby-realdevice/22-users-userid-playingitems.md)（**未复测**）。
+
 ### 修复
+
+- **Emby 条目不再回空串 `PremiereDate` / `Overview`（客户端 `FormatException: Invalid date format`）**：
+  插件没给首播日期时，条目 DTO 上此前会出现 `"PremiereDate": ""`；客户端（如 Hills）对它做
+  `DateTime.parse(value)`，`parse('')` 直接抛 `FormatException`、**整条响应解码失败**（列表整个打不开）。
+  真机拿不到就**不含这个键**（不是回空串）——现对齐：`PremiereDate` / `Overview` 改为**拿不到就不挂键**
+  （口径同 `DateCreated` / `DateModified`）。**数组类字段仍先铺 `[]`**，不变。
+  - **影响哪些端点**：一切补 `baseItem` 的条目 DTO —— `Items` 列表、`Items/Latest`、`Items/Resume`、
+    详情、季 / 集、相似等。
+  - **对客户端的影响**：`PremiereDate` / `Overview` 由**恒在（可能为空串）**变为**可能缺失**；
+    对空串做类型转换的客户端不再崩，其余客户端无感（**无需改动**）。`Etag` 哈希对 `undefined` / `''`
+    同化，**值不变、无缓存抖动**。
+  - 决策见 [ADR-0061](docs/adr/0061-omit-missing-scalar-fields.md)（细化 [ADR-0008](docs/adr/0008-no-fabricated-data.md)）；
+    真机逐条见 [docs/emby-realdevice/06-users-userid-items-latest.md](docs/emby-realdevice/06-users-userid-items-latest.md)（**未复测**）。
 
 - **Emby 登录不认小写 `pw`（HamHub Android 登不上）**：`POST /api/emby/Users/AuthenticateByName` 的
   请求体取值此前只认固定拼写（`Username`/`username`、`Pw`/`Password`/`password`），客户端发全小写
@@ -54,6 +133,24 @@
   （契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)；真机逐条见
   [docs/emby-realdevice/02-users-authenticatebyname.md](docs/emby-realdevice/02-users-authenticatebyname.md)）
 
+- **Emby 路径大小写写错就落 501（AfuseKt 登不上）**：`core/router.js` 的路径匹配此前**字面段大小写敏感**，
+  客户端把 `/api/emby/Users/AuthenticateByName` 写成全小写 `authenticatebyname` 就落 `ANY /api/emby/*rest`
+  通配 → 501。真机（.NET 路由）**大小写不敏感**，故这类客户端在真机能登、在面板 501（实测 AfuseKt/3.2.0
+  就把登录路径写成全小写）。现对齐真机：字面段**大小写不敏感**比对（`:param` / `*wildcard` 的取值照原样给）。
+  **影响面为全局**（所有走该路由器的路径，含面板自身 `/api/*`）：此前大小写写错会 404 / 501 的路径现在都能命中；
+  方法与段数约束不变（段数不齐仍 404、方法不符仍 405）。此前正确大小写的请求行为不变，**客户端无需改动**。
+  同轮删除冗余的 `Videos` 重复注册（现一条认下大小写两种），端点集合不变。
+  （契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)；真机逐条见
+  [docs/emby-realdevice/02-users-authenticatebyname.md](docs/emby-realdevice/02-users-authenticatebyname.md)）
+
+- **Emby 登录不认表单体（AfuseKt 登不上）**：`core/http.js` 的 `readBody()` 此前**只认 JSON**，
+  客户端发 `Content-Type: application/x-www-form-urlencoded`、体为 `Username=…&Pw=…&appName=…`
+  就解析失败 → 400（即便路径修好也登不上）。真机（.NET 模型绑定）JSON 与表单都读 —— 实测 AfuseKt/3.2.0
+  的登录体就是表单。现对齐真机：`readBody` 按 `content-type` 分流，**另认 `application/x-www-form-urlencoded`**
+  （未发 `content-type` 但形状像表单的也按表单解，否则照旧报 400）。响应结构、错误文案均不变，
+  发 JSON 的客户端**无需改动**。（契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)；真机逐条见
+  [docs/emby-realdevice/02-users-authenticatebyname.md](docs/emby-realdevice/02-users-authenticatebyname.md)）
+
 - **Filmly / 网易爆米花首页空白（`Items` 裸列表查询）**：客户端登录后打的
   `GET /api/emby/Users/{UserId}/Items` 不带 `ParentId`、也不带 `SortBy`/`Filters`/`SearchTerm`，
   只带 `ExcludeItemTypes`/`StartIndex`/`Limit`/`Fields` 这类通用参数 —— 此前落「其余查询 → 空」，
@@ -85,6 +182,22 @@
   「上次失败就跳过」漏掉。现改为**到点先看源起没起**：还在起就每 30s 再看一眼，最多等到开机后
   10 分钟；等满了照跑（如实测、如实记，不再等）。判据只看源实例状态，不影响手动点的那一轮。
   （实现见 [server/modules/agg/site-test.js](server/modules/agg/site-test.js)）
+
+- **中继取块超时收尾漏成「未处理的 Promise 拒绝」**：`proxy` 线路读满一块超时（`readTimeout` 先到）时
+  调 `res.body.cancel()` 收尾，但**没 await** —— 此刻 `res.arrayBuffer()` 还占着流的锁，`cancel()` 回的是
+  **被拒的 Promise**（非同步抛错），同步 `try/catch` 兜不住，于是每发超时都往日志刷一条
+  `TypeError [ERR_INVALID_STATE]: Invalid state: ReadableStream is locked`（服务本身不受影响，异常被全局拦截）。
+  现改为 `await`，超时收尾不再漏告警。对外契约与中继取块行为不变，客户端无感。
+  （实现见 [server/modules/agg/stream.js](server/modules/agg/stream.js)）
+
+- **Emby 拉流鉴权不认 query 里的 `X-Emby-Token`（客户端拉流 401）**：直连拉流端点
+  （`GET /api/emby/videos/{ItemId}/stream` 等）取 token 时此前只认请求头与 query `api_key`，
+  而客户端会把同一个 token **照着头名**塞进 query（`?X-Emby-Token=…`，**大小写照发**），于是认不出
+  → 401 `token 校验不过：没带 token`。现 `service.tokenFrom()` 的 query 兜底**同时认 `api_key` 与
+  `X-Emby-Token`**。影响端点：一切靠 `tokenFrom()` 鉴权的读取 / 拉流端点；对客户端的影响：此前只带
+  query token 的拉流由 401 转为正常，其余无感。
+  （契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)；真机逐条见
+  [docs/emby-realdevice/12-direct-stream.md](docs/emby-realdevice/12-direct-stream.md) 的 12-5，**未复测**）
 
 ### 变更
 

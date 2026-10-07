@@ -29,7 +29,7 @@
 | [0019](0019-self-update-from-release.md) | 自身更新：应用装在数据卷、按 Release 资产安装、进程重启生效 | 已采纳（重启的非托管口径被 0038 局部取代） |
 | [0020](0020-detail-snapshot.md) | 详情快照 + 剧集详情提前返回（同一次点播被算三遍的那一步存下来） | 已采纳（缓存归属与有效期被 0032 取代） |
 | [0021](0021-update-replaces-app-dir.md) | 更新即完整替换：只保留当前版本，不留本地旧版本 | 已采纳 |
-| [0023](0023-playback-progress.md) | 观看进度：客户端 `Sessions/Playing*` 上报落库，「继续观看 / 接下来看 / 已看」出真数据 | 已采纳 |
+| [0023](0023-playback-progress.md) | 观看进度：客户端 `Sessions/Playing*` 上报落库，「继续观看 / 接下来看 / 已看」出真数据 | 已采纳（「`Shows/NextUp` 出真数据」被 [0060](0060-nextup-hidden.md) 取代） |
 | [0022](0022-movie-all-play-items.md) | 电影取法：每条线路列出全部播放项（剧集仍按集号定位） | 已采纳（版本 Id 的载荷形状描述随 0039 作废） |
 | [0024](0024-site-speed-test.md) | 站点测速：服务端任务、打 `/search`、随机片名、只留最近一次 | 已采纳 |
 | [0025](0025-line-filter-in-usable-judgement.md) | 线路过滤参与"有没有用"的判据（并进快照 key） | 已采纳（局部取代 0020；转发口径被 0043 局部取代） |
@@ -66,6 +66,11 @@
 | [0056](0056-emby-compat-scope.md) | Emby 兼容层的范围界定：只照官方 API 的表面 | 已采纳 |
 | [0057](0057-emby-system-info-honest-subset.md) | `System/Info` 取诚实子集：认领端点，但不编造面板没有的能力 | 已采纳 |
 | [0058](0058-favorite-items.md) | 收藏：收藏时快照元数据落库（用户数据，不随缓存清理），读列表只吃快照 | 已采纳 |
+| [0059](0059-source-certified-candidate.md) | 片源认证：候选行 `vod_exact`，面板见到直接记 1、不再判名字 | 已采纳 |
+| [0060](0060-nextup-hidden.md) | 「接下来看」`Shows/NextUp` 端点保留但对外恒空（藏掉与「继续观看」重复的那一行） | 已采纳（取代 0023 的 `Shows/NextUp` 那一格） |
+| [0061](0061-omit-missing-scalar-fields.md) | 缺值字段的表示：DateTime / 标量省略键、不写空串（数组仍铺 `[]`） | 已采纳（细化 0008 的「不知道就空字段」） |
+| [0062](0062-relative-playback-urls.md) | 播放地址给相对路径：`DirectStreamUrl` / `MediaSources[].Path` | 已采纳（修正 0006 落地时「给绝对 URL」的取巧做法） |
+| [0063](0063-version-label-at-aggregate-output.md) | 版本行标题位下沉到聚合层产出：emby 与出口插件读同一份 `versionLabel` | 已采纳（同 0043 的模式） |
 
 ## 新增一条 ADR
 

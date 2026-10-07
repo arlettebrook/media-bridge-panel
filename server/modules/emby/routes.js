@@ -16,6 +16,8 @@
  *   POST /api/emby/Users/{UserId}/Items/{ItemId}/HideFromResume  「从继续观看里移除 / 恢复」（`Hide=false` 恢复）
  *   POST|DELETE /api/emby/Users/{UserId}/PlayedItems/{ItemId}    「标记已看 / 未看」（POST=已看、DELETE=未看）
  *   POST /api/emby/Sessions/Playing[/Progress|/Stopped]  客户端播放上报（落库，见下面「播放进度上报」）
+ *   POST|DELETE /api/emby/Users/{UserId}/PlayingItems/{ItemId}[/Progress]  播放上报（Emby **旧版族**：
+ *                                                ItemId 在路径、参数在 query、无 JSON body；同落一处库）
  *   POST /api/emby/Items/{ItemId}/PlaybackInfo   播放信息（版本清单 = 线路，Path 指向下面的 Stream）
  *   GET  /api/emby/Items/{ItemId}/Stream         拉流（现取地址后按版本 Id 里的 `playVia` **分档落法**：
  *                                                `client` 302 / 清单 200 中继；`proxy` 面板代持请求头中继，
@@ -79,18 +81,12 @@ const listener = require('./listener');
 /* 取 UserId：真机客户端的写法**不统一** —— CapyPlayer 在 `Shows/NextUp`、`Shows/{id}/Seasons`、
  * `Items/{id}/Similar` 上发小写 `userId`，在 `Items` 与 `PlaybackInfo` 上发驼峰 `UserId`（Emby 约定是后者）。
  * 两种都认：小写那几条以前取到 null，被 `assertUser` 判成"id 不属于任何账号 → 404"，
- * 剧页的季列表与相似推荐整条铺不出来（NextUp 侥幸没事 —— 它走 `accountIdFor`，能从 token 兜回来）。 */
+ * 剧页的季列表与相似推荐整条铺不出来（NextUp 侥幸没事 —— 它只验 token、不看 UserId，能兜回来）。 */
 const userIdOf = (query) => query.get('UserId') || query.get('userId');
 
 /* 取 SeasonId：同一个客户端在参数大小写上本来就混着发（见上面的 `userId`）。
  * 小写 `seasonId` 取不到时，分集列表会回 **200 但 Items=0** —— 静默空，比 404 更难查，照样放宽。 */
 const seasonIdOf = (query) => query.get('SeasonId') || query.get('seasonId');
-
-/* 取客户端访问面板用的协议：面板常挂在 HTTPS 反代后面，`Host` 头里**没有协议**，
- * 只看 Host 拼绝对 URL 会一律吐 `http://`（经 https 进来也照样）—— 反代把协议写在
- * `X-Forwarded-Proto` 里，先看它、没有才回退 `http`。口径与 agg 的 `streamKernel.originOf` 一致。 */
-const protoOf = (req) =>
-  String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || 'http';
 
 /**
  * 未实现端点的统一回应：**记一行**日志（返回序号）+ 501。
@@ -304,13 +300,16 @@ module.exports = function routes(r) {
   /**
    * GET /Shows/NextUp —— 「接下来看」（SenPlayer 实测在请求该端点，还会带 `SeriesId` 只问一部剧）
    *
-   * 按库里的进度算"该看哪一集"，见 `service.getNextUp`。
+   * **端点保留、对外恒空**（ADR-0060）：本路由照旧注册、照旧校验 token，但响应恒为
+   * `200 {Items:[], TotalRecordCount:0}` —— 目的是**藏掉**首页那行「接下来看」（它与
+   * 「继续观看」重复）。保留而不删路由，是为了老客户端不因 404 报错；**不提供开关**。
+   * 取值口径与恢复方式见 `service.getNextUp`。
    * `UserId` 在 **query**（`&UserId=…`），不在路径里 —— 与 `Shows/{Id}/Seasons` 同款。
    *
    * 无路由冲突：这里**没有**裸的 `Shows/:showId` 那条路由（只有 `Shows/:showId/Seasons|Episodes`），
    * 所以 `NextUp` 不会被当成 showId 吞掉；`SeriesId` 是 query 参数，与路由形状无关。
    *
-   * **AccessToken 一律校验、但不比对 `UserId`**（15-1 起对齐真机：无 token → 401 纯文本
+   * **AccessToken 一律校验、但不比对 `UserId`**：无 token → 401 纯文本
    * `Access token is invalid or expired.`；有效 token + 错配 / 不存在的 UserId 照旧 200 ——
    * 与 `Items/Resume` 同口径，见 `service.getNextUp`）。
    */
@@ -441,10 +440,9 @@ module.exports = function routes(r) {
 
     if (!metaBridge.parseItemId(params.itemId)) return notImplemented(req, res, { pathname, query });
 
-    /* `host` 传进去是为了让 `MediaSources[].Path` / 条目级 `Path` 是**绝对 URL**
-     * （真机的 Path 也从来不是相对路径）。用请求自己的 Host —— 那正是客户端能连到的地址。
-     * `proto` 一起给：反代后面 Host 里没协议，漏了就一律拼成 `http://`（见 protoOf）。 */
-    const out = await service.getItem(params.itemId, req.headers.host || '', protoOf(req));
+    /* `MediaSources[].Path` 给**相对路径**（`/Items/…/Stream/…`，见 `service.streamPath`）—— 客户端把它
+     * 拼在自己的 base 之后（base 已含 `/emby`），所以**不需要**把本请求的 Host / 协议传进去。 */
+    const out = await service.getItem(params.itemId);
     service.applyUserData(out, params.userId, req);
     log.logResult(req, `条目详情 Users/…/Items/${params.itemId}`, out, q + (out.body && out.body.CatpawSource ? " 源=" + out.body.CatpawSource.Site : ""));
     return sendJson(res, out.status, out.body);
@@ -462,7 +460,7 @@ module.exports = function routes(r) {
       return sendResult(res, denied);
     }
 
-    const out = await service.getPlaybackInfo(params.itemId, req.headers.host || '', service.tokenFrom(req).token, protoOf(req));
+    const out = await service.getPlaybackInfo(params.itemId, service.tokenFrom(req).token);
     log.logResult(req, `播放信息 Items/${params.itemId}/PlaybackInfo`, out, q + " " + log.countOf(out, "MediaSources"));
     return sendJson(res, out.status, out.body);
   });
@@ -536,11 +534,9 @@ module.exports = function routes(r) {
     );
     return serveStream(req, res, out, `videos/${params.itemId}/${params.file}`);
   };
-  /* **两种大小写都注册**：路由是**区分大小写**的，而两条实录都得认 —— 小写 `videos` 是早期日志
-   * （emby#39~#45），大写 `Videos` 是 Emby 官方路径（实测 Lumenic/1.0.0 打的就是大写：
-   * 先白吃一个 501，随后才退回小写拿到 302）。同一条实现，不复制逻辑。 */
+  /* 路径字面段**不区分大小写**（见 `core/router.js`），所以官方的大写 `Videos` 与早期实录的小写
+   * `videos` 由这一条一并认下 —— 此前要重复注册两条（Lumenic/1.0.0 打大写先白吃一个 501）。 */
   r.add('GET', '/api/emby/videos/:itemId/:file', serveDirectVideo);
-  r.add('GET', '/api/emby/Videos/:itemId/:file', serveDirectVideo);
 
   /**
    * `GET /api/emby/stream?seg=…&sid=…` —— **`proxy` 档 HLS 清单改写出来的子地址**（分片 / 子清单 / 密钥）。
@@ -948,6 +944,30 @@ module.exports = function routes(r) {
   playbackReport('start', 'Playing');
   playbackReport('progress', 'Playing/Progress');
   playbackReport('stop', 'Playing/Stopped');
+
+  /* **旧版族**（Emby 早期 API）：`Users/{UserId}/PlayingItems/{ItemId}[/Progress]`。
+   * 实测 HamHub Android/1.0.0 走的是这一族（不是上面的 `Sessions/Playing*`）：
+   *   · `POST   …/PlayingItems/{ItemId}`            ← 开始；
+   *   · `POST   …/PlayingItems/{ItemId}/Progress`   ← 心跳；
+   *   · `DELETE …/PlayingItems/{ItemId}`            ← 结束。
+   * 与新版**最大的不同**：`ItemId` 在**路径**、参数在 **query**、**没有 JSON body**。
+   * 这里把 path/query 拼成 `recordPlayback` 认的形状，落库口径与上面三条完全一致（含 204 空体）。
+   * ⚠️ 旧版族**不带 `RunTimeTicks`** ⇒ 时长未知时只能按位置记，"看完"可能判不出
+   *    （`recordPlayback` 会照实记「时长未知」）。
+   * ⚠️ 必须注册在下面的通配之前，否则又是 501。 */
+  const playingReport = (kind, label) => (req, res, { params, query }) => {
+    const out = service.recordPlayback(req, kind, {
+      UserId: params.userId,
+      ItemId: params.itemId,
+      PositionTicks: query.get('PositionTicks'),
+      RunTimeTicks: query.get('RunTimeTicks'),
+    });
+    log.logResult(req, `播放上报 PlayingItems/${label}`, out, log.queryBrief(query));
+    return sendOut(res, out);
+  };
+  r.add('POST', '/api/emby/Users/:userId/PlayingItems/:itemId/Progress', playingReport('progress', 'Progress'));
+  r.add('POST', '/api/emby/Users/:userId/PlayingItems/:itemId', playingReport('start', '开始'));
+  r.add('DELETE', '/api/emby/Users/:userId/PlayingItems/:itemId', playingReport('stop', '结束'));
 
   /* ---------------- 观看状态的**写**端点（客户端改「继续观看」「已看」「收藏」） ----------------
    * 四条都是实测在打的：

@@ -38,6 +38,24 @@ Value cannot be null. (Parameter 'appName')
 |---|---|---|---|---|
 | `Username` / `Pw` | 登录账号与密码，客户端按自身拼写发（Rex 发 `Username`/`Pw`；**HamHub Android `1.0.17+29` 发全小写 `username`/`pw`**） | **大小写都认**（实测 OkEmby / itsmygo：同一口令发 `Pw` 与 `pw` 均 **200** 登录成功） | 曾**只认固定拼写**（`Username`/`username`、`Pw`/`Password`/`password`）→ 收到 `pw` 取到空密码 → 401；现 **不区分大小写** | **已改**（`pickBodyField` 大小写不敏感取值；**已实测**） |
 
+**请求体格式（JSON / 表单）**
+
+| 请求形状 | 真机 | 面板 | 处理 |
+|---|---|---|---|
+| `Content-Type: application/json`，体为 `{"Username":…,"Pw":…}` | 认 | 认 | 一致 |
+| `Content-Type: application/x-www-form-urlencoded`，体为 `Username=…&Pw=…&appName=…`（**实测 AfuseKt/3.2.0**） | 认（.NET 模型绑定，JSON 与表单都读） | 曾**只认 JSON** → 解析失败 → 400；现**另认表单** | **已改**（`readBody` 按 `content-type` 分流；**未复测**） |
+
+**请求路径大小写（AfuseKt 观察）**
+
+实测 **AfuseKt/3.2.0** 把路径写成全小写 `POST /api/emby/Users/authenticatebyname?X-Emby-Client=…&X-Emby-Device-Name=…&reqformat=json`（appName 走 query、体为表单）。
+
+| 路径写法 | 真机（.NET 路由） | 面板（此前） | 处理 |
+|---|---|---|---|
+| `/Users/AuthenticateByName`（标准大小写） | 认 | 认 | 一致 |
+| `/Users/authenticatebyname`（全小写，AfuseKt） | **认**（路由大小写不敏感） | 曾**落 501 通配**（字面段大小写敏感） | **已改**（`core/router.js` 字面段比对改大小写不敏感；**未复测**） |
+
+> AfuseKt 在真机能登、在面板 501，叠加了两个原因：**路径全小写** + **表单体**。两项已分别落码（路由全局大小写不敏感、`readBody` 认表单）。
+
 **授权头（appName 来源）**
 
 | 头 | 含义 / 客户端用途 | 真机 | 面板 | 处理 |

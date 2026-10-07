@@ -58,13 +58,34 @@ function readRawBody(req, limit = 32 * 1024 * 1024) {
   });
 }
 
-/** 读请求体并解析 JSON（空 body → {}） */
+/** `a=1&b=2` → `{a:'1',b:'2'}`；不像表单形状就返回 null（交回调用方按原错误处理） */
+function formObject(raw) {
+  const s = String(raw).trim();
+  /* JSON 以 `{` / `[` 开头、或整串连一个 `=` 都没有 ⇒ 不按表单解（避免把坏 JSON 误会成表单） */
+  if (!s || s[0] === '{' || s[0] === '[' || !s.includes('=')) return null;
+  const out = {};
+  for (const [k, v] of new URLSearchParams(s).entries()) out[k] = v;
+  return out;
+}
+
+/** 读请求体并解析（空 body → {}）：默认 JSON，另认 `application/x-www-form-urlencoded` */
 async function readBody(req, limit = 8 * 1024 * 1024) {
   const raw = (await readRawBody(req, limit)).toString('utf8');
   if (!raw) return {};
+  const ct = String((req && req.headers && req.headers['content-type']) || '').toLowerCase();
+  /* 表单体：真机（.NET 模型绑定）JSON 与表单都读，实测 AfuseKt/3.2.0 的登录体就是
+   * `Username=…&Pw=…&appName=…`（此前只认 JSON，这类客户端会吃 400）。 */
+  if (ct.includes('application/x-www-form-urlencoded')) {
+    const out = {};
+    for (const [k, v] of new URLSearchParams(raw).entries()) out[k] = v;
+    return out;
+  }
   try {
     return JSON.parse(raw);
   } catch {
+    /* 有些客户端不发 content-type 却发表单体 —— 形似表单就按表单解，否则照旧报 400 */
+    const form = formObject(raw);
+    if (form) return form;
     const e = new Error('请求体不是合法 JSON');
     e.code = 400;
     throw e;

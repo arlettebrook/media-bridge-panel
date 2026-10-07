@@ -1,6 +1,7 @@
 # ADR-0023 观看进度：客户端上报落库，读端点出真数据
 
-- 状态：已采纳
+- 状态：已采纳（**局部**：`Shows/NextUp` 出真数据那一格被 [0060](0060-nextup-hidden.md) 取代，
+  该端点现恒回空；上报落库与 `Resume` / `IsPlayed` / 写端点不变）
 - 相关：[0008](0008-no-fabricated-data.md)（不编数据）· [0009](0009-unauthenticated-empty-responses.md)
   （回空不校验账号、真数据必须校验）· [0007](0007-emby-dto-shape.md)（DTO 形状）·
   [播放进度实现方案与实测记录](../playback-progress.md) · [db.js](../../server/modules/emby/db.js)（`playback` 表）·
@@ -47,6 +48,8 @@ body 里 `ItemId` **就是本面板发出去的 Id**（`tmdb_{id}_tv_s{n}_e{m}` 
     下一集必须在 TMDB 的季数据里**真实存在**（同季找不到就试下一季第 1 集），否则跳过这部剧；
     客户端指名 `SeriesId`、而库里**一点这部剧的进度都没有**时回**第一集**（剧页的"播放"要它，
     CapyPlayer 拿到空列表就不往下走）；只有"一条进度都没有"才这么补，全看完的剧仍回空。
+    ⚠️ **这一格已被 [0060](0060-nextup-hidden.md) 取代**：该端点现**恒回空**（端点保留、不删、不加开关），
+    上面的算法实现留着但暂不调用。
   - `Items?Filters=IsPlayed` = 已看列表；
   - `applyUserData()` 给列表 / 详情 / 季 / 集 / 最新 / 相似这些端点的条目补真实 `UserData`。
   - 前三条**全部校验账号**（回的是某个账号的观看记录）；`Filters=IsFavorite` 仍如实回空

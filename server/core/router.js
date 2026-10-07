@@ -8,6 +8,10 @@
  *   add('ANY',  '/website/*rest', handler)     // 通配剩余路径
  *
  * handler(req, res, ctx)；ctx = { params, query, pathname }
+ *
+ * **字面段比对不区分大小写**（对齐真机 Emby 的 .NET 路由，也是 HTTP 路径的通行做法）：
+ * 客户端把 `/Users/AuthenticateByName` 写成小写 `authenticatebyname` 也算命中
+ * （实测 AfuseKt/3.2.0 就这么发，此前落在 501 通配）。`*wildcard` 与 `:param` 的**取值照原样**给。
  */
 const { sendError } = require('./http');
 
@@ -22,7 +26,7 @@ function add(method, pattern, handler) {
   });
 }
 
-/** 路径匹配：支持 :param 与末尾 *wildcard */
+/** 路径匹配：支持 :param 与末尾 *wildcard；字面段**不区分大小写** */
 function match(patternSegs, reqSegs) {
   const params = {};
   for (let i = 0; i < patternSegs.length; i++) {
@@ -33,7 +37,7 @@ function match(patternSegs, reqSegs) {
     }
     if (i >= reqSegs.length) return null;
     if (p.startsWith(':')) params[p.slice(1)] = decodeURIComponent(reqSegs[i]);
-    else if (p !== reqSegs[i]) return null;
+    else if (p.toLowerCase() !== reqSegs[i].toLowerCase()) return null;
   }
   return patternSegs.length === reqSegs.length ? params : null;
 }

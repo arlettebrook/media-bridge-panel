@@ -26,6 +26,7 @@
 **已按用户确认改（2 点，均同 #5 口径）**：
 - 6-1 **已改**：Latest 守卫改无条件 `authorize(req)`（无 token 一律 401，含不带 `ParentId` 的空分支）。
 - 6-2 **已改**：UserId 放宽 —— 路由 `authorize(req, params.userId)` → `authorize(req)`；`getLatest` 删 `assertUser` 且签名收敛为只收 `query`（本端点不读用户私有数据，`applyUserData` 已自带 token 兜底）。
+- 6-3 **已改（未复测）：条目不再回空串 `PremiereDate` / `Overview`**。真机 `Items/Latest` 响应**不含 `PremiereDate` 键**（拿不到就不给；本项目实测的两包对照：面板 `Items/Latest` 每响应 `"PremiereDate":""` ×20，真机包零空串、零 `PremiereDate`）。客户端（Hills 1.9.1）对该字段做 `DateTime.parse(value)`，`parse('')` 抛 `FormatException: Invalid date format`、**整条响应解码失败** → 首页「最新」整个打不开。现对齐真机：`baseItem()` 里 `PremiereDate` / `Overview` 改为**有值才挂键**（口径同 `DateCreated` / `DateModified`，见 [ADR-0061](../adr/0061-omit-missing-scalar-fields.md)）；**数组类字段仍铺 `[]`**。**未复测**（需再抓一次 `Items/Latest` 确认 `PremiereDate` 键在无值时消失、客户端不再报 `FormatException`）。同一改动也覆盖 `Items/Resume` / `Items` 列表 / 详情等（`baseItem` 共用）。
 - **顺带清理**：随 5-1/6-1 失去全部调用方的 `itemsWillReturnData()` 与 `searchProviderId()` 已删（死代码），相关注释同步。~~Studios 端点仍保持 token 豁免（它永远回空，注释已注明口径分叉）~~ —— 该豁免**已作废**：`Studios` 自 #14 起对齐真机改**只验 token**（详见「十」#14）。
 
-**状态：未复测**（6-1 / 6-2 已落码：`node tools/check-syntax.js` 通过；面板端到端待批量复测）。
+**状态：未复测**（6-1 / 6-2 已落码：`node tools/check-syntax.js` 通过；面板端到端待批量复测。6-3 已落码、**未复测** —— 待抓 `Items/Latest` 复核 `PremiereDate` 键在无值时消失、客户端不再报 `FormatException`）。
