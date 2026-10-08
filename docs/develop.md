@@ -327,6 +327,13 @@ module.exports = {
 - 插件包的**两道 md5 校验**（见 [ADR-0015](adr/0015-source-bundle-integrity.md)）：
   ① 包本身的 md5（发布方给的那个，可省）；② 清单里 `files` 声明的**逐个文件** md5。
   任一道对不上就**当场拒绝**（400），不"先装上再说"、也不拿实际值去覆写清单假装成功。
+- **解包走 `tar` 的 stdin**（`-xzf -`），不落盘再 `-f <路径>` —— `plugin/bundle.js`（插件包）与
+  `panel/update.js`（版本包）两处都如此。原因：Windows 上 PATH 里若有 GNU tar（Git for Windows /
+  MSYS 自带那个），`-f C:\…` 的盘符冒号会被它读成 rsh 的「远程主机」语法，先报
+  `Cannot connect to C: resolve failed`，整条再以 `Error is not recoverable: exiting now` 收尾 ——
+  插件装不上、面板自更新也装不上（复现：Windows + Git Bash 里 `npm start`，安装任一插件）。
+  stdin 不参与那个语法，GNU tar 与 Windows 自带的 bsdtar 都能收；`--force-local` 不能替代 ——
+  bsdtar 不认这个参数。
 - 关闭面板时会一并停止所有插件子进程（含源插件**自己**起的源实例）—— "面板停、插件就停"由宿主保证。
 - 数据备份**含**插件数据与模板（见「数据目录」）；只有应用代码 `app/` 与缓存不在其中。
 - Emby 兼容开发：

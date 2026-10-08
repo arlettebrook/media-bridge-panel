@@ -3,6 +3,15 @@
 本文件记录值得用户注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 修复
+
+- **插件包与版本包的解包改走 `tar` 的 stdin**：Windows 上 PATH 里若有 GNU tar
+  （Git for Windows / MSYS 自带那个），`-f` 后面给带盘符的路径会被它读成「远程主机」语法，
+  插件库安装与面板自更新都以 `Error is not recoverable: exiting now` 失败；改走 stdin 后
+  GNU tar 与 Windows 自带的 bsdtar 都能解，也不再落临时包文件。
+
 ## [1.9.0] - 2026-10-07
 
 ### 变更

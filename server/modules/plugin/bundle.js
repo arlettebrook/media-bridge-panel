@@ -32,18 +32,18 @@ function extractToTemp(buf, expectMd5) {
     throw new Error(`包太大（${Math.round(buf.length / 1024 / 1024)}MB > ${Math.round(contract.MAX_BYTES / 1024 / 1024)}MB）`);
   }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-'));
-  const tar = path.join(dir, 'p.tar.gz');
-  fs.writeFileSync(tar, buf);
   const dest = path.join(dir, 'x');
   fs.mkdirSync(dest);
   try {
-    execFileSync('tar', ['-xzf', tar, '-C', dest], { stdio: 'pipe' });
+    /* 包从 stdin 喂给 tar（`-f -`），不落盘再 `-f <路径>`：Windows 上 PATH 里的 GNU tar
+     * （Git for Windows / MSYS 自带那个）把 `C:\…` 的盘符冒号读成 rsh 的「远程主机」语法，
+     * 报 `Cannot connect to C: resolve failed` 后整条解包失败；stdin 不参与那个语法。 */
+    execFileSync('tar', ['-xzf', '-', '-C', dest], { input: buf, stdio: ['pipe', 'pipe', 'pipe'] });
   } catch (e) {
     fs.rmSync(dir, { recursive: true, force: true });
     const msg = String((e && e.stderr) || (e && e.message) || '');
     throw new Error('解包失败：' + msg.trim().split('\n').slice(-1)[0]);
   }
-  fs.rmSync(tar, { force: true });
 
   /* 解包后的目录可能多一层（`tar czf x.tar.gz myplugin/` 很常见）—— 只要那一层里只有它自己，就进去 */
   let root = dest;

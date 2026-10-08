@@ -19,7 +19,6 @@
  *     见 `restartRefusal`。
  */
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync, spawn } = require('child_process');
@@ -304,9 +303,11 @@ function parseChecksum(text) {
   return m[1].toLowerCase();
 }
 
-function extractTarGz(file, destDir) {
+function extractTarGz(buf, destDir) {
   try {
-    execFileSync('tar', ['-xzf', file, '-C', destDir], { stdio: 'pipe' });
+    /* 包走 stdin（`-f -`）：`-f` 后面若给带盘符的路径，Windows 上 PATH 里的 GNU tar
+     * （Git for Windows / MSYS 自带那个）会把它读成 rsh 的「远程主机」语法而整条失败。 */
+    execFileSync('tar', ['-xzf', '-', '-C', destDir], { input: buf, stdio: ['pipe', 'pipe', 'pipe'] });
   } catch (e) {
     const msg = String((e && e.stderr) || (e && e.message) || '');
     throw new Error(`解包失败：${msg.trim().split('\n').slice(-1)[0]}`);
@@ -352,18 +353,14 @@ async function install(version) {
   fs.rmSync(staging, { recursive: true, force: true });
   fs.mkdirSync(staging, { recursive: true });
 
-  const tmpTar = path.join(os.tmpdir(), name);
   try {
-    fs.writeFileSync(tmpTar, tarball);
-    extractTarGz(tmpTar, staging);
+    extractTarGz(tarball, staging);
     verifyPackage(staging, version);
     fs.rmSync(finalDir, { recursive: true, force: true });
     fs.renameSync(staging, finalDir);
   } catch (e) {
     fs.rmSync(staging, { recursive: true, force: true });
     throw e;
-  } finally {
-    fs.rmSync(tmpTar, { force: true });
   }
 
   writeJsonAtomic(CURRENT_FILE, { version, installedAt: new Date().toISOString(), source: srcUrl });
