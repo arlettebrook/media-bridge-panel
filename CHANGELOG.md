@@ -3,7 +3,44 @@
 本文件记录值得用户注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [未发布]
+
+### 新增
+
+- **字幕插件（第五类插件）与 Emby 标准字幕端点**（契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)；
+  插件侧契约见插件仓库 `media-bridge-plugins/docs/plugin-contract.md`「七、字幕插件的动作」）：
+  面板新增第五类插件 `subtitle`，并落地 Emby 标准的字幕取用端点。
+  - **新增端点**：`GET /api/emby/Videos/{ItemId}/{MediaSourceId}/Subtitles/{Index}/Stream.{Format}`
+    （含带 `StartPositionTicks` 的变体）—— `{Format}` ∈ `srt/ass/ssa/vtt`。面板从版本 Id 载荷里
+    取出该轨的 `ref`，交给字幕插件的 `fetch` 动作取回内容后回**字节**
+    （`Content-Type` 优先取插件给的，没给才按 `Format` 兜底）。
+  - **详情 / 播放信息里挂字幕轨**：条目详情、`PlaybackInfo` 的 `MediaSources[].MediaStreams[]`
+    追加 `Type:'Subtitle'` 的流（`Index` / `Codec` / `Language` / `DisplayTitle` / `DeliveryUrl` 等），
+    轨来自字幕插件 `tracks` 动作的申报。版本 Id 载荷由 `{r, v?}` 扩为 `{r, v?, s?}`
+    （`s` = 流序号 → 字幕 ref 的映射；**无字幕则不写**，载荷与旧版完全一致）。
+  - **影响哪些端点**：`GET /api/emby/Users/{UserId}/Items/{ItemId}`（详情）、
+    `POST /api/emby/Items/{ItemId}/PlaybackInfo`，以及上面新增的字幕内容端点。
+  - **对客户端的影响**：装并启用字幕插件后，版本会多出字幕轨、客户端可选中取用；**没装字幕插件
+    则一切与从前完全一样**（不出字幕轨、载荷不变）。字幕插件是**软依赖** —— 没装 / 没在跑 /
+    `tracks` 失败都只降级（不出字幕轨、记一行日志），**不破坏详情本身**。
+  - 真机对照见 [docs/emby-realdevice/23-subtitles.md](docs/emby-realdevice/23-subtitles.md)（**未复测**：
+    本仓库内没有真机样本，落地依据是 Emby 官方端点形状 + 插件契约，不是抓包）。
+
+### 变更
+
+- **登录态有效期可调，且改为「滑动过期」**（语义与取舍见 [ADR-0064](docs/adr/0064-panel-session-sliding-expiry.md)）：
+  面板会话的有效期不再写死 30 天，可在「面板设置 → 安全」页按「数值 + 单位（分钟 / 小时 / 天）」调整，
+  **默认 15 分钟、最大 30 天**。语义由"到点强制退出"改为**空闲计时** —— 从**最后一次操作**起算，
+  一直在用就自动顺延，只有**空闲满这一时长**才需要重新登录（会话在用到有效期的 1/4 时自动续签）。
+  密码 / 登录接口的响应形状不变，`iat` 字段对前端不可见（会话是 HttpOnly cookie）。
+
+- **登录改为独立页面 `/login.html`**：未登录访问面板会跳到该页，登录后跳回原地址。
+  「记住密码」有两条路：① **浏览器 / 密码管理器的表单记忆**（真实 `<form>` + 命名输入框 + `autocomplete`）；
+  ② 页上的**「记住密码」勾选框** —— 勾选且登录成功后，密码经 **Base64 混淆**存进本机浏览器存储
+  （localStorage），下次打开登录页自动预填，取消勾选即清除。混淆不是加密（防随手翻看、防不了懂行的人），
+  默认不勾，请按设备信任程度取舍。
+
+- **开源协议由 MIT 改为 AGPL-3.0**。
 
 ### 修复
 

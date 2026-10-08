@@ -73,12 +73,13 @@ server/modules/
     cache.js              线路结果缓存（独立 SQLite，按天）
     site-stats.js         站点统计：测速结果（speed）+ 顺手记账（call），每站每类只留最近一次
     site-test.js          站点测速任务：每 6 小时自动一轮 / 手动开一轮
-  emby/                   10 文件  /api/emby/**
+  emby/                   11 文件  /api/emby/**
     index.js              模块清单
     routes.js             端点注册（已实现端点与面板自用端点必须注册在 501 通配之前）
     service.js            各端点业务与公共函数；详情 / 播放走 agg/api.js
     meta.js               元数据域表的同步与转发（取数问元数据插件的动作）
     meta-bridge.js        面板中立的那层：条目 Id 派生与解析、图片基地址拼装、外部 id 反查
+    subtitle-bridge.js    字幕插件转接处：tracks 聚合（挂进版本）/ fetch 转插件动作（按 ref 第一段路由）
     instance.js           Emby 实例注册表 + 请求级实例上下文（多实例的唯一真源）
     listener.js           每个启用中的实例在自己端口上挂一个 http 服务
     cache.js              图片索引缓存（独立 SQLite）
@@ -93,6 +94,7 @@ plugins/                  插件源码（**不随面板发行、也不进版本�
   metadata/<id>/          元数据插件：取元数据 / 取一季分集 / 搜索 / 注册 + 自带 webui
   source/<id>/            源插件：站点清单 / 候选 / 取播放项 / 解析地址 / 站点测速 + 自带 webui
   home/<id>/              首页插件：各榜单做成客户端媒体库行 + 自带 webui 设置页
+  subtitle/<id>/          字幕插件：申报字幕轨（tracks）/ 取字幕内容（fetch）+ 自带 webui 设置页
 public/                   前端（原生 ES module，无构建步骤）
   index.html  app.js  style.css
   core/                   dom / api / auth / state / store / registry / shell / boot / branding / plugin-ui

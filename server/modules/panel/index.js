@@ -9,6 +9,7 @@ const routes = require('./routes');
 const update = require('./update');
 const logbus = require('../../core/logbus');
 const cachedb = require('../../core/cachedb');
+const auth = require('../../core/auth');
 
 module.exports = {
   id: 'panel',
@@ -29,6 +30,10 @@ module.exports = {
        * ⚠️ 测速的**结果**（站点统计）也是面板级共享的一份，不跟模板走，见 docs/adr/0033。 */
       speedTestAuto: true,
       speedTestHours: 6,
+      /* 登录态有效期（分钟）：**默认 15、上限 30 天（43200）**，语义是**滑动过期** ——
+       * 从"最后一次使用"起算，一直在用就顺延，空闲满这一时长才失效（见 core/auth.js 的 guard）。
+       * 归面板层：它是"这道门开多久"的取舍，不是哪一栏的偏好；读写只有 core/auth.js 一处。 */
+      sessionMinutes: 15,
       modules: { source: true, agg: true, emby: true, panel: true },
       /* ⚠️ 元数据设置**不在面板层**（原来在）——它随元数据插件走：token / 基地址 / 语言 /
        * 它自己的缓存都在**插件自己的数据目录**里，UI 是插件自己的设置页。
@@ -60,6 +65,7 @@ module.exports = {
       { key: 'port', label: '面板端口', type: 'number', min: 1, max: 65535 },
       { key: 'host', label: '监听地址', type: 'text', placeholder: '0.0.0.0（局域网可访问）或 127.0.0.1' },
       { key: 'logMax', label: '日志缓冲条数', type: 'number', min: 50, max: 5000, hint: '「日志」页只留最近这么多条（纯内存，不落盘；长期留档看 docker logs）' },
+      { key: 'sessionMinutes', label: '登录态有效期（分钟）', type: 'number', min: 1, max: 43200, hint: '默认 15 分钟、最大 43200（30 天）。按"最后一次操作"起算，一直在用就顺延，空闲满这一时长才需要重新登录' },
       { key: 'cache.imageTtlDays', label: '图片索引天数', type: 'text', placeholder: '90' },
       { key: 'cache.imageMaxMB', label: '图片索引上限 MB', type: 'text', placeholder: '5' },
       { key: 'cache.linesTtlDays', label: '线路结果天数', type: 'text', placeholder: '1（0 = 不缓存）' },
@@ -74,6 +80,11 @@ module.exports = {
     ],
     validate: (o) => {
       if (!(Number(o.port) >= 1 && Number(o.port) <= 65535)) return 'port 取值 1~65535';
+      /* 登录态有效期：分钟，1 ~ 43200（30 天）。越界拒绝 —— 让"改动没生效"当场可见，
+       * 而不是悄悄退回默认（core/auth.js 那边遇到坏值才退默认）。 */
+      if (!(Number(o.sessionMinutes) >= 1 && Number(o.sessionMinutes) <= 43200)) {
+        return `sessionMinutes 取值 1~43200（分钟，即 1 分钟~30 天；当前：${o.sessionMinutes}）`;
+      }
       /* 缓存数值必须是「非负数字」（原为 emby 的设置校验，已迁到此处）。
        * ⚠️ 两个 0 的语义**不一样**（见 core/cachedb.js 的 cfg）：
        *   天数 0 = 不缓存（写完即过期）；上限 0 = **不限**（不淘汰）。二者不可当作同一语义处理。 */
@@ -116,6 +127,8 @@ module.exports = {
     const old = Number(logbus.stats().max);
     const v = Number(next && next.logMax);
     if (Number.isFinite(v) && v > 0 && v !== old) logbus.resize(v);
+    /* 会话有效期改了要让 core/auth.js 那份内存缓存失效（它只在启动 / 失效后读一次设置） */
+    auth.invalidateTtl();
     try {
       cachedb.sweepAll();
     } catch {

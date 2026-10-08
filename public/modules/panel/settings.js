@@ -757,6 +757,79 @@ function passwordCard() {
   );
 }
 
+/* -------------------------------------------------------------- 登录态有效期 */
+
+/** 有效期默认值与上限（分钟），与后端 core/auth.js 的 DEFAULT_SESSION_MIN / MAX_SESSION_MIN 对齐 */
+const SESSION_DEFAULT_MIN = 15;
+const SESSION_MAX_MIN = 30 * 24 * 60;
+/** 可选单位（分钟为基准）。显示时挑能整除当前分钟数的**最大**单位，读起来最短 */
+const SESSION_UNITS = [
+  { label: '分钟', factor: 1 },
+  { label: '小时', factor: 60 },
+  { label: '天', factor: 1440 },
+];
+
+/**
+ * 「登录态有效期」卡：空闲多久需要重新登录。
+ *
+ * 值是**滑动过期**（空闲计时，见 core/auth.js 的 guard）—— 从"最后一次操作"起算，
+ * 一直在用就自动顺延，所以这一项说的是**空闲上限**，不是"到点强制退出"。
+ * 存 `panel` 设置的 `sessionMinutes`（分钟，1 ~ 43200），与「设置」页共用同一份懒加载缓存。
+ */
+function sessionCard() {
+  const minutes = (() => {
+    const v = Number((S.panel.settings || {}).sessionMinutes);
+    return Number.isFinite(v) && v >= 1 && v <= SESSION_MAX_MIN ? Math.floor(v) : SESSION_DEFAULT_MIN;
+  })();
+  /* 挑显示单位：能整除当前分钟数的最大单位（15 → 15 分钟，1440 → 1 天） */
+  const unit = SESSION_UNITS.slice().reverse().find((u) => minutes % u.factor === 0) || SESSION_UNITS[0];
+  const numInput = el('input', { type: 'number', class: 'w-md', min: '1', value: String(Math.round(minutes / unit.factor)) });
+  const unitSel = el('select', { class: 'w-sm' }, ...SESSION_UNITS.map((u) => el('option', { value: String(u.factor), text: u.label })));
+  unitSel.value = String(unit.factor);
+  const save = el('button', { class: 'btn primary', text: '保存' });
+
+  save.addEventListener('click', async () => {
+    const total = Math.round(Number(numInput.value) * Number(unitSel.value));
+    if (!(Number.isFinite(total) && total >= 1 && total <= SESSION_MAX_MIN)) {
+      return toast(`有效期填 1 分钟 ~ ${SESSION_MAX_MIN / 1440} 天之间`, true);
+    }
+    save.disabled = true;
+    try {
+      const r = await api('/api/modules/panel/settings', {
+        method: 'PUT',
+        body: { settings: { sessionMinutes: total } },
+      });
+      S.panel.settings = r.settings;
+      toast('登录态有效期已保存');
+    } catch (e) {
+      toast('保存失败：' + e.message, true);
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  return el(
+    'div',
+    { class: 'card' },
+    el('h3', { text: '登录态有效期' }),
+    el('p', {
+      class: 'note',
+      text: '从最后一次操作起算，一直在用就自动顺延 —— 空闲满这一时长才需要重新登录。默认 15 分钟，最大 30 天。',
+    }),
+    el(
+      'div',
+      { class: 'fset' },
+      el(
+        'div',
+        { class: 'fld' },
+        el('span', { class: 'lbl', text: '空闲有效期' }),
+        el('div', { class: 'ctl' }, numInput, unitSel)
+      )
+    ),
+    el('div', { class: 'row btn-row' }, save)
+  );
+}
+
 /**
  * 「站点测速」卡：开关 + 间隔。
  *
@@ -814,13 +887,27 @@ export function renderPanelBackup(v) {
 }
 
 /**
- * 「安全」页：改面板密码。
+ * 「安全」页：改面板密码 + 登录态有效期。
  *
- * 从「设置」页拆出来单开一页 —— 密码是**登录这个面板的凭据**，与"面板怎么跑"的设置不是一类；
+ * 从「设置」页拆出来单开一页 —— 密码与登录态是**进这个面板的门**，与"面板怎么跑"的设置不是一类；
  * 退出登录挪去了「概览」页（那里是整机动作）。
  */
-export function renderPanelSecurity(v) {
+export async function renderPanelSecurity(v) {
   v.append(passwordCard());
+  /* 有效期存在 panel 设置里（`sessionMinutes`），与「设置」页同一份懒加载缓存；读失败只影响这张卡 */
+  try {
+    if (!S.panel.settings) S.panel.settings = (await api('/api/modules/panel/settings')).settings;
+    v.append(sessionCard());
+  } catch (e) {
+    v.append(
+      el(
+        'div',
+        { class: 'card' },
+        el('h3', { text: '登录态有效期' }),
+        el('div', { class: 'hint warn', text: '读取面板设置失败：' + e.message })
+      )
+    );
+  }
 }
 
 /**

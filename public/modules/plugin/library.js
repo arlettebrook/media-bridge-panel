@@ -16,7 +16,7 @@ import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { refreshNav } from '../../core/shell.js';
 
-const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页', output: '输出' };
+const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页', output: '输出', subtitle: '字幕' };
 const fmtKB = (n) => (Number(n) > 0 ? `约 ${Math.max(1, Math.round(Number(n) / 1024))}KB` : '');
 /** 一条清单的类型数组（后端 v2 清单给 types；兼容单值） */
 const typesOf = (p) => (Array.isArray(p.types) ? p.types : p.type ? [p.type] : []);

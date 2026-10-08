@@ -15,7 +15,7 @@
 import { el } from './dom.js';
 import { api } from './api.js';
 
-const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页', output: '输出' };
+const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页', output: '输出', subtitle: '字幕' };
 const typeLabel = (t) => TYPE_LABEL[t] || t || '?';
 const STEP_MARK = { done: '✔', running: '…', failed: '✘', pending: '·' };
 

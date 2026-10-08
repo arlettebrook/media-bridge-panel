@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#e9edf3" />
+  <!-- ⚠️ 名字的**权威**在 core/branding.js（启动后 JS 会覆盖标题与标题位）；这里这份只是首屏兜底 -->
+  <title>登录 · 媒体桥面板</title>
+  <!-- ⚠️ 顺序不能反：daisyui.css 整包在 @layer 里，而 style.css 不叠层 ——
+       不叠层的规则天然压得过叠层的，本项目那份必须排在后面才说了算。 -->
+  <link rel="stylesheet" href="/vendor/daisyui.css" />
+  <link rel="stylesheet" href="/style.css" />
+  <!-- 主题首屏兜底：必须在 body 之前跑完，否则刷新时会先闪一帧另一套色
+       （样式层只认 html[data-theme] 这一个属性，而它是 JS 写上去的）。默认亮色。 -->
+  <script>
+    (function () {
+      try {
+        document.documentElement.setAttribute(
+          'data-theme',
+          localStorage.getItem('mbp-theme') === 'dark' ? 'dark' : 'light'
+        );
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+    })();
+  </script>
+</head>
+<body>
+  <!-- 独立登录页（见 core/login.js + core/auth.js 的 gotoLogin）。
+       表单是**真实提交**给 /api/auth/login 的：命名输入框 + 真实 form，浏览器 / 密码管理器
+       据此保存与自动填充密码 —— 这就是"记住密码"。正常提交被 login.js 接管（fetch），
+       免整页 POST 跳走、便于就地报错；JS 没跑起来时它仍是一条可用的原生 POST。 -->
+  <div class="auth-mask">
+    <div class="auth-card">
+      <h2 id="loginTitle">媒体桥面板</h2>
+      <p id="loginSub" class="auth-sub">请输入面板密码</p>
+      <form id="loginForm" class="auth-form" method="post" action="/api/auth/login">
+        <!-- 单密码面板没有用户名 —— 这个字段固定值、屏外不可见，只为让密码管理器把凭据认得稳 -->
+        <input type="text" name="username" class="auth-user" value="panel" autocomplete="username" tabindex="-1" aria-hidden="true" />
+        <input type="password" id="panelPassword" name="password" autocomplete="current-password" placeholder="面板密码" required />
+        <label class="auth-remember"><input type="checkbox" id="rememberPw" />记住密码</label>
+        <button type="submit" id="loginBtn" class="btn primary">登录</button>
+      </form>
+      <div id="loginTip" class="note auth-tip"></div>
+    </div>
+  </div>
+  <script type="module" src="/core/login.js"></script>
+</body>
+</html>
