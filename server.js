@@ -141,7 +141,7 @@ const server = http.createServer(async (req, res) => {
          * 只有面板自用端点要登录（名单与 auth.needsAuth 同一份），客户端协议端点
          * 根本不在这里提供（见下面那条 404）。
          * ⚠️ 容器健康检查**不再走这里**：它打的是上面那条 `/api/health`（本进程存活即可）。 */
-        const deny = auth.guard(req, pathname);
+        const deny = auth.guard(req, res, pathname);
         if (deny) {
           res.setHeader('Set-Cookie', auth.cookieHeader('', req)); // 顺手清掉过期/无效的那个 cookie
           return sendError(res, 401, deny);

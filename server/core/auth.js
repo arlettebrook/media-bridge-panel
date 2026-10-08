@@ -15,8 +15,9 @@
  *
  * 三条设计选择：
  *   ① **密码只存 scrypt 哈希**，从不落明文（比对用 `timingSafeEqual`）；
- *   ② **会话是无状态签名 cookie**（`exp` + `pv` 两段签名）—— 面板重启不必重新登录，
+ *   ② **会话是无状态签名 cookie**（`exp` + `iat` + `pv` 三段签名）—— 面板重启不必重新登录，
  *      而 `pv` 是"密码哈希"的指纹，所以**改密码 = 旧会话立刻全失效**；
+ *      有效期**可配且滑动**（默认 15 分钟、上限 30 天，改设置见面板「安全」页）；
  *   ③ Emby 客户端那套端点（`/api/emby/*`）**必须放行** —— 它们有自己的 AccessToken 校验，
  *      面板门禁只管"面板自己的接口与被代理的源配置页"。
  */
@@ -25,14 +26,20 @@ const fs = require('fs');
 const path = require('path');
 
 const { DATA_DIR } = require('./paths');
+const settings = require('./settings');
 
 const FILE = path.join(DATA_DIR, 'auth.json');
 /** 默认密码：**首次使用时才写进 auth.json 的哈希**，之后随便改（README 里也提了这句） */
 const DEFAULT_PASSWORD = '123456';
 /** 新密码下限（默认密码 6 位，故下限取 6） */
 const MIN_LEN = 6;
-/** 会话有效期：30 天（面板是自用工具，无需频繁登录） */
-const TTL_MS = 30 * 24 * 3600 * 1000;
+/**
+ * 会话有效期：**默认 15 分钟、上限 30 天**（单位分钟，可在「面板设置 → 安全」里改）。
+ * 语义是**滑动过期**（空闲计时）—— 从"最后一次使用"起算，一直在用就自动顺延，
+ * 空闲满这一时长才失效，而不是到点强制退出（实现见下面的 guard）。
+ */
+const DEFAULT_SESSION_MIN = 15;
+const MAX_SESSION_MIN = 30 * 24 * 60;
 const COOKIE = 'catpaw_panel';
 /** 失败节流：连续 5 次 → 锁 60 秒（同一 IP） */
 const MAX_FAILS = 5;
@@ -215,27 +222,71 @@ function verifyStreamPart(payload, mac) {
   return crypto.timingSafeEqual(a, b);
 }
 
+/* -------------------------------------------- 会话有效期（可配 · 滑动过期） */
+
+/**
+ * 当前会话有效期（分钟）：读「面板设置 → 安全」的 `sessionMinutes`。
+ *
+ * 缓存一份在内存里 —— `guard` 每个请求都要用，而 `settings.read` 每次同步读盘。
+ * 改设置由 panel 模块的 `onSettingsChange` 调 `invalidateTtl()` 失效（见 modules/panel/index.js）。
+ * 读不到 / 越界一律退回默认 15 分钟（不让一个坏值把时长搞成 0 或无限）。
+ */
+let ttlCache = null;
+
+function sessionMinutes() {
+  if (ttlCache === null) {
+    let m = DEFAULT_SESSION_MIN;
+    try {
+      const v = Number((settings.read('panel') || {}).sessionMinutes);
+      if (Number.isFinite(v) && v >= 1 && v <= MAX_SESSION_MIN) m = Math.floor(v);
+    } catch {
+      m = DEFAULT_SESSION_MIN;
+    }
+    ttlCache = m;
+  }
+  return ttlCache;
+}
+
+function ttlMs() {
+  return sessionMinutes() * 60 * 1000;
+}
+
+/** 设置改了就失效缓存（由 panel 模块的 onSettingsChange 调用） */
+function invalidateTtl() {
+  ttlCache = null;
+}
+
 function issueToken() {
-  const payload = Buffer.from(JSON.stringify({ exp: Date.now() + TTL_MS, pv: pvOf() }), 'utf8').toString('base64url');
+  const now = Date.now();
+  const payload = Buffer.from(JSON.stringify({ exp: now + ttlMs(), iat: now, pv: pvOf() }), 'utf8').toString('base64url');
   return payload + '.' + sign(payload);
 }
 
-function verifyToken(token) {
+/**
+ * 验签 + 解出载荷（**不判过期**，也校验密码指纹）—— 坏 token 回 null。
+ * `iat` 是签发时刻，`guard` 靠它判断够不够旧、要不要滑动续签。
+ */
+function readToken(token) {
   const s = String(token || '');
   const dot = s.lastIndexOf('.');
-  if (dot <= 0) return false;
+  if (dot <= 0) return null;
   const payload = s.slice(0, dot);
   const mac = s.slice(dot + 1);
   const want = sign(payload);
-  if (mac.length !== want.length) return false;
-  if (!crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want))) return false;
+  if (mac.length !== want.length) return null;
+  if (!crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(want))) return null;
   try {
     const o = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!o.exp || o.exp < Date.now()) return false;
-    return o.pv === pvOf();
+    if (!o || o.pv !== pvOf()) return null;
+    return o;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function verifyToken(token) {
+  const o = readToken(token);
+  return !!o && !!o.exp && o.exp >= Date.now();
 }
 
 function parseCookies(req) {
@@ -258,7 +309,7 @@ function cookieHeader(token, req) {
    * 加了 Secure 浏览器会直接丢掉这个 cookie，变成"登录了还是被拦"。 */
   const https = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
   const base = `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax`;
-  return token ? `${base}; Max-Age=${Math.floor(TTL_MS / 1000)}${https ? '; Secure' : ''}` : `${base}; Max-Age=0${https ? '; Secure' : ''}`;
+  return token ? `${base}; Max-Age=${Math.floor(ttlMs() / 1000)}${https ? '; Secure' : ''}` : `${base}; Max-Age=0${https ? '; Secure' : ''}`;
 }
 
 /* ---------------------------------------------------------------- 门禁 */
@@ -311,16 +362,27 @@ function clientIp(req) {
 
 /**
  * 拦一道：需要鉴权且没通过 → 返回一句给前端看的错误（调用方回 401）；通过 → null。
- * 顺带把"会话过期"的 cookie 清掉，免得浏览器一直带着一个再也用不了的旧 token。
+ *
+ * 通过时顺带做**滑动续期**：够旧的会话（已用掉有效期的 1/4，或旧 token 没有 `iat`）
+ * 就重签一枚、回写 `Set-Cookie` —— 这样"一直在用"就不过期，只有**空闲满时长**才失效。
+ * 未通过时不在这里清 cookie（那由调用方做，见 server.js），免得和续签逻辑混在一起。
  *
  * 只有一处调用点：`server.js` 在处理 `/api/*` 之前。原先还有个 `force` 选项，
  * 是给"配置中心的兜底转发"用的（那些路径不在名单里，只能一律要登录）——
  * 那条兜底随源插件化去掉了（配置中心由插件设置页直连实例端口），这个选项也一起删掉。
  */
-function guard(req, pathname) {
+function guard(req, res, pathname) {
   if (!needsAuth(pathname)) return null;
-  if (isAuthed(req)) return null;
-  return '需要登录面板（浏览器里打开面板首页登录一次即可；接口调用请先登录拿 cookie）';
+  const payload = readToken(parseCookies(req)[COOKIE]);
+  if (!payload) return '需要登录面板（浏览器里打开面板登录一次即可；接口调用请先登录拿 cookie）';
+  const now = Date.now();
+  if (!(payload.exp > now)) return '会话已过期，请重新登录';
+  /* 够旧就续签：活跃则一直有效，空闲满时长才失效。 */
+  const iat = Number(payload.iat) || 0;
+  if ((!iat || now - iat > ttlMs() / 4) && res && typeof res.setHeader === 'function') {
+    res.setHeader('Set-Cookie', cookieHeader(issueToken(), req));
+  }
+  return null;
 }
 
 /** 登录尝试的节流（同一 IP 连续失败就锁一会儿）—— 返回剩余秒数，0 = 可以试 */
@@ -368,9 +430,13 @@ function login(req, password) {
 module.exports = {
   DEFAULT_PASSWORD,
   MIN_LEN,
+  DEFAULT_SESSION_MIN,
+  MAX_SESSION_MIN,
   needsAuth,
   guard,
   isAuthed,
+  sessionMinutes,
+  invalidateTtl,
   parseCookies,
   isDefaultPassword,
   setPassword,

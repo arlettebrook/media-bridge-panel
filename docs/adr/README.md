@@ -71,6 +71,7 @@
 | [0061](0061-omit-missing-scalar-fields.md) | 缺值字段的表示：DateTime / 标量省略键、不写空串（数组仍铺 `[]`） | 已采纳（细化 0008 的「不知道就空字段」） |
 | [0062](0062-relative-playback-urls.md) | 播放地址给相对路径：`DirectStreamUrl` / `MediaSources[].Path` | 已采纳（修正 0006 落地时「给绝对 URL」的取巧做法） |
 | [0063](0063-version-label-at-aggregate-output.md) | 版本行标题位下沉到聚合层产出：emby 与出口插件读同一份 `versionLabel` | 已采纳（同 0043 的模式） |
+| [0064](0064-panel-session-sliding-expiry.md) | 面板会话：有效期可配且滑动过期，登录页独立、密码交给浏览器记忆 | 已采纳（细化 0017） |
 
 ## 新增一条 ADR
 
