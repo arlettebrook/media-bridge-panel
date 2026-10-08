@@ -39,6 +39,7 @@ const home = require('./home');
 const db = require('./db');
 const cache = require('./cache');
 const instance = require('./instance'); // 当前请求属于哪个 Emby 实例（见 instance.js）
+const subtitleBridge = require('./subtitle-bridge'); // 字幕插件转接处（tracks 聚合 / fetch 转插件动作）
 
 /** 兼容目标版本：客户端按 Emby 的版本号判断能力，这里报一个常见的 Emby 4.8 */
 const EMBY_VERSION = '4.8.0.0';
@@ -2741,6 +2742,18 @@ async function getItem(itemId) {
    * 线路从 `detail.lines` 里去掉了）—— 所以本层不再自己滤，只把那笔账读出来写进日志/诊断字段。
    * 这样 emby 与出口插件（FW/Rex）拿到的是同一份结果，规则也只有一个实现（见 ADR-0025 / 0043）。 */
   const lfStat = ((d.stats || {}).lineFilter) || null;
+  /* ---- 字幕轨：**为一个播放目标问一次**（字幕与线路无关，契约 §七）—— 回来的轨挂到该目标的
+   * 每个版本上（电影多压制版本共用同一份轨，见 buildMediaSource）。字幕插件是**软依赖**：
+   * 没装 / 没在跑 / `tracks` 失败都只记一行日志、不出字幕轨，**绝不破坏详情本身**
+   * （扇出与失败语义见 `subtitle-bridge.js`）。坐标是这个播放目标（片名 + 年份 + 季集），
+   * 与线路无关，所以在这里问一次即可。 */
+  const subtitles = await subtitleBridge.tracks({
+    name,
+    originalName: found.OriginalTitle || '',
+    year: year || '',
+    season: p.season,
+    episode: p.episode,
+  });
   const bindings = [];
   const siteDigest = [];
   /* 线路 = 版本：**每个站的线路都列出来**。版本行标题位（含"多源时前置源名""同片别名""电影多版本
@@ -2818,6 +2831,7 @@ async function getItem(itemId) {
               line,
               runtimeTicks: found.RunTimeTicks,
               item: t,
+              subtitles,
             })
           );
         });
@@ -2992,6 +3006,19 @@ const STREAM_BASE = {
   SupportsExternalStream: false,
 };
 
+/* 字幕：插件申报的 `format`（契约认 `srt` / `ass` / `ssa` / `vtt`）→ Emby `Codec` 名。
+ * Emby 用 `subrip` 指 SRT、`webvtt` 指 VTT（ass/ssa 同名）。 */
+const SUBTITLE_CODEC = { srt: 'subrip', ass: 'ass', ssa: 'ssa', vtt: 'webvtt' };
+
+/* 回字幕字节时的 `Content-Type`：**优先取插件给的 `contentType`**，没给才按 `format` 落这一份。
+ * 与 Emby 约定一致（SRT 是 `application/x-subrip`、SSA/ASS 是 `text/x-ssa`、VTT 是 `text/vtt`）。 */
+const SUBTITLE_CONTENT_TYPE = {
+  srt: 'application/x-subrip',
+  ass: 'text/x-ssa',
+  ssa: 'text/x-ssa',
+  vtt: 'text/vtt',
+};
+
 /** 宽高比化简成 `240:101` 这种（真机就是这么给的，不是原始的 3840×1616） */
 function aspectRatioOf(w, h) {
   const a = Math.round(Number(w) || 0);
@@ -3048,6 +3075,21 @@ function directStreamUrl({ itemId, token, src, container }) {
 }
 
 /**
+ * 字幕流的内容地址（`MediaStreams[].DeliveryUrl`）—— **Emby 标准的字幕取用形状**
+ * （`/Videos/{ItemId}/{MediaSourceId}/Subtitles/{Index}/Stream.{Format}`，见 emby-realdevice #23）。
+ *
+ * 给**相对路径**（不带 `/api/emby` 前缀、不带主机），与 `directStreamUrl` / `streamPath` 同一口径：
+ * 客户端把它拼在自己的 base（已含 `/emby`）之后。`Videos` 字面段在本层路由**大小写不敏感**，
+ * 所以官方大写与早期小写都能命中（见 routes.js）。
+ */
+function subtitleUrl(itemId, src, index, format) {
+  return (
+    `/Videos/${encodeURIComponent(itemId)}/${encodeURIComponent(src)}` +
+    `/Subtitles/${index}/Stream.${format}`
+  );
+}
+
+/**
  * 版本标题**全局不撞名**。flag 单段化后，同站不同包靠播放项自己的结构化规格区分
  * （每集 [大小] 前缀通常已经不同）；若仍有完全同名的版本，按「分辨率 → 编码 → 第 N 版本」
  * 从该版本视频流的字段补一段，只补撞名的组，不撞不添噪。
@@ -3075,12 +3117,10 @@ function ensureUniqueSourceNames(msList) {
   }
 }
 
-function buildMediaSource({ itemId, line, runtimeTicks, headers = {}, item }) {
+function buildMediaSource({ itemId, line, runtimeTicks, headers = {}, item, subtitles = [] }) {
   /* 这个版本要播的那一项：电影 = 该线路下的某个播放项；剧集 = **定位到的这一集**。
    * 两者都带集名里源标的规格（容器/分辨率/编码/体积），也带**插件给它编的 `ref`**。 */
   const t = item || line.target || {};
-  /* `line.playVia` 由源插件申报、聚合层原样透传（契约第五节）；编进版本 Id 供起播判档用 */
-  const src = catpawSourceId(t.ref, line.playVia);
   /* 版本标题位（`[体积] 站点标签 · 线路flag [· 变体标注] [· 项标注]`）由**聚合层拼好**，
    * 写在这项的 `versionLabel` 上（`agg/service.js` 的 `fillVersionLabels`）—— 规则只实现一次，
    * emby 层与出口插件（FW/Rex）读的是同一个字段（见 ADR-0063）。
@@ -3089,11 +3129,11 @@ function buildMediaSource({ itemId, line, runtimeTicks, headers = {}, item }) {
   /* Path 末段 = 版本行的**副标题**（客户端取「解码后最后一个 `/` 之后」，见 streamPath）。
    * 优先用 agg 拼好的 `standardName`（`标题.年份.季集.规格.容器`），没有就退到原始文件名。 */
   const fileName = t.standardName || t.name || `${line.flag}.mkv`;
-  const rel = streamPath(itemId, src, fileName);
+  /* ⚠️ `Id` / `Path` **不在这里算**：版本 Id 的载荷要承载"流序号 → 字幕 ref"的映射（`s` 字段，
+   * 见 catpawSourceId），得等字幕流建好、拿到各自 `Index` 才算；而每条字幕流的 `DeliveryUrl`
+   * 又依赖版本 Id。所以整段次序是：先建 streams（视频/音频/字幕）→ 算 Id → 回填 `Path` / `DeliveryUrl`。 */
   const ms = {
-    Id: src,
     Name: title,
-    Path: rel,
     Protocol: 'Http',
     Type: 'Default',
     IsRemote: true,
@@ -3179,7 +3219,42 @@ function buildMediaSource({ itemId, line, runtimeTicks, headers = {}, item }) {
     streams.push(a);
     ms.DefaultAudioStreamIndex = a.Index;
   }
+  /* 字幕流：挂在视频/音频之后（`Index` 顺延）。**字幕与线路无关**（契约 §七）—— 面板为一个播放
+   * 目标问一次 `tracks`，把同一份轨挂到该目标的**每个版本**上（电影多压制版本共用）。
+   * 每条轨记下自己的 `Index` / `ref` / `format`：`Index` 与 `ref` 编进版本 Id 的 `s` 映射，
+   * `format` 用于回填 `DeliveryUrl` 的 `Stream.{Format}` 段。 */
+  const subTracks = [];
+  for (const s of subtitles) {
+    const idx = streams.length;
+    const st = Object.assign({}, STREAM_BASE, {
+      Type: 'Subtitle',
+      Index: idx,
+      Codec: SUBTITLE_CODEC[s.format] || s.format,
+      /* `lang` 原样写进 `Language`（契约 §七：BCP-47 风格，面板不解释） */
+      Language: s.lang,
+      DisplayTitle: s.label || s.lang,
+      IsExternal: true,
+      IsTextSubtitleStream: true,
+      SupportsExternalStream: true,
+      DeliveryMethod: 'External',
+    });
+    streams.push(st);
+    subTracks.push({ index: idx, ref: s.ref, format: s.format, stream: st });
+  }
   ms.MediaStreams = streams;
+  /* 版本 Id：把"流序号 → 字幕 ref"的映射一起编进载荷（`s` 字段）—— 客户端点开某条字幕轨时
+   * 只回传版本 Id 与该轨的 `Index`，面板据此把 `ref` 交给字幕插件 `fetch`（见 getSubtitle）。 */
+  const subMap = {};
+  subTracks.forEach((x) => {
+    subMap[String(x.index)] = x.ref;
+  });
+  const src = catpawSourceId(t.ref, line.playVia, subMap);
+  ms.Id = src;
+  ms.Path = streamPath(itemId, src, fileName);
+  /* 回填每条字幕流的 `DeliveryUrl`（指向字幕内容端点，相对路径）—— 依赖上面算出的版本 Id。 */
+  subTracks.forEach((x) => {
+    x.stream.DeliveryUrl = subtitleUrl(itemId, src, x.index, x.format);
+  });
   return ms;
 }
 
@@ -3203,7 +3278,7 @@ function buildMediaSource({ itemId, line, runtimeTicks, headers = {}, item }) {
  * **面板不解释 `ref` 的内容**（契约第八节）：里面是什么、怎么换成一个地址，都是源插件的事。
  * 这一层只做三件事：压小、编码成客户端安全的一串、播放时原样交回插件。
  */
-function catpawSourceId(ref, playVia) {
+function catpawSourceId(ref, playVia, subs) {
   const o = { r: String(ref || '') };
   /* 线路级的 `playVia` **跟着 `ref` 一起编进 Id** —— 它决定起播时面板怎么落地址（见 `finishStream`）：
    * `proxy` 的线路客户端带不了鉴权头，得由面板代持中继。缺省 `client` 不写（省长度、也免得老口径漂移）。
@@ -3211,6 +3286,11 @@ function catpawSourceId(ref, playVia) {
    * 否则 Emby 这条路上只剩 302 一条死路（与出口插件读 `detail` 的 `line.playVia` 同一份真相）。 */
   const v = String(playVia || 'client');
   if (v !== 'client') o.v = v;
+  /* `s` = "字幕流序号 → 字幕 ref"的映射（键是 `MediaStreams[].Index` 的字符串形式）。客户端点开
+   * 某条字幕轨时只回传版本 Id 与该轨 `Index`，面板据 `s[Index]` 取 `ref` 交给字幕插件 `fetch`。
+   * **无字幕时不写 `s`**（载荷与旧版完全一致，不白占长度）。 */
+  const sMap = subs && typeof subs === 'object' ? subs : null;
+  if (sMap && Object.keys(sMap).length) o.s = sMap;
   const payload = JSON.stringify(o);
   return 'catpaw:' + zlib.deflateRawSync(Buffer.from(payload, 'utf8')).toString('base64url');
 }
@@ -3229,7 +3309,7 @@ function catpawSourceId(ref, playVia) {
 /**
  * 拆版本 Id —— 认出来就是 `{ref}`，认不出回 `null`（上层据此报 400，不猜）。
  *
- * 形状只有一种：`catpaw:<base64url(deflateRaw(JSON {r: ref}))>`（见 `catpawSourceId`）。
+ * 形状只有一种：`catpaw:<base64url(deflateRaw(JSON {r, v?, s?}))>`（见 `catpawSourceId`）。
  * ⚠️ **旧形状不再认**（多源之前那种 `<源>:<站点>:<线路>|<vod>`，以及只编码不压缩的那一版）：
  * 按 ADR-0034 不留双读分支 —— 客户端手里缓存的旧 Id 会被如实回一句"重新进一次播放页"
  * （客户端进播放页必先问 PlaybackInfo，所以它自会拿到新的）；这正是那条"不为未发布的东西留兼容"的口径。
@@ -3245,7 +3325,10 @@ function parseCatpawSourceId(src) {
     if (!ref) return null;
     /* `v` 是线路级的落法声明（见 `catpawSourceId`）：缺席 = 老 Id / 缺省 `client`。
      * 原样带出去交给 `finishStream` 判档，这里不解释、不校验取值（`planStream` 只认 `proxy`）。 */
-    return { ref, playVia: String(o.v || 'client') };
+    /* `s` = "字幕流序号 → 字幕 ref"的映射（见 `catpawSourceId`）：缺席 = 无字幕 / 老 Id。
+     * 原样带出去，`getSubtitle` 按客户端的 `Index` 取值。 */
+    const subs = o.s && typeof o.s === 'object' && !Array.isArray(o.s) ? o.s : {};
+    return { ref, playVia: String(o.v || 'client'), subs };
   } catch {
     return null;
   }
@@ -3373,6 +3456,74 @@ async function getPlaybackInfo(itemId, token = '') {
       /* **0 个版本时把 getItem 的原因一并打出来** —— 否则日志只剩「0 个版本」，无从判断是聚合没命中、
        * 站源没详情、还是取数失败（排查时曾被这个问题卡住，只能另开脚本去打聚合）。 */
       (sources.length ? '' : `  ← ${item.log}`),
+  };
+}
+
+/**
+ * 取字幕内容：`GET /api/emby/Videos/{ItemId}/{MediaSourceId}/Subtitles/{Index}/Stream.{Format}`
+ * （Emby 标准的字幕取用形状，见 emby-realdevice #23）。
+ *
+ * 客户端点开版本里某条字幕轨时打这条：`{MediaSourceId}` 就是版本 Id，`{Index}` 是那轨的
+ * `MediaStreams[].Index`。面板从版本 Id 载荷里取出 `s[Index]`（字幕 `ref`），**按第一段路由**
+ * 到字幕插件、调它的 `fetch({ ref })` 取回内容。面板**不解释 `ref`**（契约第八节），也不缓存
+ * 字幕内容 —— 缓存归插件自己管（契约 §七），这里每次都现取。
+ *
+ * 失败语义（照实回，见 #23-1）：`{Index}` 在版本里认不出 → 404；版本 Id 认不出 → 400；
+ * Id 非集/电影 → 404；插件取内容失败 → 照实回失败码（`metaBridge.httpStatusOf`）。
+ * `format` 只用于"插件没给 `contentType`"时的兜底映射（形状已在路由层校验过）。
+ */
+async function getSubtitle(itemId, src, index, format) {
+  const p = metaBridge.parseItemId(itemId);
+  if (!isPlayableId(p)) {
+    return { status: 404, body: { error: '只有「集」和「电影」有字幕' }, log: `Id 不是集/电影 → 404：${itemId}` };
+  }
+
+  const parsed = parseCatpawSourceId(src);
+  if (!parsed) {
+    /* 与拉流同口径：认不出多半是旧版客户端缓存下来的版本 Id —— 让它重进一次播放页。 */
+    return {
+      status: 400,
+      body: {
+        error: '这个版本 Id 认不出（可能是改版前缓存下来的）—— 请重新进一次播放页获取版本列表',
+        src: String(src || ''),
+      },
+      log: `字幕 src 认不出 → 400：${String(src || '').slice(0, 60)}`,
+    };
+  }
+
+  const ref = parsed.subs[String(index)];
+  if (!ref) {
+    return {
+      status: 404,
+      body: { error: '这个版本里没有这个字幕轨' },
+      log: `字幕 ${index} 不在版本里 → 404（版本内字幕轨：${Object.keys(parsed.subs).join(',') || '无'}）`,
+    };
+  }
+
+  let out;
+  try {
+    /* 回调插件 `fetch`：出参 `{ body, contentType? }`（契约 §七）。超时用桥的默认值。 */
+    out = await subtitleBridge.fetch(ref);
+  } catch (e) {
+    const err = e || {};
+    return {
+      status: metaBridge.httpStatusOf(err),
+      body: { error: err.message || '取字幕失败', code: err.code },
+      log: `字幕 ${index}（${format}）取内容失败（${err.code || '?'}：${err.message || ''}）`,
+    };
+  }
+  const body = out && out.body;
+  if (body === undefined || body === null) {
+    return { status: 502, body: { error: '字幕插件没给出内容' }, log: `字幕 ${index}（${format}）→ 502：插件没给 body` };
+  }
+  /* `Content-Type`：**优先取插件给的 `contentType`**，没给才按 `Format` 落一份（都补 charset）。 */
+  const contentType = (out && out.contentType) || SUBTITLE_CONTENT_TYPE[format] || 'text/plain';
+  const buf = Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'utf8');
+  return {
+    status: 200,
+    buffer: buf,
+    contentType: `${contentType}; charset=utf-8`,
+    log: `字幕 ${index}（${format}）→ 200 ${buf.length}B`,
   };
 }
 
@@ -3840,6 +3991,7 @@ module.exports = {
   getItem,
   getSimilar,
   getPlaybackInfo,
+  getSubtitle,
   resolveStream,
   catpawSourceId,
   parseCatpawSourceId,

@@ -10,7 +10,7 @@
 import { S } from './state.js';
 
 /**
- * 四类插件各占侧栏一栏（ADR-0029 已定 18：**插件设置页按类型挂栏**）。
+ * 五类插件各占侧栏一栏（ADR-0029 已定 18：**插件设置页按类型挂栏**）。
  *
  * 插件自带 UI 是它自己的 HTML（`plugin.json` 的 `webui`），不是面板的页 ——
  * 所以这里只登记"哪一栏、叫什么"，具体有几个子项**开页面时现算**（读 `S.plugins`）。
@@ -47,6 +47,15 @@ const PLUGIN_UI_TYPES = [
     label: '输出',
     type: 'output',
     icon: ico('<path d="M6.2 3.2H3.8a1.2 1.2 0 0 0-1.2 1.2v7.2a1.2 1.2 0 0 0 1.2 1.2h2.4"/><path d="M10 5.2 12.8 8 10 10.8"/><path d="M12.8 8H6.6"/>'),
+  },
+  {
+    id: 'plugin-subtitle',
+    label: '字幕',
+    type: 'subtitle',
+    icon: ico(
+      '<rect x="1.6" y="3.2" width="12.8" height="9.6" rx="1.6"/>' +
+        '<path d="M4.4 7.2h2.2M9.4 7.2h2.2M4.4 9.6h3.4M9.6 9.6h2"/>'
+    ),
   },
 ];
 

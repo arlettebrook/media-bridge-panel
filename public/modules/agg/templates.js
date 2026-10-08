@@ -622,7 +622,9 @@ function srcTabs(groups, chosenSet) {
 
   for (const [src, sites] of groups) {
     const on = sites.filter((s) => chosenSet.has(sid(s.source, s.key))).length;
-    const name = `${sites[0].sourceName || src}（${src}）`;
+    /* 括号里只写插件 id，不带实例段：source 形如 "catpaw-resolve/s1"，"/s1" 是实例坐标、
+       对挑选站点没有信息量，写上反而让页签变长 */
+    const name = `${sites[0].sourceName || src}（${src.split('/')[0]}）`;
     const tab = el('button', {
       class: 'src-tab' + (src === S.siteGroup ? ' active' : ''),
       title: `${name}：这一组 ${on}/${sites.length} 已勾选`,
@@ -643,7 +645,7 @@ function srcGroup(src, sites, chosenSet, labelText) {
   const head = el(
     'div',
     { class: 'src-head' },
-    el('b', { text: labelText || `${sites[0].sourceName || src}（${src}）` }),
+    el('b', { text: labelText || `${sites[0].sourceName || src}（${src.split('/')[0]}）` }),
     el('span', { class: 'muted', text: `这一组 ${on}/${sites.length} 已勾选` }),
     el('span', { class: 'spacer' }),
     el('button', { class: 'btn mini', title: '把这一组当前列出来的站点全部勾上', text: '整组全选', onclick: () => bulk(sites, 'on') }),

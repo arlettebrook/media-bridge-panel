@@ -3,6 +3,29 @@
 本文件记录值得用户注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+
+- **字幕插件（第五类插件）与 Emby 标准字幕端点**（契约变更记录见 [docs/emby-compat.md](docs/emby-compat.md)；
+  插件侧契约见插件仓库 `media-bridge-plugins/docs/plugin-contract.md`「七、字幕插件的动作」）：
+  面板新增第五类插件 `subtitle`，并落地 Emby 标准的字幕取用端点。
+  - **新增端点**：`GET /api/emby/Videos/{ItemId}/{MediaSourceId}/Subtitles/{Index}/Stream.{Format}`
+    （含带 `StartPositionTicks` 的变体）—— `{Format}` ∈ `srt/ass/ssa/vtt`。面板从版本 Id 载荷里
+    取出该轨的 `ref`，交给字幕插件的 `fetch` 动作取回内容后回**字节**
+    （`Content-Type` 优先取插件给的，没给才按 `Format` 兜底）。
+  - **详情 / 播放信息里挂字幕轨**：条目详情、`PlaybackInfo` 的 `MediaSources[].MediaStreams[]`
+    追加 `Type:'Subtitle'` 的流（`Index` / `Codec` / `Language` / `DisplayTitle` / `DeliveryUrl` 等），
+    轨来自字幕插件 `tracks` 动作的申报。版本 Id 载荷由 `{r, v?}` 扩为 `{r, v?, s?}`
+    （`s` = 流序号 → 字幕 ref 的映射；**无字幕则不写**，载荷与旧版完全一致）。
+  - **影响哪些端点**：`GET /api/emby/Users/{UserId}/Items/{ItemId}`（详情）、
+    `POST /api/emby/Items/{ItemId}/PlaybackInfo`，以及上面新增的字幕内容端点。
+  - **对客户端的影响**：装并启用字幕插件后，版本会多出字幕轨、客户端可选中取用；**没装字幕插件
+    则一切与从前完全一样**（不出字幕轨、载荷不变）。字幕插件是**软依赖** —— 没装 / 没在跑 /
+    `tracks` 失败都只降级（不出字幕轨、记一行日志），**不破坏详情本身**。
+  - 真机对照见 [docs/emby-realdevice/23-subtitles.md](docs/emby-realdevice/23-subtitles.md)（**未复测**：
+    本仓库内没有真机样本，落地依据是 Emby 官方端点形状 + 插件契约，不是抓包）。
+
 ## [1.9.0] - 2026-10-07
 
 ### 变更

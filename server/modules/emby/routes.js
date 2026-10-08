@@ -30,6 +30,10 @@
  *                                                /api/emby/ 前缀下）
  *   GET  /api/emby/Items/{ItemId}/Download       下载（与拉流**同一条链路**：MediaSourceId → 现取地址 → 落法；
  *                                                `client` 档 302 之后文件名/断点续传归源站，面板不扛流量）
+ *   GET  /api/emby/Videos/{ItemId}/{MediaSourceId}/Subtitles/{Index}/Stream.{Format}
+ *                                                字幕内容（**Emby 标准**形状；`Index` = 版本里字幕流的流序号，
+ *                                                面板取版本 Id 载荷的 `s[Index]` → 字幕插件 `fetch`；另注册
+ *                                                带 `StartPositionTicks` 的变体，见 emby-realdevice #23）
  *   GET  /api/emby/Shows/{Id}/Seasons        剧的季列表（**占位**：插件的 seasons[]；UserId 在 query 里）
  *   GET  /api/emby/Shows/{Id}/Episodes       某一季的分集（**占位**：插件的取季动作；UserId/SeasonId 在 query 里）
  *   GET  /api/emby/Items/{Id}/Images/{type}  图片（**豁免 token**；tag = `cpimg.<base64url(URL)>.<签名>`，验签不过 404；**一律 302** 到原图；支持 `/Images/{type}/{index}`）
@@ -537,6 +541,49 @@ module.exports = function routes(r) {
   /* 路径字面段**不区分大小写**（见 `core/router.js`），所以官方的大写 `Videos` 与早期实录的小写
    * `videos` 由这一条一并认下 —— 此前要重复注册两条（Lumenic/1.0.0 打大写先白吃一个 501）。 */
   r.add('GET', '/api/emby/videos/:itemId/:file', serveDirectVideo);
+
+  /**
+   * 字幕内容：`GET /Videos/{ItemId}/{MediaSourceId}/Subtitles/{Index}/Stream.{Format}`
+   * （**Emby 标准**的字幕取用形状，见 emby-realdevice #23）。
+   *
+   * 客户端在版本里认出 `Type:'Subtitle'` 的轨（那是字幕插件 `tracks` 申报、面板挂上去的）后打这条：
+   * `{MediaSourceId}` = 版本 Id（载荷 `s` 字段里编着"流序号 → 字幕 ref"）、`{Index}` = 那轨的
+   * `MediaStreams[].Index`。面板取出 `ref` 交给字幕插件 `fetch` 取内容后回**字节**
+   * （`Content-Type` 优先取插件给的，见 `service.getSubtitle`）。
+   *
+   * 路由**不支持段内** `Stream.:format`（见 `core/router.js`），故按 `serveDirectVideo` 的老范式：
+   * `:file` 收成**整段**，这里用正则校验 `Stream.{srt|ass|ssa|vtt}`，其余（`original.srt` 之类）
+   * 仍按「未实现」记日志 + 501，不提前猜。`Videos` 字面段**大小写不敏感**，官方大写与早期小写一并认下。
+   *
+   * Emby 官方还有一条带起播位置的变体 `…/Subtitles/{Index}/{StartPositionTicks}/Stream.{Format}`：
+   * **一并注册**（同一处理，`StartPositionTicks` 忽略 —— 面板回的是整段字幕，裁剪交给客户端）。
+   *
+   * ⚠️ **必须注册在通配 `ANY /api/emby/*rest` 之前**。
+   */
+  const serveSubtitle = async (req, res, { params, pathname, query }) => {
+    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401。**只验 token、不比对 UserId**（#12-1） */
+    const denied = service.authorize(req);
+    if (denied) {
+      log.logResult(req, `字幕 Videos/${params.itemId}/Subtitles/${params.index}`, denied);
+      return sendResult(res, denied);
+    }
+
+    const m = /^Stream\.(srt|ass|ssa|vtt)$/i.exec(params.file);
+    if (!m) return notImplemented(req, res, { pathname, query });
+
+    const out = await service.getSubtitle(
+      params.itemId,
+      params.mediaSourceId,
+      params.index,
+      m[1].toLowerCase()
+    );
+    log.logResult(req, `字幕 Videos/${params.itemId}/Subtitles/${params.index}`, out);
+    if (out.buffer) return sendBuffer(res, out.status, out.buffer, out.contentType);
+    return sendJson(res, out.status, out.body);
+  };
+  r.add('GET', '/api/emby/Videos/:itemId/:mediaSourceId/Subtitles/:index/:file', serveSubtitle);
+  /* 带起播位置的变体：多一段 `:start`，同一处理 */
+  r.add('GET', '/api/emby/Videos/:itemId/:mediaSourceId/Subtitles/:index/:start/:file', serveSubtitle);
 
   /**
    * `GET /api/emby/stream?seg=…&sid=…` —— **`proxy` 档 HLS 清单改写出来的子地址**（分片 / 子清单 / 密钥）。

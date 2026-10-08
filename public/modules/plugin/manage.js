@@ -21,8 +21,8 @@ import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { refreshNav } from '../../core/shell.js';
 
-/* 四个类型名与侧栏那四栏一致（元数据 / 片源 / 首页 / 输出，见 core/registry.js） */
-const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页', output: '输出' };
+/* 五个类型名与侧栏那五栏一致（元数据 / 片源 / 首页 / 输出 / 字幕，见 core/registry.js） */
+const TYPE_LABEL = { metadata: '元数据', source: '片源', home: '首页', output: '输出', subtitle: '字幕' };
 /* 多类型之后身份就是 id（见 docs/adr/0046）：更新结果 / 忙碌状态都按 id 索引。
  * 管理 URL 仍要带一个角色段，用第一个类型即可（后端按 id 定位进程）。 */
 const sidOf = (p) => p.id;

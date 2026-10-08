@@ -15,7 +15,7 @@
  *   name     必填，显示名
  *   author   可选，作者署名（插件库与管理页里显示；不写就不显示这一行）
  *   version  必填
- *   types    必填，metadata / source / home / output 的**数组**（一个包可同时具备多个平级类型）；
+ *   types    必填，metadata / source / home / output / subtitle 的**数组**（一个包可同时具备多个平级类型）；
  *            旧写法单值 `type` 仍接受，等价 `types:[type]`
  *   main     可选，入口文件名（默认 index.js）
  *   domain   types 含 metadata 时必填：**它注册的域 id**（就是条目 Id 的前缀，见 docs/adr/0031），
@@ -41,7 +41,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const TYPES = ['metadata', 'source', 'home', 'output'];
+const TYPES = ['metadata', 'source', 'home', 'output', 'subtitle'];
 const ID_RE = /^[a-z][a-z0-9._-]{1,63}$/i;
 const MAX_FILES = 512;
 const MAX_BYTES = 16 * 1024 * 1024;
